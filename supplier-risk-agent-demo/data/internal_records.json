@@ -1,0 +1,44 @@
+{
+  "low-risk": {
+    "orders_12m": 18,
+    "order_amount_12m": 620000,
+    "invoice_match_rate": 0.98,
+    "delivery_delay_count": 0,
+    "quality_issue_count": 1,
+    "contract_dispute_count": 0,
+    "return_rate": 0.01,
+    "cooperation_years": 3,
+    "documents": [
+      {"name": "年度框架合同", "type": "contract", "risk_note": "无异常条款"},
+      {"name": "供应商调查表", "type": "questionnaire", "risk_note": "信息完整"}
+    ]
+  },
+  "medium-risk": {
+    "orders_12m": 9,
+    "order_amount_12m": 1450000,
+    "invoice_match_rate": 0.89,
+    "delivery_delay_count": 3,
+    "quality_issue_count": 2,
+    "contract_dispute_count": 1,
+    "return_rate": 0.06,
+    "cooperation_years": 1,
+    "documents": [
+      {"name": "采购合同样本", "type": "contract", "risk_note": "付款和验收条款需复核"},
+      {"name": "供应商调查表", "type": "questionnaire", "risk_note": "实际控制人说明不足"}
+    ]
+  },
+  "high-risk": {
+    "orders_12m": 2,
+    "order_amount_12m": 300000,
+    "invoice_match_rate": 0.72,
+    "delivery_delay_count": 5,
+    "quality_issue_count": 4,
+    "contract_dispute_count": 2,
+    "return_rate": 0.12,
+    "cooperation_years": 0,
+    "documents": [
+      {"name": "供应商调查表", "type": "questionnaire", "risk_note": "关键字段缺失"},
+      {"name": "营业执照扫描件", "type": "license", "risk_note": "需核验主体状态"}
+    ]
+  }
+}

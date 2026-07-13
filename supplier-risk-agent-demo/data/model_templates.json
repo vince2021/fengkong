@@ -1,0 +1,563 @@
+{
+  "templates": {
+    "general": {
+      "version": "MCR-20260711-001",
+      "name": "通用客商信用评级模型",
+      "industry_template": "general",
+      "status": "active",
+      "weights": {
+        "external_risk": 0.4,
+        "internal_performance": 0.3,
+        "financial_credit": 0.2,
+        "relationship_stability": 0.1
+      },
+      "thresholds": {
+        "major_litigation_amount": 5000000,
+        "dishonesty_count": 0,
+        "operating_abnormal_count": 0,
+        "delivery_delay_count": 3,
+        "invoice_match_rate": 0.9,
+        "overdue_rate": 0.1,
+        "contract_dispute_count": 2
+      },
+      "strong_rules": [
+        {
+          "id": "SR-001",
+          "name": "主体异常禁入",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {
+              "field": "external.registration_status",
+              "operator": "not_in",
+              "value": [
+                "存续",
+                "在业"
+              ],
+              "label": "主体经营状态不是存续或在业"
+            }
+          ],
+          "action": {
+            "rating_override": "D",
+            "access_strategy": "禁入",
+            "limit_multiplier_cap": 0,
+            "payment_term_days_cap": 0,
+            "review_required": true,
+            "risk_segment_override": "禁入客商"
+          }
+        },
+        {
+          "id": "SR-002",
+          "name": "失信记录禁入",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {
+              "field": "external.dishonesty_count",
+              "operator": ">",
+              "value_ref": "thresholds.dishonesty_count",
+              "label": "失信被执行记录大于阈值"
+            }
+          ],
+          "action": {
+            "rating_override": "D",
+            "access_strategy": "禁入",
+            "limit_multiplier_cap": 0,
+            "payment_term_days_cap": 0,
+            "review_required": true,
+            "risk_segment_override": "禁入客商"
+          }
+        },
+        {
+          "id": "SR-003",
+          "name": "重大诉讼与高额度复核",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {
+              "field": "external.major_litigation_amount",
+              "operator": ">",
+              "value_ref": "thresholds.major_litigation_amount",
+              "label": "重大诉讼金额大于阈值"
+            },
+            {
+              "field": "requested_limit",
+              "operator": ">",
+              "value": 1000000,
+              "label": "申请额度大于 100 万"
+            }
+          ],
+          "action": {
+            "access_strategy": "人工复核",
+            "limit_multiplier_cap": 0.3,
+            "payment_term_days_cap": 15,
+            "review_required": true,
+            "risk_segment_override": "重点监控"
+          }
+        },
+        {
+          "id": "SR-004",
+          "name": "内部履约异常限制",
+          "enabled": true,
+          "condition_relation": "any",
+          "conditions": [
+            {
+              "field": "financial.overdue_rate",
+              "operator": ">",
+              "value_ref": "thresholds.overdue_rate",
+              "label": "逾期率大于阈值"
+            },
+            {
+              "field": "internal.delivery_delay_count",
+              "operator": ">=",
+              "value_ref": "thresholds.delivery_delay_count",
+              "label": "履约延期次数达到阈值"
+            },
+            {
+              "field": "internal.contract_dispute_count",
+              "operator": ">=",
+              "value_ref": "thresholds.contract_dispute_count",
+              "label": "合同争议次数达到阈值"
+            }
+          ],
+          "action": {
+            "access_strategy": "限制准入",
+            "limit_multiplier_cap": 0.3,
+            "payment_term_days_cap": 15,
+            "review_required": true,
+            "risk_segment_override": "重点监控"
+          }
+        }
+      ],
+      "strategy_mapping": [
+        {
+          "rating": "AAA",
+          "score_min": 95,
+          "score_max": 100,
+          "risk_segment": "核心客商",
+          "access_strategy": "自动准入",
+          "limit_multiplier": 1.0,
+          "payment_term_days": 60,
+          "monitoring_frequency": "季度"
+        },
+        {
+          "rating": "AA",
+          "score_min": 90,
+          "score_max": 94.99,
+          "risk_segment": "优质客商",
+          "access_strategy": "自动准入",
+          "limit_multiplier": 0.9,
+          "payment_term_days": 45,
+          "monitoring_frequency": "季度"
+        },
+        {
+          "rating": "A",
+          "score_min": 80,
+          "score_max": 89.99,
+          "risk_segment": "普通客商",
+          "access_strategy": "准入",
+          "limit_multiplier": 0.7,
+          "payment_term_days": 30,
+          "monitoring_frequency": "季度"
+        },
+        {
+          "rating": "BBB",
+          "score_min": 70,
+          "score_max": 79.99,
+          "risk_segment": "关注客商",
+          "access_strategy": "限制准入",
+          "limit_multiplier": 0.5,
+          "payment_term_days": 15,
+          "monitoring_frequency": "月度"
+        },
+        {
+          "rating": "BB",
+          "score_min": 60,
+          "score_max": 69.99,
+          "risk_segment": "重点监控",
+          "access_strategy": "人工复核",
+          "limit_multiplier": 0.3,
+          "payment_term_days": 15,
+          "monitoring_frequency": "月度"
+        },
+        {
+          "rating": "B",
+          "score_min": 50,
+          "score_max": 59.99,
+          "risk_segment": "高风险客商",
+          "access_strategy": "审慎准入",
+          "limit_multiplier": 0.1,
+          "payment_term_days": 0,
+          "monitoring_frequency": "月度"
+        },
+        {
+          "rating": "D",
+          "score_min": 0,
+          "score_max": 49.99,
+          "risk_segment": "禁入客商",
+          "access_strategy": "禁入",
+          "limit_multiplier": 0,
+          "payment_term_days": 0,
+          "monitoring_frequency": "实时监控"
+        }
+      ],
+      "created_by": "风控负责人",
+      "created_at": "2026-07-11 18:00:00",
+      "change_reason": "初始化通用模板"
+    },
+    "pharma": {
+      "extends": "general",
+      "name": "医药流通行业模板",
+      "weights": {
+        "external_risk": 0.45,
+        "internal_performance": 0.25,
+        "financial_credit": 0.2,
+        "relationship_stability": 0.1
+      }
+    },
+    "manufacturing": {
+      "extends": "general",
+      "name": "制造业行业模板",
+      "weights": {
+        "external_risk": 0.3,
+        "internal_performance": 0.4,
+        "financial_credit": 0.2,
+        "relationship_stability": 0.1
+      }
+    },
+    "construction": {
+      "extends": "general",
+      "name": "工程建筑行业模板",
+      "weights": {
+        "external_risk": 0.45,
+        "internal_performance": 0.2,
+        "financial_credit": 0.25,
+        "relationship_stability": 0.1
+      }
+    },
+    "logistics": {
+      "extends": "general",
+      "name": "物流供应链行业模板",
+      "weights": {
+        "external_risk": 0.35,
+        "internal_performance": 0.35,
+        "financial_credit": 0.2,
+        "relationship_stability": 0.1
+      }
+    },
+    "tech_enterprise_basic": {
+      "version": "TECH-BASE-20260711-001",
+      "name": "科创企业基本评价模型",
+      "industry_template": "tech_enterprise_basic",
+      "scorecard_type": "tech_enterprise_basic",
+      "status": "active",
+      "weights": {
+        "external_risk": 0.4,
+        "internal_performance": 0.3,
+        "financial_credit": 0.2,
+        "relationship_stability": 0.1
+      },
+      "thresholds": {
+        "major_litigation_amount": 5000000,
+        "dishonesty_count": 0,
+        "operating_abnormal_count": 0,
+        "delivery_delay_count": 3,
+        "invoice_match_rate": 0.9,
+        "overdue_rate": 0.1,
+        "contract_dispute_count": 2
+      },
+      "strong_rules": [
+        {
+          "id": "SR-001",
+          "name": "主体异常禁入",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {
+              "field": "external.registration_status",
+              "operator": "not_in",
+              "value": [
+                "存续",
+                "在业"
+              ],
+              "label": "主体经营状态不是存续或在业"
+            }
+          ],
+          "action": {
+            "rating_override": "D",
+            "access_strategy": "禁入",
+            "limit_multiplier_cap": 0,
+            "payment_term_days_cap": 0,
+            "review_required": true,
+            "risk_segment_override": "禁入客商"
+          }
+        },
+        {
+          "id": "SR-002",
+          "name": "失信记录禁入",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {
+              "field": "external.dishonesty_count",
+              "operator": ">",
+              "value_ref": "thresholds.dishonesty_count",
+              "label": "失信被执行记录大于阈值"
+            }
+          ],
+          "action": {
+            "rating_override": "D",
+            "access_strategy": "禁入",
+            "limit_multiplier_cap": 0,
+            "payment_term_days_cap": 0,
+            "review_required": true,
+            "risk_segment_override": "禁入客商"
+          }
+        },
+        {
+          "id": "SR-003",
+          "name": "重大诉讼与高额度复核",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {
+              "field": "external.major_litigation_amount",
+              "operator": ">",
+              "value_ref": "thresholds.major_litigation_amount",
+              "label": "重大诉讼金额大于阈值"
+            },
+            {
+              "field": "requested_limit",
+              "operator": ">",
+              "value": 1000000,
+              "label": "申请额度大于 100 万"
+            }
+          ],
+          "action": {
+            "access_strategy": "人工复核",
+            "limit_multiplier_cap": 0.3,
+            "payment_term_days_cap": 15,
+            "review_required": true,
+            "risk_segment_override": "重点监控"
+          }
+        },
+        {
+          "id": "SR-004",
+          "name": "内部履约异常限制",
+          "enabled": true,
+          "condition_relation": "any",
+          "conditions": [
+            {
+              "field": "financial.overdue_rate",
+              "operator": ">",
+              "value_ref": "thresholds.overdue_rate",
+              "label": "逾期率大于阈值"
+            },
+            {
+              "field": "internal.delivery_delay_count",
+              "operator": ">=",
+              "value_ref": "thresholds.delivery_delay_count",
+              "label": "履约延期次数达到阈值"
+            },
+            {
+              "field": "internal.contract_dispute_count",
+              "operator": ">=",
+              "value_ref": "thresholds.contract_dispute_count",
+              "label": "合同争议次数达到阈值"
+            }
+          ],
+          "action": {
+            "access_strategy": "限制准入",
+            "limit_multiplier_cap": 0.3,
+            "payment_term_days_cap": 15,
+            "review_required": true,
+            "risk_segment_override": "重点监控"
+          }
+        }
+      ],
+      "tech_scorecard": {
+        "base_max_score": 100,
+        "bonus_max_score": 90,
+        "deduction_min_score": -80,
+        "base_modules": [
+          {
+            "key": "ip_quality_quantity",
+            "name": "自主创新技术-知识产权质量和数量",
+            "max_score": 10
+          },
+          {
+            "key": "investor_quality_quantity",
+            "name": "商业模式可行性-已入股投资机构质量和数量",
+            "max_score": 30
+          },
+          {
+            "key": "government_or_key_orders",
+            "name": "商业模式可行性-政府支持或知名企业订单",
+            "max_score": 30
+          },
+          {
+            "key": "controller_education",
+            "name": "企业家精神-实际控制人教育背景",
+            "max_score": 5
+          },
+          {
+            "key": "controller_experience",
+            "name": "企业家精神-实际控制人从业经历",
+            "max_score": 5
+          },
+          {
+            "key": "entrepreneurship",
+            "name": "企业家精神-创业经历",
+            "max_score": 5
+          },
+          {
+            "key": "shareholding_ratio",
+            "name": "团队稳定性-最大股东持股比例",
+            "max_score": 5
+          },
+          {
+            "key": "director_stability",
+            "name": "团队稳定性-持股董事变更情况",
+            "max_score": 5
+          },
+          {
+            "key": "audited_financial_report",
+            "name": "企业经营规范程度-财务报表审计",
+            "max_score": 5
+          }
+        ],
+        "limit_mapping": [
+          {
+            "score_min": 0,
+            "score_max": 59.99,
+            "rating": "D",
+            "risk_segment": "不予额度",
+            "access_strategy": "不建议准入",
+            "limit_text": "0",
+            "credit_limit_text": "0"
+          },
+          {
+            "score_min": 60,
+            "score_max": 70,
+            "rating": "B",
+            "risk_segment": "审慎支持",
+            "access_strategy": "人工复核",
+            "limit_text": "≤500万元",
+            "credit_limit_text": "按审批确定"
+          },
+          {
+            "score_min": 70.01,
+            "score_max": 100,
+            "rating": "A",
+            "risk_segment": "重点支持",
+            "access_strategy": "准入",
+            "limit_text": "≤2000万元",
+            "credit_limit_text": "信用额度≤1000万元"
+          },
+          {
+            "score_min": 100.01,
+            "score_max": 999,
+            "rating": "AA",
+            "risk_segment": "优先支持",
+            "access_strategy": "准入",
+            "limit_text": "≤5000万元",
+            "credit_limit_text": "信用额度≤3000万元"
+          }
+        ],
+        "editable_rules": {
+          "base": {
+            "software_copyright_points": 3,
+            "invention_patent_points": 10,
+            "pct_patent_points": 10,
+            "utility_model_points": 1,
+            "utility_model_cap": 5,
+            "ip_module_cap": 10,
+            "premium_investor_points": 30,
+            "other_vc_one_points": 20,
+            "other_vc_two_or_more_points": 30,
+            "investor_module_cap": 30,
+            "famous_company_order_points": 30,
+            "strategic_bank_customer_order_points": 30,
+            "government_procurement_order_points": 30,
+            "industry_leader_order_points": 20,
+            "aa_minus_customer_order_points": 15,
+            "government_subsidy_points": 20,
+            "continuous_government_subsidy_points": 25,
+            "government_industrial_space_points": 20,
+            "order_module_cap": 30,
+            "bachelor_points": 3,
+            "master_or_above_points": 5,
+            "controller_experience_points": 5,
+            "entrepreneurship_points": 5,
+            "shareholding_ratio_threshold": 0.5,
+            "shareholding_ratio_points": 5,
+            "director_stability_points": 5,
+            "audited_report_points": 5
+          },
+          "bonus": {
+            "high_level_talent_points": 40,
+            "specialized_new_national_points": 30,
+            "specialized_new_provincial_points": 20,
+            "specialized_new_municipal_points": 10,
+            "rd_expense_revenue_ratio_3y_threshold": 0.07,
+            "rd_expense_revenue_ratio_3y_points": 10,
+            "annual_income_tax_paid_threshold": 150000,
+            "annual_income_tax_paid_points": 10
+          },
+          "deduction": {
+            "bank_credit_count_threshold": 4,
+            "bank_credit_count_points": -40,
+            "major_bank_top_two_points": -20,
+            "controller_changed_3y_points": -10,
+            "environmental_penalty_2y_points": -30
+          }
+        }
+      },
+      "strategy_mapping": [
+        {
+          "rating": "AA",
+          "score_min": 100.01,
+          "score_max": 999,
+          "risk_segment": "优先支持",
+          "access_strategy": "准入",
+          "limit_multiplier": 1.0,
+          "payment_term_days": 60,
+          "monitoring_frequency": "季度"
+        },
+        {
+          "rating": "A",
+          "score_min": 70.01,
+          "score_max": 100,
+          "risk_segment": "重点支持",
+          "access_strategy": "准入",
+          "limit_multiplier": 0.7,
+          "payment_term_days": 45,
+          "monitoring_frequency": "季度"
+        },
+        {
+          "rating": "B",
+          "score_min": 60,
+          "score_max": 70,
+          "risk_segment": "审慎支持",
+          "access_strategy": "人工复核",
+          "limit_multiplier": 0.3,
+          "payment_term_days": 30,
+          "monitoring_frequency": "月度"
+        },
+        {
+          "rating": "D",
+          "score_min": 0,
+          "score_max": 59.99,
+          "risk_segment": "不予额度",
+          "access_strategy": "不建议准入",
+          "limit_multiplier": 0,
+          "payment_term_days": 0,
+          "monitoring_frequency": "实时监控"
+        }
+      ],
+      "created_by": "风控负责人",
+      "created_at": "2026-07-11 20:40:00",
+      "change_reason": "根据《科创企业基本评价模型》初始化评分卡配置"
+    }
+  }
+}

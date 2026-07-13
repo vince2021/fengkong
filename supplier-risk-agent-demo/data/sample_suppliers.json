@@ -1,0 +1,74 @@
+[
+  {
+    "id": "low-risk",
+    "label": "低风险样本",
+    "name": "深圳市稳健电子科技有限公司",
+    "credit_code": "91440300MA5STABLE1",
+    "category": "电子元器件",
+    "request_amount": 800000,
+    "contract_months": 12,
+    "is_key_supplier": false,
+    "materials": ["营业执照", "供应商调查表", "近一年主要客户清单", "质量体系证书"],
+    "external_profile": {
+      "registration_status": "存续",
+      "registered_capital": "5000万元人民币",
+      "established_years": 9,
+      "legal_cases_count": 1,
+      "major_litigation_amount": 120000,
+      "dishonesty_count": 0,
+      "admin_penalty_count": 0,
+      "operating_abnormal_count": 0,
+      "equity_freeze_count": 0,
+      "shareholder_high_risk": false,
+      "tax_credit_level": "A"
+    }
+  },
+  {
+    "id": "medium-risk",
+    "label": "中风险样本",
+    "name": "杭州启明包装材料有限公司",
+    "credit_code": "91330100MA5REVIEW2",
+    "category": "包装材料",
+    "request_amount": 2500000,
+    "contract_months": 24,
+    "is_key_supplier": true,
+    "materials": ["营业执照", "供应商调查表", "最近一期财务报表", "主要客户合同样本"],
+    "external_profile": {
+      "registration_status": "存续",
+      "registered_capital": "1200万元人民币",
+      "established_years": 4,
+      "legal_cases_count": 6,
+      "major_litigation_amount": 1800000,
+      "dishonesty_count": 0,
+      "admin_penalty_count": 1,
+      "operating_abnormal_count": 1,
+      "equity_freeze_count": 0,
+      "shareholder_high_risk": true,
+      "tax_credit_level": "B"
+    }
+  },
+  {
+    "id": "high-risk",
+    "label": "高风险样本",
+    "name": "青岛宏远供应链管理有限公司",
+    "credit_code": "91370200MA5REJECT3",
+    "category": "物流与仓储",
+    "request_amount": 5000000,
+    "contract_months": 36,
+    "is_key_supplier": true,
+    "materials": ["营业执照", "供应商调查表"],
+    "external_profile": {
+      "registration_status": "经营异常",
+      "registered_capital": "800万元人民币",
+      "established_years": 2,
+      "legal_cases_count": 18,
+      "major_litigation_amount": 9600000,
+      "dishonesty_count": 1,
+      "admin_penalty_count": 3,
+      "operating_abnormal_count": 2,
+      "equity_freeze_count": 2,
+      "shareholder_high_risk": true,
+      "tax_credit_level": "D"
+    }
+  }
+]
