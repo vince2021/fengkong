@@ -14,8 +14,22 @@ class NavigationConfigTest(unittest.TestCase):
             [page["key"] for page in groups[0]["pages"]],
             ["demo_route", "product_samples", "industry_template", "demo_flow", "demo_script", "customer_qa"],
         )
-        self.assertEqual([page["key"] for page in groups[1]["pages"]], ["sales_assets", "pilot_workspace", "delivery_package"])
-        self.assertEqual([page["key"] for page in groups[2]["pages"]], ["dashboard", "counterparty_detail", "model_config", "rating_preview"])
+        self.assertEqual(
+            [page["key"] for page in groups[1]["pages"]],
+            [
+                "sales_assets",
+                "pilot_workspace",
+                "pilot_kickoff",
+                "pilot_field_mapping",
+                "pilot_task_board",
+                "pilot_value_review",
+                "delivery_package",
+            ],
+        )
+        self.assertEqual(
+            [page["key"] for page in groups[2]["pages"]],
+            ["dashboard", "approval_workflow", "counterparty_detail", "model_config", "rating_preview"],
+        )
 
     def test_each_group_has_business_positioning(self) -> None:
         groups = build_navigation_groups()

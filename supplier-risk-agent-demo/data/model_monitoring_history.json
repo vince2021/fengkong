@@ -1,0 +1,41 @@
+{
+  "datasets": {
+    "general": {
+      "dataset_id": "proxy-general-monitoring-2026h1",
+      "name": "通用模型跨期监控演示数据集",
+      "evidence_level": "simulation_proxy",
+      "label_definition": "基于演示客商风险状态构造的代理事件标签，仅用于验证监控计算链，不可作为正式违约回溯证据。",
+      "source": "平台演示样本派生",
+      "baseline": {
+        "period": "2026Q1",
+        "score_band_counts": {
+          "0-50": 8,
+          "50-60": 6,
+          "60-70": 8,
+          "70-80": 10,
+          "80-90": 9,
+          "90-100": 10
+        }
+      },
+      "current": {
+        "period": "2026Q2",
+        "score_band_counts": {
+          "0-50": 10,
+          "50-60": 7,
+          "60-70": 7,
+          "70-80": 9,
+          "80-90": 8,
+          "90-100": 10
+        }
+      },
+      "backtest_bins": [
+        {"score_band": "0-50", "average_pd": 0.60, "event_count": 8, "non_event_count": 1},
+        {"score_band": "50-60", "average_pd": 0.30, "event_count": 4, "non_event_count": 2},
+        {"score_band": "60-70", "average_pd": 0.15, "event_count": 3, "non_event_count": 4},
+        {"score_band": "70-80", "average_pd": 0.08, "event_count": 2, "non_event_count": 6},
+        {"score_band": "80-90", "average_pd": 0.03, "event_count": 1, "non_event_count": 8},
+        {"score_band": "90-100", "average_pd": 0.01, "event_count": 0, "non_event_count": 12}
+      ]
+    }
+  }
+}

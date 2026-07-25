@@ -8,6 +8,13 @@ from pathlib import Path
 
 import streamlit as st
 
+from rating.approval_workflow import (
+    WORKFLOW_STAGES,
+    advance_approval_case,
+    build_workflow_progress,
+    create_approval_case,
+    stage_label,
+)
 from rating.models import DIMENSIONS
 from rating.customer_qa import build_customer_qa_bank
 from rating.demo_audience import AUDIENCE_OPTIONS, build_audience_guidance
@@ -30,7 +37,12 @@ from rating.model_configurator import (
     build_rule_matrix,
     build_strategy_matrix,
 )
+from rating.model_impact import build_score_calculation_trace, get_editable_indicators, simulate_indicator_change
 from rating.navigation_config import build_navigation_groups
+from rating.pilot_field_mapping import build_pilot_field_mapping_markdown, build_pilot_field_mapping_package
+from rating.pilot_kickoff import build_pilot_kickoff_markdown, build_pilot_kickoff_package
+from rating.pilot_task_board import build_pilot_task_board, build_pilot_task_board_markdown
+from rating.pilot_value_review import build_pilot_value_review, build_pilot_value_review_markdown
 from rating.product_home import build_product_home
 from rating.risk_intelligence import (
     build_agent_timeline,
@@ -39,6 +51,7 @@ from rating.risk_intelligence import (
 )
 from rating.sample_scenarios import build_sample_scenarios, count_scenarios_by_industry
 from rating.scorecard import rate_counterparties
+from rating.template_resolver import resolve_template
 from rating.ui_presenters import badge_html, key_value_panel_html, rows_table_html, status_strip_html
 from reports.report import build_credit_rating_report
 from rating.detail_workbench import build_detail_workbench
@@ -95,21 +108,6 @@ def _markdown_cell(value) -> str:
     return text.replace("|", "\\|").replace("\n", "<br>")
 
 
-def resolve_template(template_key: str, templates: dict) -> dict:
-    selected = templates[template_key]
-    if "extends" not in selected:
-        return copy.deepcopy(selected)
-
-    base = copy.deepcopy(templates[selected["extends"]])
-    for key, value in selected.items():
-        if key == "extends":
-            continue
-        base[key] = copy.deepcopy(value)
-    base["industry_template"] = template_key
-    base["version"] = f"{base['version']}-{template_key.upper()}"
-    return base
-
-
 def init_state() -> None:
     templates = load_json(MODEL_TEMPLATES_PATH)["templates"]
     counterparties = load_json(COUNTERPARTIES_PATH)
@@ -131,6 +129,8 @@ def init_state() -> None:
         st.session_state.config_error = ""
     if "review_records" not in st.session_state:
         st.session_state.review_records = []
+    if "approval_cases" not in st.session_state:
+        st.session_state.approval_cases = {}
 
 
 def recalculate_results() -> None:
@@ -728,6 +728,198 @@ def render_pilot_workspace() -> None:
     )
 
 
+def render_pilot_kickoff() -> None:
+    st.markdown("### 试点启动包")
+    st.caption("用于客户同意试点后，快速确认启动会目标、双方准备清单、会议议程、验收口径和下一步任务。")
+
+    results = current_rating_results()
+    if not results:
+        st.warning("当前模板没有可生成试点启动包的评级结果。")
+        return
+
+    left_control, right_control = st.columns([1, 1])
+    selected_id = left_control.selectbox(
+        "选择启动样本",
+        options=[item["counterparty_id"] for item in results],
+        format_func=lambda item_id: _format_result_option(results, item_id),
+        key=f"pilot_kickoff_counterparty_{st.session_state.selected_template}",
+    )
+    role_key = right_control.selectbox(
+        "试点牵头角色",
+        options=[item["key"] for item in AUDIENCE_OPTIONS],
+        format_func=lambda key: next(item["label"] for item in AUDIENCE_OPTIONS if item["key"] == key),
+        key=f"pilot_kickoff_role_{selected_id}",
+    )
+
+    flow = build_current_demo_flow(selected_id, results)
+    guidance = build_audience_guidance(role_key, flow)
+    package = build_pilot_kickoff_package(flow, guidance)
+    markdown = build_pilot_kickoff_markdown(package)
+
+    st.markdown(f"#### {package['package_title']}")
+    render_key_value_table(package["cover_summary"])
+
+    section_names = ["启动会目标", "客户准备清单", "我方准备清单", "启动会议程", "验收口径", "下一步任务"]
+    selected_section = st.radio(
+        "查看启动包章节",
+        options=section_names,
+        horizontal=True,
+        key=f"pilot_kickoff_section_{selected_id}_{role_key}",
+    )
+    render_rows_table(package[selected_section])
+
+    st.download_button(
+        "下载试点启动包 Markdown",
+        data=markdown.encode("utf-8"),
+        file_name=f"{selected_id}-{role_key}-pilot-kickoff.md",
+        mime="text/markdown",
+        key=f"download_kickoff_{selected_id}_{role_key}",
+    )
+
+
+def render_pilot_field_mapping() -> None:
+    st.markdown("### 试点字段映射")
+    st.caption("用于启动会后确认外部数据、内部字段、材料知识库、模型输出和审计留痕的映射关系。")
+
+    template_key = st.session_state.selected_template
+    package = build_pilot_field_mapping_package(template_key, st.session_state.model_config)
+    markdown = build_pilot_field_mapping_markdown(package)
+    sections = package["sections"]
+
+    st.markdown(f"#### {package['package_title']}")
+    st.markdown(
+        status_strip_html(
+            [
+                ("行业模板", package["industry_label"]),
+                ("模型版本", package["model_version"]),
+                ("字段分组", f"{len(sections)} 类"),
+                ("准备字段", f"{len(package['data_readiness_checklist'])} 项"),
+                ("落地状态", "可试点"),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+
+    render_key_value_table(package["summary"])
+
+    mapping_tab, checklist_tab = st.tabs(["字段映射", "数据准备清单"])
+    with mapping_tab:
+        selected_section = st.radio(
+            "查看字段分组",
+            options=list(sections.keys()),
+            horizontal=True,
+            key=f"pilot_field_mapping_section_{template_key}",
+        )
+        render_rows_table(sections[selected_section])
+    with checklist_tab:
+        render_rows_table(package["data_readiness_checklist"])
+
+    st.download_button(
+        "下载字段映射包 Markdown",
+        data=markdown.encode("utf-8"),
+        file_name=f"{template_key}-pilot-field-mapping.md",
+        mime="text/markdown",
+        key=f"download_field_mapping_{template_key}",
+    )
+
+
+def render_pilot_task_board() -> None:
+    st.markdown("### 客户试点任务看板")
+    st.caption("把字段准备清单转成可推进的任务状态，用于客户试点启动后的每日跟进和缺口管理。")
+
+    template_key = st.session_state.selected_template
+    mapping_package = build_pilot_field_mapping_package(template_key, st.session_state.model_config)
+    board = build_pilot_task_board(mapping_package)
+    markdown = build_pilot_task_board_markdown(board)
+
+    st.markdown(f"#### {board['title']}")
+    st.markdown(
+        status_strip_html(
+            [
+                ("任务总数", board["summary"]["任务总数"]),
+                ("待客户处理", board["summary"]["待客户处理"]),
+                ("阻塞任务", board["summary"]["阻塞任务"]),
+                ("模型版本", board["model_version"]),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+    render_key_value_table(board["summary"])
+
+    summary_tab, board_tab, risk_tab, all_tab = st.tabs(["状态汇总", "看板视图", "阻塞任务", "全部任务"])
+    with summary_tab:
+        render_rows_table(board["status_summary"])
+    with board_tab:
+        status_tabs = st.tabs(list(board["columns"].keys()))
+        for status, status_tab in zip(board["columns"].keys(), status_tabs):
+            with status_tab:
+                render_rows_table(board["columns"][status])
+    with risk_tab:
+        render_rows_table(board["risk_tasks"])
+    with all_tab:
+        render_rows_table(board["tasks"])
+
+    st.download_button(
+        "下载试点任务看板 Markdown",
+        data=markdown.encode("utf-8"),
+        file_name=f"{template_key}-pilot-task-board.md",
+        mime="text/markdown",
+        key=f"download_task_board_{template_key}",
+    )
+
+
+def render_pilot_value_review() -> None:
+    st.markdown("### 试点复盘与价值评估")
+    st.caption("将样本回放、风险识别、字段缺口和效率收益汇总为管理层可判断的 POC 建议。")
+
+    results = current_rating_results()
+    if not results:
+        st.warning("当前模板没有可复盘的评级结果。")
+        return
+
+    template_key = st.session_state.selected_template
+    mapping_package = build_pilot_field_mapping_package(template_key, st.session_state.model_config)
+    task_board = build_pilot_task_board(mapping_package)
+    review = build_pilot_value_review(mapping_package, task_board, results)
+    markdown = build_pilot_value_review_markdown(review)
+
+    st.markdown(f"#### {review['title']}")
+    st.markdown(
+        status_strip_html(
+            [
+                ("样本数量", review["summary"]["样本数量"]),
+                ("风险识别", review["summary"]["风险识别"]),
+                ("字段缺口", review["summary"]["字段缺口"]),
+                ("建议结论", review["summary"]["建议结论"]),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+    render_key_value_table(review["summary"])
+
+    metric_tab, risk_tab, efficiency_tab, gap_tab, poc_tab = st.tabs(["价值指标", "风险识别", "效率测算", "字段缺口", "POC 建议"])
+    with metric_tab:
+        render_rows_table(review["value_metrics"])
+    with risk_tab:
+        render_rows_table(review["risk_findings"])
+    with efficiency_tab:
+        render_rows_table(review["efficiency_estimate"])
+    with gap_tab:
+        render_rows_table(review["field_gap_impact"])
+    with poc_tab:
+        render_rows_table(review["poc_recommendation"])
+        st.markdown("##### 下一步动作")
+        render_rows_table(review["next_actions"])
+
+    st.download_button(
+        "下载试点复盘 Markdown",
+        data=markdown.encode("utf-8"),
+        file_name=f"{template_key}-pilot-value-review.md",
+        mime="text/markdown",
+        key=f"download_value_review_{template_key}",
+    )
+
+
 def render_delivery_package() -> None:
     st.markdown("### 完整交付包")
     st.caption("将演示脚本、获客资产和试点工作台合并为一份可下载材料，用于客户跟进、内部复盘和试点立项。")
@@ -871,8 +1063,13 @@ def render_page_by_key(page_key: str) -> None:
         "customer_qa": render_customer_qa,
         "sales_assets": render_sales_assets,
         "pilot_workspace": render_pilot_workspace,
+        "pilot_kickoff": render_pilot_kickoff,
+        "pilot_field_mapping": render_pilot_field_mapping,
+        "pilot_task_board": render_pilot_task_board,
+        "pilot_value_review": render_pilot_value_review,
         "delivery_package": render_delivery_package,
         "dashboard": render_dashboard,
+        "approval_workflow": render_approval_workflow,
         "counterparty_detail": render_counterparty_detail,
         "model_config": render_model_config_center,
         "rating_preview": render_rating_preview,
@@ -1273,17 +1470,208 @@ def render_report_download(result: dict) -> None:
     )
 
 
+def render_approval_workflow() -> None:
+    st.markdown("### 客户准入与授信审批工作流")
+    st.caption("从主体注册、资料收集到模型评分、额度账期建议和最终策略，逐环节校验并完整留痕。")
+
+    counterparties = st.session_state.counterparties
+    results = {item["counterparty_id"]: item for item in current_rating_results()}
+    selected_id = st.selectbox(
+        "选择审批客户/供应商",
+        options=[item["id"] for item in counterparties if item["id"] in results],
+        format_func=lambda item_id: next(item["name"] for item in counterparties if item["id"] == item_id),
+        key="approval_counterparty",
+    )
+    counterparty = next(item for item in counterparties if item["id"] == selected_id)
+    if selected_id not in st.session_state.approval_cases:
+        st.session_state.approval_cases[selected_id] = create_approval_case(counterparty)
+    case = st.session_state.approval_cases[selected_id]
+    result = results[selected_id]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("审批编号", case["case_id"])
+    c2.metric("当前环节", "已结束" if case["status"] == "已完成" else stage_label(case["current_stage"]))
+    c3.metric("已完成环节", f"{len(case['completed_stages'])}/{len(WORKFLOW_STAGES)}")
+    c4.metric("审批状态", case["status"])
+
+    render_rows_table(build_workflow_progress(case))
+    work_tab, result_tab, trail_tab = st.tabs(["当前审批环节", "模型与授信结果", "审批留痕"])
+    with work_tab:
+        if case["status"] == "已完成":
+            st.success("审批流程已完成，最终策略已生效。")
+            render_key_value_table(case["data"]["final_strategy"])
+        else:
+            _render_current_approval_stage(case, counterparty, result)
+    with result_tab:
+        render_key_value_table(
+            {
+                "模型": st.session_state.model_config["name"],
+                "模型版本": result["model_version"],
+                "信用评分": result["total_score"],
+                "信用等级": result["rating"],
+                "建议额度": money(result["suggested_limit"]),
+                "建议授信期": f"{result['suggested_payment_term_days']} 天" if result["suggested_payment_term_days"] else "预付款",
+                "最终准入策略": result["access_strategy"],
+                "监控频率": result["monitoring_frequency"],
+            }
+        )
+        render_rows_table(build_score_calculation_trace(counterparty, st.session_state.model_config).get("dimension_contributions", []))
+    with trail_tab:
+        render_rows_table(case["timeline"])
+
+    if st.button("重置该审批流程", key=f"reset_approval_{selected_id}"):
+        st.session_state.approval_cases[selected_id] = create_approval_case(counterparty)
+        st.rerun()
+
+
+def _render_current_approval_stage(case: dict, counterparty: dict, result: dict) -> None:
+    stage = case["current_stage"]
+    st.markdown(f"#### {stage_label(stage)}")
+    actor = next(item["owner"] for item in WORKFLOW_STAGES if item["key"] == stage)
+
+    if stage == "registration":
+        registered_name = st.text_input("注册主体名称", value=counterparty["name"], key=f"reg_name_{counterparty['id']}")
+        credit_code = st.text_input("统一社会信用代码", value=counterparty.get("credit_code", ""), key=f"reg_code_{counterparty['id']}")
+        contact_name = st.text_input("联系人", value="业务联系人", key=f"reg_contact_{counterparty['id']}")
+        payload = {"registered_name": registered_name, "unified_social_credit_code": credit_code, "contact_name": contact_name}
+    elif stage == "document_upload":
+        documents = st.multiselect(
+            "已上传资料",
+            ["营业执照", "公司章程", "财务报表", "订单合同", "发票与回款明细", "资质证照", "授信申请书"],
+            default=["营业执照", "财务报表", "订单合同"],
+            key=f"approval_docs_{counterparty['id']}",
+        )
+        payload = {"documents": documents}
+    elif stage == "supplement":
+        gaps = st.multiselect("资料缺口", ["实控人信息", "最新财务报表", "历史逾期说明", "重大诉讼说明", "业务合同明细"], key=f"approval_gaps_{counterparty['id']}")
+        supplement_status = st.radio("补充状态", ["待补充", "已补齐"], horizontal=True, key=f"supplement_status_{counterparty['id']}")
+        payload = {"gaps": gaps, "supplement_status": supplement_status}
+    elif stage == "approval_submit":
+        business_type = st.selectbox("审批类型", ["新客户准入", "供应商准入", "新增授信", "额度调整", "续授信"], key=f"business_type_{counterparty['id']}")
+        requested_limit = st.number_input("申请额度（元）", min_value=0, value=int(counterparty.get("requested_limit", 0)), step=100000, key=f"approval_limit_{counterparty['id']}")
+        requested_term = st.number_input("申请授信期/账期（天）", min_value=0, value=int(counterparty.get("current_payment_term_days", 30)), step=5, key=f"approval_term_{counterparty['id']}")
+        payload = {"business_type": business_type, "requested_limit": requested_limit, "requested_term_days": requested_term}
+    elif stage == "model_selection":
+        st.info("模型选择必须固化模板、版本及适用业务，后续评分和审计均引用该快照。")
+        model_name = st.selectbox("评级模型", [st.session_state.model_config["name"]], key=f"approval_model_{counterparty['id']}")
+        payload = {"model_name": model_name, "model_version": st.session_state.model_config["version"], "industry_template": st.session_state.selected_template}
+    elif stage == "scoring":
+        trace = build_score_calculation_trace(counterparty, st.session_state.model_config)
+        st.markdown(f"**计算公式：** {trace.get('formula', '-')}")
+        render_rows_table(trace.get("dimension_contributions", []))
+        render_rows_table(trace.get("indicator_deductions", []))
+        payload = {"total_score": result["total_score"], "rating": result["rating"], "raw_rating": result["raw_rating"], "strong_rule_hits": [hit["rule_id"] for hit in result["strong_rule_hits"]]}
+    elif stage == "credit_proposal":
+        suggested_limit = st.number_input("审批建议额度（元）", min_value=0, value=int(result["suggested_limit"]), step=100000, key=f"suggested_limit_{counterparty['id']}")
+        suggested_term = st.number_input("审批建议授信期/账期（天）", min_value=0, value=int(result["suggested_payment_term_days"]), step=5, key=f"suggested_term_{counterparty['id']}")
+        payload = {"suggested_limit": suggested_limit, "suggested_payment_term_days": suggested_term, "model_suggested_limit": result["suggested_limit"]}
+    else:
+        decision = st.selectbox("审批决定", ["通过", "有条件通过", "退回补充", "拒绝"], index=0 if result["access_strategy"] not in {"禁入", "不建议准入"} else 3, key=f"final_decision_{counterparty['id']}")
+        access_strategy = st.text_input("最终准入策略", value=result["access_strategy"], key=f"final_strategy_{counterparty['id']}")
+        monitoring = st.text_input("贷后/合作监控频率", value=result["monitoring_frequency"], key=f"final_monitoring_{counterparty['id']}")
+        payload = {"decision": decision, "access_strategy": access_strategy, "monitoring_frequency": monitoring, "review_required": result["review_required"]}
+
+    if st.button("完成当前环节并进入下一步", type="primary", key=f"advance_{counterparty['id']}_{stage}"):
+        try:
+            st.session_state.approval_cases[counterparty["id"]] = advance_approval_case(case, payload, actor)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+
+def render_model_calculation_trace() -> None:
+    st.markdown("#### 指标运算与结果形成链路")
+    st.caption("解释单项指标如何形成维度分、权重贡献、总分，以及强规则如何覆盖最终策略。")
+    if st.session_state.model_config.get("scorecard_type") == "tech_enterprise_basic":
+        st.info("科创模型采用模块封顶、加分和减分运算；请在评分卡配置中查看各模块计算参数。")
+        return
+    counterparty = _select_model_analysis_counterparty("calculation_trace_counterparty")
+    trace = build_score_calculation_trace(counterparty, st.session_state.model_config)
+    if not trace["ok"]:
+        st.error(f"暂时无法计算：{trace['error']}")
+        st.info(trace["formula"])
+        return
+    st.info(trace["formula"])
+    if trace.get("matrix_inputs"):
+        st.markdown("##### 业务—财务矩阵输入")
+        render_rows_table(trace["matrix_inputs"])
+    if trace.get("data_quality"):
+        st.markdown("##### 数据完整度")
+        render_key_value_table(trace["data_quality"])
+    if trace.get("limit_calculation"):
+        st.markdown("##### 建议额度约束链")
+        st.caption(trace["limit_calculation"]["公式"])
+        render_rows_table([{"约束项": key, "候选额度": money(value)} for key, value in trace["limit_calculation"]["候选上限"].items()])
+        st.info(f"当前约束项：{trace['limit_calculation']['约束项']}；规则调整后额度：{money(trace['limit_calculation']['规则调整后额度'])}")
+    render_rows_table(trace["dimension_contributions"])
+    st.markdown("##### 指标运算明细")
+    render_rows_table(trace["indicator_deductions"])
+    st.markdown("##### 强规则覆盖")
+    render_rows_table(
+        [{"规则": hit["rule_id"], "名称": hit["rule_name"], "命中动作": hit["action"].get("access_strategy", "-"), "说明": "强规则优先于综合评分"} for hit in trace["result"]["strong_rule_hits"]]
+    )
+
+
+def render_indicator_impact_analysis() -> None:
+    st.markdown("#### 局部指标敏感性分析")
+    st.caption("保持其他字段和模型配置不变，只调整一个指标，观察评分、等级、额度、账期及强规则的变化。")
+    if st.session_state.model_config.get("scorecard_type") == "tech_enterprise_basic":
+        st.info("当前敏感性面板面向通用加权模型；科创模型可通过加减分配置直接预览影响。")
+        return
+    counterparty = _select_model_analysis_counterparty("impact_counterparty")
+    indicator = st.selectbox("选择变动指标", get_editable_indicators(st.session_state.model_config), format_func=lambda item: f"{item['label']}（{item['unit']}）", key="impact_indicator")
+    current = counterparty
+    for part in indicator["path"].split("."):
+        current = current[part]
+    if indicator["unit"] == "%" and indicator.get("value_scale") != "whole":
+        new_value = st.slider("模拟值", 0.0, 1.0, float(current), float(indicator["step"]), format="%.2f")
+    else:
+        new_value = st.number_input("模拟值", min_value=float(indicator["min"]), max_value=float(indicator["max"]), value=float(current), step=float(indicator["step"]), key=f"impact_value_{indicator['path']}")
+        if isinstance(current, int):
+            new_value = int(new_value)
+    impact = simulate_indicator_change(counterparty, st.session_state.model_config, indicator["path"], new_value)
+    if not impact["ok"]:
+        st.error(f"暂时无法分析：{impact['error']}")
+        st.caption("请先确保评分卡权重合计为 100%，并应用当前模型配置。")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("总分变化", impact["after"]["total_score"], delta=impact["impact"]["总分变化"])
+    c2.metric("评级", impact["after"]["rating"], delta=impact["impact"]["评级变化"])
+    c3.metric("建议额度", money(impact["after"]["suggested_limit"]), delta=money(impact["impact"]["额度变化"]))
+    c4.metric("建议账期", f"{impact['after']['suggested_payment_term_days']} 天", delta=f"{impact['impact']['账期变化']} 天")
+    render_rows_table(
+        [
+            {"对比项": "指标值", "调整前": impact["old_value"], "调整后": impact["new_value"]},
+            {"对比项": "信用评分", "调整前": impact["before"]["total_score"], "调整后": impact["after"]["total_score"]},
+            {"对比项": "信用等级", "调整前": impact["before"]["rating"], "调整后": impact["after"]["rating"]},
+            {"对比项": "最终策略", "调整前": impact["before"]["access_strategy"], "调整后": impact["after"]["access_strategy"]},
+            {"对比项": "强规则命中", "调整前": len(impact["before"]["strong_rule_hits"]), "调整后": len(impact["after"]["strong_rule_hits"])},
+        ]
+    )
+
+
+def _select_model_analysis_counterparty(key: str) -> dict:
+    results = {item["counterparty_id"] for item in current_rating_results()}
+    options = [item for item in st.session_state.counterparties if item["id"] in results]
+    selected_id = st.selectbox("分析样本", [item["id"] for item in options], format_func=lambda item_id: next(item["name"] for item in options if item["id"] == item_id), key=key)
+    return next(item for item in options if item["id"] == selected_id)
+
+
 def render_model_config_center() -> None:
     st.markdown("### 模型配置中心")
     st.caption("面向风控/内控业务负责人，按指标库、评分卡、强规则、策略矩阵和版本治理来管理模型。")
 
-    overview_tab, indicator_tab, scorecard_tab, rule_tab, strategy_tab, version_tab = st.tabs(
-        ["模型总览", "指标库", "评分卡配置", "强规则", "策略矩阵", "版本治理"]
+    overview_tab, indicator_tab, calculation_tab, impact_tab, scorecard_tab, rule_tab, strategy_tab, version_tab = st.tabs(
+        ["模型总览", "指标库", "运算链路", "敏感性分析", "评分卡配置", "强规则", "策略矩阵", "版本治理"]
     )
     with overview_tab:
         render_model_overview()
     with indicator_tab:
         render_indicator_library()
+    with calculation_tab:
+        render_model_calculation_trace()
+    with impact_tab:
+        render_indicator_impact_analysis()
     with scorecard_tab:
         render_scorecard_configuration()
     with rule_tab:

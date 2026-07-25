@@ -112,7 +112,8 @@ def build_industry_explanation(template_key: str, model_config: dict) -> dict:
 
 def _build_weight_rationale(weights: dict, dimension_rationale: dict) -> list[dict]:
     rows = []
-    for key, label in DIMENSIONS.items():
+    for key in weights:
+        label = DIMENSIONS.get(key, key)
         rows.append(
             {
                 "指标维度": label,

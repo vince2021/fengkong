@@ -1,0 +1,239 @@
+import type { ApiErrorShape, ApprovalAction, ApprovalCase, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentPrecheck, DocumentRecord, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule } from "./types";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
+const TOKEN_KEY = "risk-platform.dev-token";
+type ModelOutcomePayload = { external_observation_id: string; source: string; template_key: string; model_version: string; counterparty_id: string; population_period: string; predicted_score: number; predicted_pd: number; observed_event: boolean; prediction_at: string; observation_end: string; evidence_reference: string };
+
+export const devIdentities = [
+  { token: "dev-manager", label: "客户经理", description: "发起申请并推动业务环节" },
+  { token: "dev-risk", label: "风控经理", description: "选择模型、评级与风险复核" },
+  { token: "dev-approver", label: "授信审批人", description: "审批额度、账期与最终策略" },
+  { token: "dev-client", label: "企业客户", description: "维护本企业资料" },
+  { token: "dev-model-admin", label: "模型管理员", description: "模型治理与配置" },
+  { token: "dev-auditor", label: "审计人员", description: "只读审计与追溯" },
+  { token: "dev-operations", label: "运营值班", description: "运行 SLA 扫描与升级催办" },
+  { token: "dev-admin", label: "平台管理员", description: "本地演示全权限" },
+] as const;
+
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) ?? "dev-manager";
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", `Bearer ${getToken()}`);
+  if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
+  const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  if (!response.ok) {
+    let message = `请求失败（${response.status}）`;
+    try {
+      const error = (await response.json()) as ApiErrorShape;
+      if (error.detail) message = error.detail;
+    } catch {
+      // Non-JSON gateway errors keep the status-based message.
+    }
+    throw new Error(message);
+  }
+  return response.json() as Promise<T>;
+}
+
+export const api = {
+  me: () => request<Principal>("/auth/me"),
+  counterparties: () => request<Counterparty[]>("/counterparties"),
+  rawProfile: (counterpartyId: string) => request<RawEnterpriseProfile>(`/counterparties/${counterpartyId}/raw-profile`),
+  enterpriseDataProfile: (counterpartyId: string) => request<EnterpriseDataProfile>(`/data-governance/counterparties/${counterpartyId}/profile`),
+  enterpriseDataConflicts: (counterpartyId: string) => request<EnterpriseDataConflict[]>(`/data-governance/counterparties/${counterpartyId}/conflicts`),
+  ratingReadiness: (counterpartyId: string, templateKey = "corporate_credit_v2") => request<RatingReadiness>(`/data-governance/counterparties/${counterpartyId}/rating-readiness?template_key=${encodeURIComponent(templateKey)}`),
+  enterpriseFieldLineage: (counterpartyId: string, fieldPath: string) => request<EnterpriseFieldLineage>(`/data-governance/counterparties/${counterpartyId}/lineage?field_path=${encodeURIComponent(fieldPath)}`),
+  enterpriseDataImports: (counterpartyId: string) => request<EnterpriseDataImport[]>(`/data-governance/imports?counterparty_id=${encodeURIComponent(counterpartyId)}`),
+  createEnterpriseDataImport: (payload: { import_key: string; counterparty_id: string; source_type: EnterpriseDataImport["source_type"]; source_name: string; schema_version: string; as_of_date: string; evidence_reference: string; payload: Record<string, unknown>; field_evidence: Record<string, { reference?: string; locator?: string }> }) =>
+    request<EnterpriseDataImport>("/data-governance/imports", { method: "POST", body: JSON.stringify(payload) }),
+  createEnterpriseDataResolution: (payload: { counterparty_id: string; field_path: string; selected_field_id: string; reason_category: EnterpriseDataResolution["reason_category"]; rationale: string }) =>
+    request<EnterpriseDataResolution>("/data-governance/resolutions", { method: "POST", body: JSON.stringify(payload) }),
+  reviewEnterpriseDataResolution: (id: string, payload: { expected_row_version: number; decision: "approve" | "reject"; comment: string }) =>
+    request<EnterpriseDataResolution>(`/data-governance/resolutions/${id}/review`, { method: "POST", body: JSON.stringify(payload) }),
+  approvalCases: () => request<ApprovalCase[]>("/approval-cases"),
+  approvalCase: (id: string) => request<ApprovalCase>(`/approval-cases/${id}`),
+  createApprovalCase: (counterpartyId: string) =>
+    request<ApprovalCase>("/approval-cases", { method: "POST", body: JSON.stringify({ counterparty_id: counterpartyId }) }),
+  advanceApprovalCase: (id: string, rowVersion: number, payload: Record<string, unknown>) =>
+    request<ApprovalCase>(`/approval-cases/${id}/advance`, {
+      method: "POST",
+      body: JSON.stringify({ expected_row_version: rowVersion, payload }),
+    }),
+  automateApprovalCase: (id: string, rowVersion: number, templateKey?: string) =>
+    request<ApprovalCase>(`/approval-cases/${id}/automate`, {
+      method: "POST",
+      body: JSON.stringify({ expected_row_version: rowVersion, ...(templateKey ? { template_key: templateKey } : {}) }),
+    }),
+  actOnApprovalCase: (id: string, rowVersion: number, action: ApprovalAction, reason: string, requiredDocumentTypes: string[] = []) =>
+    request<ApprovalCase>(`/approval-cases/${id}/actions`, {
+      method: "POST",
+      body: JSON.stringify({ action, reason, expected_row_version: rowVersion, required_document_types: requiredDocumentTypes }),
+    }),
+  creditReports: (caseId: string) => request<CreditReport[]>(`/credit-reports?case_id=${encodeURIComponent(caseId)}`),
+  createCreditReport: (caseId: string) => request<CreditReport>("/credit-reports", { method: "POST", body: JSON.stringify({ case_id: caseId }) }),
+  decisionVariances: (caseId?: string) => request<DecisionVariance[]>(`/decision-governance/variances${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
+  decisionGovernanceSummary: () => request<DecisionGovernanceSummary>("/decision-governance/summary"),
+  verifyCreditReport: (id: string) => request<CreditReportIntegrity>(`/credit-reports/${id}/integrity`),
+  downloadCreditReport: async (report: CreditReport) => {
+    const response = await fetch(`${API_BASE}/credit-reports/${report.id}/download`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!response.ok) {
+      let message = `报告下载失败（${response.status}）`;
+      try { const payload = await response.json() as ApiErrorShape; if (payload.detail) message = payload.detail; } catch { /* keep status message */ }
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = window.document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${report.report_no}-信用评级与授信决策报告.pdf`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
+  runRating: (counterpartyId: string, templateKey = "general") =>
+    request<RatingResult>("/ratings/run", {
+      method: "POST",
+      body: JSON.stringify({ counterparty_id: counterpartyId, template_key: templateKey }),
+    }),
+  portfolioRatingBatches: (templateKey?: string) => request<PortfolioRatingBatch[]>(`/ratings/batches${templateKey ? `?template_key=${encodeURIComponent(templateKey)}` : ""}`),
+  createPortfolioRatingBatch: (payload: { batch_key: string; template_key: string; counterparty_type: "all" | "supplier" | "customer" }) =>
+    request<PortfolioRatingBatch>("/ratings/batches", { method: "POST", body: JSON.stringify(payload) }),
+  models: () => request<ModelSummary[]>("/models"),
+  model: (templateKey: string) => request<ModelDetail>(`/models/${templateKey}`),
+  indicatorPool: () => request<IndicatorPoolResponse>("/indicator-pool"),
+  indicatorObservations: (counterpartyId: string, indicatorId?: string) => request<EnterpriseIndicatorObservation[]>(`/indicator-observations?counterparty_id=${encodeURIComponent(counterpartyId)}${indicatorId ? `&indicator_id=${encodeURIComponent(indicatorId)}` : ""}`),
+  createIndicatorObservation: (payload: { counterparty_id: string; indicator_id: string; values: Record<string, number | boolean>; evidence_reference: string; evidence_document_id?: string; as_of_date: string }) =>
+    request<EnterpriseIndicatorObservation>("/indicator-observations", { method: "POST", body: JSON.stringify(payload) }),
+  reviewIndicatorObservation: (id: string, payload: { expected_row_version: number; decision: "verify" | "reject"; comment: string }) =>
+    request<EnterpriseIndicatorObservation>(`/indicator-observations/${id}/review`, { method: "POST", body: JSON.stringify(payload) }),
+  ratingTrace: (counterpartyId: string, templateKey: string) =>
+    request<RatingTrace>("/ratings/trace", {
+      method: "POST",
+      body: JSON.stringify({ counterparty_id: counterpartyId, template_key: templateKey }),
+    }),
+  modelImpact: (counterpartyId: string, templateKey: string, fieldPath: string, newValue: number) =>
+    request<ModelImpact>("/models/impact", {
+      method: "POST",
+      body: JSON.stringify({ counterparty_id: counterpartyId, template_key: templateKey, field_path: fieldPath, new_value: newValue }),
+    }),
+  modelChanges: (templateKey: string) => request<ModelChangeRecord[]>(`/model-governance/changes?template_key=${encodeURIComponent(templateKey)}`),
+  modelValidation: (templateKey: string, candidateChangeId?: string) => request<ModelValidationReport>(`/model-governance/validation?template_key=${encodeURIComponent(templateKey)}${candidateChangeId ? `&candidate_change_id=${encodeURIComponent(candidateChangeId)}` : ""}`),
+  createModelChange: (payload: { template_key: string; candidate_version: string; change_reason: string; weights: Record<string, number>; thresholds: Record<string, number>; strong_rules: StrongRule[]; strategy_mapping: Array<Record<string, string | number>>; indicator_selection: Array<{ indicator_id: string; weight: number; enabled: boolean }>; risk_screening_policy: RiskScreeningPolicy }) =>
+    request<ModelChangeRecord>("/model-governance/changes", { method: "POST", body: JSON.stringify(payload) }),
+  updateModelChange: (id: string, payload: { expected_row_version: number; change_reason: string; weights: Record<string, number>; thresholds: Record<string, number>; strong_rules: StrongRule[]; strategy_mapping: Array<Record<string, string | number>>; indicator_selection: Array<{ indicator_id: string; weight: number; enabled: boolean }>; risk_screening_policy: RiskScreeningPolicy }) =>
+    request<ModelChangeRecord>(`/model-governance/changes/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  submitModelChange: (id: string, rowVersion: number) =>
+    request<ModelChangeRecord>(`/model-governance/changes/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
+  reviewModelChange: (id: string, rowVersion: number, decision: "publish" | "reject", comment: string) =>
+    request<ModelChangeRecord>(`/model-governance/changes/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  modelReleases: (templateKey: string) => request<ModelReleaseRecord[]>(`/model-governance/releases?template_key=${encodeURIComponent(templateKey)}`),
+  rollbackModelRelease: (id: string, comment: string) =>
+    request<ModelReleaseRecord>(`/model-governance/releases/${id}/rollback`, { method: "POST", body: JSON.stringify({ comment }) }),
+  modelMonitoringSummary: (templateKey: string) => request<MonitoringSummary>(`/model-governance/monitoring-summary?template_key=${encodeURIComponent(templateKey)}`),
+  modelOutcomes: (templateKey: string) => request<ModelOutcome[]>(`/model-governance/outcomes?template_key=${encodeURIComponent(templateKey)}`),
+  createModelOutcome: (payload: ModelOutcomePayload) =>
+    request<ModelOutcome>("/model-governance/outcomes", { method: "POST", body: JSON.stringify(payload) }),
+  createModelOutcomesBatch: (outcomes: ModelOutcomePayload[]) =>
+    request<{ total: number; created: number; idempotent: number; rejected: number; results: Array<{ index: number; external_observation_id: string; status: "created" | "idempotent" | "rejected"; outcome_id: string | null; error: string | null }> }>("/model-governance/outcomes/batch", { method: "POST", body: JSON.stringify({ outcomes }) }),
+  outcomeImports: (templateKey: string) => request<ModelOutcomeImport[]>(`/model-governance/outcome-imports?template_key=${encodeURIComponent(templateKey)}`),
+  createOutcomeImport: (payload: { import_key: string; source: string; template_key: string; population_period: string; expected_count: number; outcomes: ModelOutcomePayload[] }) =>
+    request<ModelOutcomeImport>("/model-governance/outcome-imports", { method: "POST", body: JSON.stringify(payload) }),
+  verifyModelOutcome: (id: string, rowVersion: number, decision: "verify" | "reject", note: string) =>
+    request<ModelOutcome>(`/model-governance/outcomes/${id}/verify`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, note }) }),
+  monitoringIssues: (templateKey: string) => request<MonitoringIssue[]>(`/model-governance/issues?template_key=${encodeURIComponent(templateKey)}`),
+  modelMonitoringRuns: (templateKey: string) => request<ModelMonitoringRun[]>(`/model-governance/runs?template_key=${encodeURIComponent(templateKey)}`),
+  executeModelMonitoringRun: (payload: { run_key: string; template_key: string; as_of_period: string; trigger_type: "manual" | "scheduled" }) =>
+    request<ModelMonitoringRun>("/model-governance/runs", { method: "POST", body: JSON.stringify(payload) }),
+  monitoringSchedules: (templateKey: string) => request<ModelMonitoringSchedule[]>(`/model-governance/schedules?template_key=${encodeURIComponent(templateKey)}`),
+  createMonitoringSchedule: (payload: { template_key: string; cadence: "monthly" | "quarterly"; timezone_name: "Asia/Shanghai" | "UTC"; enabled: boolean; next_run_at: string }) =>
+    request<ModelMonitoringSchedule>("/model-governance/schedules", { method: "POST", body: JSON.stringify(payload) }),
+  updateMonitoringSchedule: (id: string, payload: { expected_row_version: number; cadence: "monthly" | "quarterly"; timezone_name: "Asia/Shanghai" | "UTC"; enabled: boolean; next_run_at: string }) =>
+    request<ModelMonitoringSchedule>(`/model-governance/schedules/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  runDueMonitoringSchedules: (asOf = new Date().toISOString()) => request<MonitoringSchedulerTick>("/model-governance/schedules/run-due", { method: "POST", body: JSON.stringify({ as_of: asOf }) }),
+  governanceNotifications: (unreadOnly = false) => request<ModelGovernanceNotification[]>(`/model-governance/governance-notifications?unread_only=${unreadOnly}`),
+  readGovernanceNotification: (id: string) => request<ModelGovernanceNotification>(`/model-governance/governance-notifications/${id}/read`, { method: "POST" }),
+  scanMonitoringIssues: (templateKey: string) => request<MonitoringIssue[]>(`/model-governance/issues/scan?template_key=${encodeURIComponent(templateKey)}`, { method: "POST" }),
+  startMonitoringRemediation: (id: string, rowVersion: number, owner: string, plan: string, dueDays = 30) =>
+    request<MonitoringIssue>(`/model-governance/issues/${id}/remediation`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, owner, plan, due_days: dueDays }) }),
+  submitMonitoringRevalidation: (id: string, rowVersion: number, result: string) =>
+    request<MonitoringIssue>(`/model-governance/issues/${id}/submit-revalidation`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, result }) }),
+  reviewMonitoringRevalidation: (id: string, rowVersion: number, decision: "pass" | "fail", conclusion: string) =>
+    request<MonitoringIssue>(`/model-governance/issues/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, conclusion }) }),
+  linkMonitoringIssueChange: (id: string, rowVersion: number, changeId: string) =>
+    request<MonitoringIssue>(`/model-governance/issues/${id}/link-change`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, change_id: changeId }) }),
+  creditFacilities: () => request<CreditFacility[]>("/credit-facilities"),
+  creditFacility: (id: string) => request<CreditFacilityDetail>(`/credit-facilities/${id}`),
+  facilitySummary: () => request<FacilitySummary>("/credit-facilities/summary"),
+  facilityAlerts: () => request<FacilityAlert[]>("/credit-facilities/alerts"),
+  riskEvents: () => request<RiskEvent[]>("/credit-facilities/risk-events"),
+  transactFacility: (id: string, payload: { transaction_ref: string; transaction_type: "drawdown" | "repayment"; amount: number; expected_row_version: number; reason: string }) =>
+    request<{ facility: CreditFacility; idempotent: boolean }>(`/credit-facilities/${id}/transactions`, { method: "POST", body: JSON.stringify(payload) }),
+  reviewFacility: (id: string, payload: { expected_row_version: number; rating: string; next_review_days: number; conclusion: string }) =>
+    request<CreditFacility>(`/credit-facilities/${id}/reviews`, { method: "POST", body: JSON.stringify(payload) }),
+  scanFacilities: () => request<{ active_facilities_scanned: number; facilities_expired: number; alerts_opened: number }>("/credit-facilities/scan", { method: "POST" }),
+  acknowledgeFacilityAlert: (id: string) => request<FacilityAlert>(`/credit-facilities/alerts/${id}/acknowledge`, { method: "POST" }),
+  createRiskEvent: (id: string, payload: { external_event_id: string; event_type: string; source: string; severity: "warning" | "critical"; occurred_at: string; title: string; description: string; payload: Record<string, unknown> }) =>
+    request<{ risk_event: RiskEvent; alert: FacilityAlert; idempotent: boolean }>(`/credit-facilities/${id}/risk-events`, { method: "POST", body: JSON.stringify(payload) }),
+  controlFacility: (id: string, payload: { expected_row_version: number; action: "freeze" | "unfreeze" | "reduce_limit" | "close"; target_limit?: number; reason: string }) =>
+    request<CreditFacility>(`/credit-facilities/${id}/controls`, { method: "POST", body: JSON.stringify(payload) }),
+  disposeFacilityAlert: (id: string, payload: { expected_alert_version: number; expected_facility_version: number; action: "monitor" | "freeze" | "reduce_limit" | "close"; target_limit?: number; conclusion: string }) =>
+    request<{ alert: FacilityAlert; facility: CreditFacility }>(`/credit-facilities/alerts/${id}/dispose`, { method: "POST", body: JSON.stringify(payload) }),
+  documents: (counterpartyId?: string, caseId?: string) => {
+    const query = new URLSearchParams();
+    if (counterpartyId) query.set("counterparty_id", counterpartyId);
+    if (caseId) query.set("case_id", caseId);
+    return request<DocumentRecord[]>(`/documents${query.size ? `?${query}` : ""}`);
+  },
+  documentChecklist: (counterpartyId: string, templateKey: string, caseId?: string) => {
+    const query = new URLSearchParams({ counterparty_id: counterpartyId, template_key: templateKey });
+    if (caseId) query.set("case_id", caseId);
+    return request<DocumentChecklist>(`/documents/checklist?${query}`);
+  },
+  documentPrechecks: (counterpartyId?: string, caseId?: string) => {
+    const query = new URLSearchParams();
+    if (counterpartyId) query.set("counterparty_id", counterpartyId);
+    if (caseId) query.set("case_id", caseId);
+    return request<DocumentPrecheck[]>(`/documents/prechecks${query.size ? `?${query}` : ""}`);
+  },
+  documentCorrections: (counterpartyId?: string, caseId?: string) => {
+    const query = new URLSearchParams();
+    if (counterpartyId) query.set("counterparty_id", counterpartyId);
+    if (caseId) query.set("case_id", caseId);
+    return request<DocumentCorrection[]>(`/documents/corrections${query.size ? `?${query}` : ""}`);
+  },
+  uploadDocument: (counterpartyId: string, documentType: string, file: File, caseId?: string, correctionId?: string) => {
+    const body = new FormData();
+    body.set("counterparty_id", counterpartyId);
+    body.set("document_type", documentType);
+    if (caseId) body.set("case_id", caseId);
+    if (correctionId) body.set("correction_id", correctionId);
+    body.set("file", file);
+    return request<DocumentRecord>("/documents", { method: "POST", body });
+  },
+  reviewDocument: (documentId: string, payload: { expected_row_version: number; decision: "verify" | "needs_supplement" | "reject"; comment: string; checks: DocumentCheckResult[] }) =>
+    request<DocumentRecord>(`/documents/${documentId}/review`, { method: "POST", body: JSON.stringify(payload) }),
+  linkDocumentToCase: (documentId: string, caseId: string, expectedRowVersion: number) =>
+    request<DocumentRecord>(`/documents/${documentId}/case`, { method: "POST", body: JSON.stringify({ case_id: caseId, expected_row_version: expectedRowVersion }) }),
+  downloadDocument: async (document: DocumentRecord) => {
+    const response = await fetch(`${API_BASE}/documents/${document.id}/download`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!response.ok) throw new Error(`下载失败（${response.status}）`);
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = window.document.createElement("a");
+    anchor.href = url;
+    anchor.download = document.original_name;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
+  notifications: (unreadOnly = false) => request<NotificationRecord[]>(`/notifications?unread_only=${unreadOnly}`),
+  markNotificationRead: (id: string) => request<NotificationRecord>(`/notifications/${id}/read`, { method: "POST" }),
+  operationsSummary: () => request<OperationsSummary>("/operations/sla/summary"),
+  runSlaScan: () => request<SlaScanResult>("/operations/sla/scan", { method: "POST" }),
+};

@@ -4,10 +4,14 @@ __pycache__/
 *$py.class
 .Python
 .venv/
+node_modules/
 venv/
 env/
 .env
 .env.*
+!.env.example
+*.db
+supplier-risk-agent-demo/data/uploads/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -16,4 +20,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+*.tsbuildinfo
 .streamlit/secrets.toml
+supplier-risk-agent-demo/output/
+supplier-risk-agent-demo/tmp/

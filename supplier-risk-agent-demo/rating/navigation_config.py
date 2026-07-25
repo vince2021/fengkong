@@ -21,6 +21,10 @@ def build_navigation_groups() -> list[dict]:
             "pages": [
                 {"key": "sales_assets", "label": "获客资产"},
                 {"key": "pilot_workspace", "label": "试点工作台"},
+                {"key": "pilot_kickoff", "label": "启动包"},
+                {"key": "pilot_field_mapping", "label": "字段映射"},
+                {"key": "pilot_task_board", "label": "任务看板"},
+                {"key": "pilot_value_review", "label": "价值复盘"},
                 {"key": "delivery_package", "label": "交付包"},
             ],
         },
@@ -29,6 +33,7 @@ def build_navigation_groups() -> list[dict]:
             "description": "展示评级结果、企业详情、模型配置和配置影响预览。",
             "pages": [
                 {"key": "dashboard", "label": "评级驾驶舱"},
+                {"key": "approval_workflow", "label": "审批工作流"},
                 {"key": "counterparty_detail", "label": "企业评分详情"},
                 {"key": "model_config", "label": "模型配置中心"},
                 {"key": "rating_preview", "label": "评级结果预览"},

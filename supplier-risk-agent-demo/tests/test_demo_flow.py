@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 from rating.demo_flow import build_demo_flow
 from rating.detail_workbench import build_detail_workbench
 from rating.risk_intelligence import build_agent_timeline, build_counterparty_profile
+from rating.risk_screening_policy import DEFAULT_RISK_SCREENING_POLICY
 from rating.scorecard import rate_counterparty
 
 
@@ -36,7 +38,9 @@ class DemoFlowTest(unittest.TestCase):
         self.assertEqual(flow["final_outputs"][0]["交付物"], "客商信用评级审核报告")
 
     def test_review_step_reflects_when_manual_review_is_not_required(self) -> None:
-        config = self.templates["tech_enterprise_basic"]
+        config = deepcopy(self.templates["tech_enterprise_basic"])
+        config["risk_screening_policy"] = deepcopy(DEFAULT_RISK_SCREENING_POLICY)
+        config["risk_screening_policy"]["enabled"] = False
         counterparty = next(item for item in self.counterparties if item["id"] == "cp_tech_high_001")
         result = rate_counterparty(counterparty, config)
         profile = build_counterparty_profile(counterparty, result)

@@ -1,0 +1,209 @@
+{
+  "schema_version": "enterprise-raw-v1",
+  "profile_id": "raw-inalfa-guangzhou-20240815",
+  "as_of_date": "2024-08-15",
+  "entity": {
+    "name_cn": "英纳法汽车天窗系统（广州）有限公司",
+    "name_en": "Inalfa Roof Systems (Guangzhou) Co., Ltd.",
+    "unified_social_credit_code": "91440101MA5AW31D00",
+    "registration_number": "440125000416357",
+    "registration_status": "在营（开业）",
+    "established_date": "2018-05-23",
+    "operating_term": "2018-05-23 至无固定期限",
+    "legal_representative": "张兆贤",
+    "enterprise_type": "有限责任公司(外商投资企业法人独资)",
+    "registered_capital_cny": 27000000,
+    "paid_in_capital_cny": 27000000,
+    "employee_count": 150,
+    "enterprise_scale": "小型",
+    "listed": false,
+    "address": "广州市增城区石滩镇三江沙头村木棉仔",
+    "industry": {
+      "section_code": "C",
+      "division_code": "36",
+      "group_code": "367",
+      "class_code": "3670",
+      "name": "汽车零部件及配件制造"
+    }
+  },
+  "ownership": {
+    "shareholders": [
+      {
+        "name": "英纳法企业管理（上海）有限公司",
+        "unified_social_credit_code": "91310000310590667G",
+        "subscribed_capital_cny": 27000000,
+        "ownership_pct": 100.0,
+        "subscribed_date": "2018-11-30"
+      }
+    ],
+    "ultimate_parent": {
+      "name": "INALFA ROOF SYSTEMS GROUP B.V.",
+      "country": "荷兰"
+    },
+    "key_management": [
+      {"name": "莫亚荣", "position": "董事长"},
+      {"name": "张兆贤", "position": "董事兼总经理"},
+      {"name": "张海波", "position": "监事"},
+      {"name": "杨智", "position": "董事"}
+    ]
+  },
+  "operations": {
+    "business_summary": "汽车天窗系统及配套零部件生产与销售",
+    "production_lines": 3,
+    "annual_capacity_units": 300000,
+    "facility_area_sqm": 9500,
+    "domestic_sales_pct": 100.0,
+    "domestic_procurement_pct": 100.0,
+    "sales_regions": ["华南等地区"],
+    "named_customers": ["福建奔驰汽车有限公司", "东风汽车有限公司东风日产乘用车公司"],
+    "input_categories": ["五金配件", "玻璃", "粘胶剂", "生产设备"],
+    "customs_role": "进出口货物收发货人",
+    "customs_registration_date": "2018-11-12",
+    "patent_count": 9,
+    "qualification_count": 2,
+    "qualifications": [
+      {"name": "环境管理体系认证", "valid_to": "2026-11-02"},
+      {"name": "汽车行业质量管理体系认证", "valid_to": "2025-10-25"}
+    ]
+  },
+  "financial_statements": {
+    "currency": "CNY",
+    "unit": "万元",
+    "periods": [
+      {
+        "year": 2021,
+        "total_assets": 24907,
+        "total_liabilities": 17795,
+        "total_equity": 7112,
+        "revenue": 32309,
+        "total_profit": 3825,
+        "income_tax": 974,
+        "net_profit": 2851,
+        "debt_to_assets_pct": 71.45,
+        "net_profit_margin_pct": 8.82,
+        "return_on_equity_pct": 40.09,
+        "return_on_assets_pct": 15.36,
+        "total_asset_turnover": 1.30,
+        "sales_growth_pct": null,
+        "profit_growth_pct": null,
+        "capital_preservation_pct": null,
+        "asset_growth_pct": null
+      },
+      {
+        "year": 2022,
+        "total_assets": 26016,
+        "total_liabilities": 17099,
+        "total_equity": 8917,
+        "revenue": 22287,
+        "total_profit": 2224,
+        "income_tax": 419,
+        "net_profit": 1805,
+        "debt_to_assets_pct": 65.72,
+        "net_profit_margin_pct": 8.10,
+        "return_on_equity_pct": 22.52,
+        "return_on_assets_pct": 8.73,
+        "total_asset_turnover": 0.88,
+        "sales_growth_pct": -31.02,
+        "profit_growth_pct": -41.86,
+        "capital_preservation_pct": 125.38,
+        "asset_growth_pct": 4.45
+      },
+      {
+        "year": 2023,
+        "total_assets": 26015,
+        "total_liabilities": 16286,
+        "total_equity": 9729,
+        "revenue": 14636,
+        "total_profit": 1021,
+        "income_tax": 208,
+        "net_profit": 813,
+        "debt_to_assets_pct": 62.60,
+        "net_profit_margin_pct": 5.55,
+        "return_on_equity_pct": 8.72,
+        "return_on_assets_pct": 3.92,
+        "total_asset_turnover": 0.56,
+        "sales_growth_pct": -34.33,
+        "profit_growth_pct": -54.09,
+        "capital_preservation_pct": 109.11,
+        "asset_growth_pct": 0.00
+      }
+    ],
+    "derived_features": {
+      "three_year_weighting": {"2021": 0.20, "2022": 0.30, "2023": 0.50},
+      "weighted_revenue_wan_cny": 20465.9,
+      "weighted_total_profit_wan_cny": 1942.7,
+      "weighted_debt_to_assets_pct": 65.31,
+      "weighted_net_profit_margin_pct": 6.97,
+      "weighted_return_on_equity_pct": 19.13,
+      "weighted_total_asset_turnover": 0.80,
+      "two_year_weighted_sales_growth_pct": -33.34,
+      "two_year_weighting": {"2022": 0.30, "2023": 0.70},
+      "derivation_note": "三年值按 20%/30%/50%，仅两年有值的增长率按 30%/70%；口径来自《一般工商企业评级》中的跨期处理规则。"
+    }
+  },
+  "external_risk": {
+    "business_scope_change_count_last_year": 1,
+    "operating_abnormal_count": 0,
+    "serious_illegal_count": 0,
+    "admin_penalty_count": 0,
+    "tax_arrears_count": 0,
+    "tax_violation_count": 0,
+    "dishonesty_count": 0,
+    "enforcement_count": 0,
+    "equity_freeze_count": 0,
+    "bankruptcy_reorganization_count": 0,
+    "legal_case_count": 1,
+    "legal_case_amount_cny": null,
+    "legal_case_note": "报告披露一宗 2020 年劳动争议案件及两次同案开庭公告，未披露金额；不得把开庭公告数当作独立案件数。",
+    "tax_credit": {"2021": "A", "2022": "A", "2023": "A"},
+    "industry_risk": {
+      "year": 2022,
+      "nonperforming_rate_pct": 1.77,
+      "composite_index": 92.88,
+      "operating_index": 112.65,
+      "financial_index": 55.62,
+      "credit_index": 110.37,
+      "sp_industry_risk_level": 4
+    },
+    "report_rule_hits": [
+      {"severity": "提示信息", "rule": "近1年内经营范围变更次数≥1", "actual": 1},
+      {"severity": "中风险", "rule": "当期营业收入下降幅度≥30%", "actual_pct": -34.33},
+      {"severity": "中风险", "rule": "当期利润总额下降幅度≥30%", "actual_pct": -54.09},
+      {"severity": "中风险", "rule": "净利润率下降幅度≥30%", "actual_pct": -54.96}
+    ]
+  },
+  "external_benchmark": {
+    "provider": "中诚信征信",
+    "report_score": 49.58,
+    "report_rating": "C",
+    "suggested_credit_limit_cny": 0,
+    "suggested_trade_term": "现款交易",
+    "model_components": {
+      "basic_quality": 11.00,
+      "industry_region": 2.40,
+      "operation_management": 5.40,
+      "sustainable_development": 7.00,
+      "credit_protection": 15.40,
+      "corporate_governance": 11.25,
+      "risk_adjustment": -2.87
+    },
+    "usage": "仅作为外部基准标签与回放对照，不作为本平台模型训练真值。"
+  },
+  "internal_transaction_data": {
+    "status": "not_provided_in_source_materials",
+    "orders": null,
+    "receivables": null,
+    "overdue_receivables": null,
+    "payment_history": null,
+    "contract_disputes": null,
+    "requested_credit_limit": null,
+    "note": "会议纪要要求后续接入 ERP 的订单、应收、逾期和申请额度；本批材料没有英纳法对应的内部交易事实。"
+  },
+  "source_lineage": [
+    {"source_id": "credit-report", "file": "DD2408050046100611标准信用报告-英纳法汽车天窗系统（广州）有限公司-中文.pdf", "pages": "3-22", "usage": "企业事实、三年财务、风险事件、外部基准评级"},
+    {"source_id": "general-rating", "file": "一般工商企业评级.pdf", "pages": "3-14", "usage": "三级指标、权重、阈值、三年加权和经营/财务矩阵"},
+    {"source_id": "investment-model", "file": "股权、债权投资企业风险评估模型建设可…方案（终稿）.pdf", "pages": "9-44", "usage": "内外部数据目录、准入规则、AHP、预测模型验证与监控框架"},
+    {"source_id": "sp-methodology", "file": "解读标普信用评级（中国）工商企业评级方法论.pdf", "pages": "1-8", "usage": "行业风险、竞争地位、现金流杠杆、评级基准与调整因素"},
+    {"source_id": "meeting-minutes", "file": "【会议纪要】中石油技术开发_信控项目.docx", "pages": "1-3", "usage": "客户场景、ERP 内部数据、行业分模、额度与账期输出要求"}
+  ]
+}

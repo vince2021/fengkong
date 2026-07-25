@@ -44,10 +44,23 @@ def map_rating(total_score: float, strategy_mapping: list[dict]) -> str:
 
 
 def rate_counterparty(counterparty: dict, config: dict) -> dict:
+    if config.get("scorecard_type") == "corporate_credit_v2":
+        from rating.corporate_credit_scorecard import rate_corporate_credit
+
+        result = rate_corporate_credit(counterparty, config)
+
+        from rating.risk_screening_policy import apply_risk_screening_policy
+
+        return apply_risk_screening_policy(counterparty, config, result)
+
     if config.get("scorecard_type") == "tech_enterprise_basic":
         from rating.tech_scorecard import rate_tech_enterprise
 
-        return rate_tech_enterprise(counterparty, config)
+        result = rate_tech_enterprise(counterparty, config)
+
+        from rating.risk_screening_policy import apply_risk_screening_policy
+
+        return apply_risk_screening_policy(counterparty, config, result)
 
     is_valid, error = validate_weights(config["weights"])
     if not is_valid:
@@ -65,7 +78,7 @@ def rate_counterparty(counterparty: dict, config: dict) -> dict:
     final_strategy = apply_rule_actions(base_strategy, strong_rule_hits, counterparty)
     explanation_summary = split_explanations(dimension_result["explanations"])
 
-    return {
+    result = {
         "ok": True,
         "counterparty_id": counterparty["id"],
         "counterparty_name": counterparty["name"],
@@ -86,6 +99,10 @@ def rate_counterparty(counterparty: dict, config: dict) -> dict:
         "main_deductions": explanation_summary["main_deductions"],
         "main_positive_factors": explanation_summary["main_positive_factors"],
     }
+
+    from rating.risk_screening_policy import apply_risk_screening_policy
+
+    return apply_risk_screening_policy(counterparty, config, result)
 
 
 def rate_counterparties(counterparties: list[dict], config: dict) -> list[dict]:

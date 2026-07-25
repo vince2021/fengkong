@@ -26,12 +26,20 @@ def evaluate_condition(counterparty: dict, config: dict, condition: dict) -> boo
     operator = condition["operator"]
 
     if operator == ">":
+        if left is None or right is None:
+            return False
         return left > right
     if operator == ">=":
+        if left is None or right is None:
+            return False
         return left >= right
     if operator == "<":
+        if left is None or right is None:
+            return False
         return left < right
     if operator == "<=":
+        if left is None or right is None:
+            return False
         return left <= right
     if operator == "==":
         return left == right

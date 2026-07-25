@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rating.enterprise_indicator_pool import build_model_indicator_details
 from rating.models import DIMENSIONS
 
 
@@ -73,8 +74,27 @@ def build_model_overview(config: dict) -> dict:
 
 def build_indicator_library(config: dict) -> list[dict]:
     if config.get("scorecard_type") == "tech_enterprise_basic":
-        return _build_tech_indicator_library(config)
-    return _build_general_indicator_library(config)
+        native_rows = _build_tech_indicator_library(config)
+    elif config.get("scorecard_type") == "corporate_credit_v2":
+        native_rows = _build_corporate_indicator_library(config)
+    else:
+        native_rows = _build_general_indicator_library(config)
+    return native_rows + _build_enterprise_risk_pool_rows(config)
+
+
+def _build_enterprise_risk_pool_rows(config: dict) -> list[dict]:
+    return [
+        {
+            "指标类型": f"企业风险池 / {item['category']}",
+            "指标名称": item["name"],
+            "数据来源": item["data_source"],
+            "配置项": f"{item['field_path']} / 相对权重 {item['model_weight']:g}",
+            "当前配置": item["scoring"]["formula"],
+            "解释口径": f"{item['statistics_period']}；1 分高风险、2 分关注或缺失、3 分低风险",
+            "状态": "启用" if item["enabled"] else "停用",
+        }
+        for item in build_model_indicator_details(config)
+    ]
 
 
 def build_rule_matrix(config: dict) -> list[dict]:
@@ -128,14 +148,14 @@ def build_strategy_matrix(config: dict) -> list[dict]:
 
 def _build_general_indicator_library(config: dict) -> list[dict]:
     rows = []
-    for key, label in DIMENSIONS.items():
+    for key, weight in config.get("weights", {}).items():
         rows.append(
             {
                 "指标类型": "一级维度",
-                "指标名称": label,
+                "指标名称": DIMENSIONS.get(key, key),
                 "数据来源": _dimension_source(key),
                 "配置项": "权重",
-                "当前配置": f"{config['weights'][key]:.0%}",
+                "当前配置": f"{weight:.0%}",
                 "解释口径": "按维度得分加权进入总分",
                 "状态": "启用",
             }
@@ -152,6 +172,37 @@ def _build_general_indicator_library(config: dict) -> list[dict]:
                 "状态": "启用",
             }
         )
+    return rows
+
+
+def _build_corporate_indicator_library(config: dict) -> list[dict]:
+    rows = []
+    for key, weight in config.get("weights", {}).items():
+        rows.append(
+            {
+                "指标类型": "决策层",
+                "指标名称": DIMENSIONS.get(key, key),
+                "数据来源": "子模型/矩阵",
+                "配置项": "决策层权重",
+                "当前配置": f"{weight:.0%}",
+                "解释口径": "业务与财务先形成矩阵锚点，再与外部信用、交易行为合成",
+                "状态": "启用",
+            }
+        )
+    for dimension in config["indicator_model"]["dimensions"].values():
+        for group in dimension["groups"]:
+            for indicator in group["indicators"]:
+                rows.append(
+                    {
+                        "指标类型": dimension["label"],
+                        "指标名称": indicator["label"],
+                        "数据来源": indicator.get("source", "待配置"),
+                        "配置项": f"{group['label']} / {indicator['path']}",
+                        "当前配置": f"组权重 {group['weight']:.0%}，指标权重 {indicator['weight']:.0%}",
+                        "解释口径": f"{indicator['scoring']['type']} 分箱；缺失按中性分并降低完整度",
+                        "状态": "启用",
+                    }
+                )
     return rows
 
 
@@ -194,6 +245,8 @@ def _tech_rows(indicator_type: str, rules: dict, labels: dict) -> list[dict]:
 def _scorecard_type_label(config: dict) -> str:
     if config.get("scorecard_type") == "tech_enterprise_basic":
         return "科创企业基本评价模型"
+    if config.get("scorecard_type") == "corporate_credit_v2":
+        return "分层矩阵工商企业模型"
     return "通用加权评分模型"
 
 

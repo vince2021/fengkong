@@ -178,6 +178,7 @@ def _calculate_deduction_items(profile: dict, rules: dict) -> list[dict]:
 
 
 def _calculate_support_data_items(counterparty: dict, profile: dict) -> list[dict]:
+    revenue_growth_exempt = profile.get("cfda_new_drug_rd_enterprise") is True
     checks = [
         ("注册地粤港澳大湾区九市企业", profile.get("gba_registration") is True),
         ("成立一年以上", counterparty.get("external", {}).get("established_years", 0) >= 1),
@@ -185,13 +186,23 @@ def _calculate_support_data_items(counterparty: dict, profile: dict) -> list[dic
         ("核心研发人员占比 ≥10%", profile.get("rd_staff_ratio", 0) >= 0.1),
         ("主营业务收入 ≥1000 万元", profile.get("main_business_revenue", 0) >= 10000000),
         ("最近一期净资产 ≥1000 万元", profile.get("latest_net_assets", 0) >= 10000000),
-        ("最近一年营业收入增长率 ≥20%", profile.get("revenue_growth_rate", 0) >= 0.2),
+        (
+            "最近一年营业收入增长率 ≥20%（CFDA 认证的新药研发企业除外）",
+            revenue_growth_exempt or profile.get("revenue_growth_rate", 0) >= 0.2,
+        ),
         ("企业资产负债率 ≤70%", profile.get("asset_liability_ratio", 1) <= 0.7),
         ("毛利率 ≥30%", profile.get("gross_margin", 0) >= 0.3),
         ("现金储备/年三项费用 ≥1", profile.get("cash_reserve_to_three_expenses", 0) >= 1),
         ("研发费用占当年收入 ≥5%", profile.get("rd_expense_revenue_ratio_current", 0) >= 0.05),
     ]
-    return [{"indicator": name, "passed": passed} for name, passed in checks]
+    return [
+        {
+            "indicator": name,
+            "passed": passed,
+            "evidence": "适用 CFDA 新药研发企业豁免" if "CFDA" in name and revenue_growth_exempt else None,
+        }
+        for name, passed in checks
+    ]
 
 
 def _map_limit(total_score: float, limit_mapping: list[dict]) -> dict:

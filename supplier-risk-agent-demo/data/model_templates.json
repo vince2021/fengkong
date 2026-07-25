@@ -205,6 +205,187 @@
       "created_at": "2026-07-11 18:00:00",
       "change_reason": "初始化通用模板"
     },
+    "corporate_credit_v2": {
+      "extends": "general",
+      "version": "CORP-20260714-001",
+      "name": "材料增强型工商企业信用模型",
+      "scorecard_type": "corporate_credit_v2",
+      "change_reason": "融合工商企业评级、标普业务财务矩阵、投资风险模型及信控会议纪要，新增分层运算、缺失完整度与交易策略",
+      "weights": {
+        "business_financial_anchor": 0.65,
+        "external_credit": 0.2,
+        "transaction_behavior": 0.15
+      },
+      "thresholds": {
+        "major_litigation_amount": 5000000,
+        "dishonesty_count": 0,
+        "enforcement_count": 0,
+        "revenue_decline_pct": -30,
+        "profit_decline_pct": -30,
+        "debt_to_assets_high_pct": 80,
+        "transaction_complete": 1
+      },
+      "strong_rules": [
+        {
+          "id": "CR-001",
+          "name": "主体异常或终止经营禁入",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "external.registration_status", "operator": "not_in", "value": ["存续", "在业", "在营（开业）"], "label": "主体不处于正常经营状态"}],
+          "action": {"rating_override": "D", "access_strategy": "禁入", "limit_multiplier_cap": 0, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "禁入客商", "score_adjustment": -20, "severity": "重大风险"}
+        },
+        {
+          "id": "CR-002",
+          "name": "失信或被执行禁入",
+          "enabled": true,
+          "condition_relation": "any",
+          "conditions": [
+            {"field": "external.dishonesty_count", "operator": ">", "value_ref": "thresholds.dishonesty_count", "label": "存在失信被执行记录"},
+            {"field": "external.enforcement_count", "operator": ">", "value_ref": "thresholds.enforcement_count", "label": "存在被执行记录"}
+          ],
+          "action": {"rating_override": "D", "access_strategy": "禁入", "limit_multiplier_cap": 0, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "禁入客商", "score_adjustment": -20, "severity": "重大风险"}
+        },
+        {
+          "id": "CR-101",
+          "name": "营业收入显著下降",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "corporate_profile.operations.sales_growth_pct", "operator": "<=", "value_ref": "thresholds.revenue_decline_pct", "label": "跨期营业收入下降达到30%"}],
+          "action": {"score_adjustment": -2, "review_required": true, "severity": "中风险"}
+        },
+        {
+          "id": "CR-102",
+          "name": "利润显著下降",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "corporate_profile.operations.profit_growth_pct", "operator": "<=", "value_ref": "thresholds.profit_decline_pct", "label": "跨期利润总额下降达到30%"}],
+          "action": {"score_adjustment": -2, "review_required": true, "severity": "中风险"}
+        },
+        {
+          "id": "CR-103",
+          "name": "净利率显著下降",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "corporate_profile.financial.net_profit_margin_change_pct", "operator": "<=", "value_ref": "thresholds.profit_decline_pct", "label": "净利润率下降达到30%"}],
+          "action": {"score_adjustment": -2, "review_required": true, "severity": "中风险"}
+        },
+        {
+          "id": "CR-201",
+          "name": "内部交易资料不完整",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": false, "label": "订单、应收、逾期或回款资料未完整接入"}],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.2, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "重点监控", "severity": "数据质量"}
+        }
+      ],
+      "credit_policy": {
+        "revenue_limit_pct_by_rating": {"AAA": 0.08, "AA": 0.06, "A": 0.04, "BBB": 0.025, "BB": 0.015, "B": 0.0, "D": 0.0},
+        "order_amount_multiplier": 0.25,
+        "missing_request_policy": "未提供申请额度时不自动建议信用额度",
+        "missing_transaction_policy": "内部交易数据不完整时仅允许人工复核并收紧账期"
+      },
+      "indicator_model": {
+        "risk_band_cutoffs": [85, 75, 65, 55, 40],
+        "business_financial_matrix": [
+          [98, 94, 89, 82, 74, 66],
+          [94, 90, 84, 78, 70, 62],
+          [89, 84, 79, 73, 65, 56],
+          [82, 78, 73, 67, 58, 49],
+          [74, 70, 65, 58, 50, 40],
+          [66, 62, 56, 49, 40, 28]
+        ],
+        "risk_adjustment_range": [-20, 10],
+        "review_completeness_threshold": 0.75,
+        "completeness_weights": {"business_risk": 0.25, "financial_risk": 0.35, "external_credit": 0.2, "transaction_behavior": 0.2},
+        "dimensions": {
+          "business_risk": {
+            "label": "业务风险",
+            "groups": [
+              {"id": "industry", "label": "行业环境", "weight": 0.2, "indicators": [
+                {"label": "行业风险档位", "path": "corporate_profile.business.industry_risk_level", "unit": "档", "weight": 1.0, "source": "标普方法论/行业数据", "scoring": {"type": "lower_better", "cutoffs": [[1,100],[2,85],[3,70],[4,55],[5,35]], "floor_score": 20}}
+              ]},
+              {"id": "competitiveness", "label": "规模与竞争力", "weight": 0.25, "indicators": [
+                {"label": "资产总额", "path": "corporate_profile.business.total_assets_yi", "unit": "亿元", "weight": 0.3, "source": "信用报告/一般工商模型", "scoring": {"type": "higher_better", "cutoffs": [[400,100],[250,85],[150,70],[80,55],[20,40]], "floor_score": 20}},
+                {"label": "营业收入", "path": "corporate_profile.business.revenue_yi", "unit": "亿元", "weight": 0.3, "source": "信用报告/一般工商模型", "scoring": {"type": "higher_better", "cutoffs": [[300,100],[120,85],[50,70],[20,55],[10,40]], "floor_score": 20}},
+                {"label": "专利储备", "path": "corporate_profile.business.patent_count", "unit": "项", "weight": 0.2, "source": "信用报告/投资风险模型", "scoring": {"type": "higher_better", "cutoffs": [[50,100],[20,85],[10,70],[5,55],[1,40]], "floor_score": 20}},
+                {"label": "资质认证", "path": "corporate_profile.business.qualification_count", "unit": "项", "weight": 0.2, "source": "信用报告", "scoring": {"type": "higher_better", "cutoffs": [[5,100],[3,85],[2,70],[1,55]], "floor_score": 30}}
+              ]},
+              {"id": "operations", "label": "经营效率与趋势", "weight": 0.3, "indicators": [
+                {"label": "总资产周转次数", "path": "corporate_profile.operations.total_asset_turnover", "unit": "次", "weight": 0.35, "source": "信用报告/一般工商模型", "scoring": {"type": "higher_better", "cutoffs": [[0.8,100],[0.55,85],[0.35,70],[0.25,55],[0.15,40],[0.1,25]], "floor_score": 10}},
+                {"label": "营业收入增长率", "path": "corporate_profile.operations.sales_growth_pct", "unit": "%", "weight": 0.35, "source": "信用报告", "scoring": {"type": "higher_better", "cutoffs": [[20,100],[10,85],[0,70],[-10,55],[-30,35]], "floor_score": 10}},
+                {"label": "利润增长率", "path": "corporate_profile.operations.profit_growth_pct", "unit": "%", "weight": 0.3, "source": "信用报告", "scoring": {"type": "higher_better", "cutoffs": [[20,100],[10,85],[0,70],[-10,55],[-30,35]], "floor_score": 10}}
+              ]},
+              {"id": "governance", "label": "治理与支持", "weight": 0.25, "indicators": [
+                {"label": "成立年限", "path": "external.established_years", "unit": "年", "weight": 0.35, "source": "工商信息/投资风险模型", "scoring": {"type": "higher_better", "cutoffs": [[20,100],[10,85],[5,70],[3,55],[1,35]], "floor_score": 20}},
+                {"label": "集团股东支持", "path": "corporate_profile.governance.group_support", "weight": 0.4, "source": "股权穿透/一般工商模型", "scoring": {"type": "categorical", "scores": {"strong": 90, "adequate": 70, "limited": 45, "negative": 20}, "default": 50}},
+                {"label": "治理结构完整", "path": "corporate_profile.governance.structure_complete", "weight": 0.25, "source": "工商信息", "scoring": {"type": "boolean", "true_score": 80, "false_score": 35}}
+              ]}
+            ]
+          },
+          "financial_risk": {
+            "label": "财务风险",
+            "groups": [
+              {"id": "profitability", "label": "盈利能力", "weight": 0.3, "indicators": [
+                {"label": "利润总额", "path": "corporate_profile.financial.total_profit_yi", "unit": "亿元", "weight": 0.3, "source": "信用报告/一般工商模型", "scoring": {"type": "higher_better", "cutoffs": [[15,100],[10,85],[5,70],[3,55],[0,40],[-5,20]], "floor_score": 10}},
+                {"label": "净利润率", "path": "corporate_profile.financial.net_profit_margin_pct", "unit": "%", "weight": 0.35, "source": "信用报告", "scoring": {"type": "higher_better", "cutoffs": [[22,100],[16,85],[11,70],[7,55],[5,40],[3,25]], "floor_score": 10}},
+                {"label": "净资产收益率", "path": "corporate_profile.financial.return_on_equity_pct", "unit": "%", "weight": 0.35, "source": "信用报告/一般工商模型", "scoring": {"type": "higher_better", "cutoffs": [[9,100],[6,85],[2,70],[-5,55],[-10,40],[-20,25]], "floor_score": 10}}
+              ]},
+              {"id": "capital", "label": "资本结构", "weight": 0.25, "indicators": [
+                {"label": "资产负债率", "path": "corporate_profile.financial.debt_to_assets_pct", "unit": "%", "weight": 1.0, "source": "信用报告/一般工商模型", "scoring": {"type": "lower_better", "cutoffs": [[55,100],[65,85],[70,70],[75,55],[80,40],[85,25]], "floor_score": 10}}
+              ]},
+              {"id": "asset_quality", "label": "资产质量", "weight": 0.15, "indicators": [
+                {"label": "资产增长率", "path": "corporate_profile.financial.asset_growth_pct", "unit": "%", "weight": 0.35, "source": "信用报告", "scoring": {"type": "higher_better", "cutoffs": [[15,100],[8,85],[3,70],[0,55],[-10,35]], "floor_score": 15}},
+                {"label": "资本保值增值率", "path": "corporate_profile.financial.capital_preservation_pct", "unit": "%", "weight": 0.3, "source": "信用报告", "scoring": {"type": "higher_better", "cutoffs": [[120,100],[110,85],[100,70],[90,50],[80,30]], "floor_score": 15}},
+                {"label": "总资产周转次数", "path": "corporate_profile.operations.total_asset_turnover", "unit": "次", "weight": 0.35, "source": "信用报告/一般工商模型", "scoring": {"type": "higher_better", "cutoffs": [[0.8,100],[0.55,85],[0.35,70],[0.25,55],[0.15,40],[0.1,25]], "floor_score": 10}}
+              ]},
+              {"id": "cashflow_solvency", "label": "现金流与偿债", "weight": 0.3, "indicators": [
+                {"label": "现金类资产/短期债务", "path": "corporate_profile.financial.cash_to_short_debt", "unit": "倍", "weight": 0.25, "source": "待补充财务报表", "scoring": {"type": "higher_better", "cutoffs": [[2,100],[1.5,85],[1,70],[0.5,45],[0.2,25]], "floor_score": 10}},
+                {"label": "EBITDA利息倍数", "path": "corporate_profile.financial.ebitda_interest_coverage", "unit": "倍", "weight": 0.25, "source": "待补充财务报表", "scoring": {"type": "higher_better", "cutoffs": [[10,100],[6,85],[3,70],[2,50],[1,30]], "floor_score": 10}},
+                {"label": "债务/EBITDA", "path": "corporate_profile.financial.debt_to_ebitda", "unit": "倍", "weight": 0.25, "source": "标普方法论/待补充", "scoring": {"type": "lower_better", "cutoffs": [[1.5,100],[2.5,85],[4,70],[6,50],[8,30]], "floor_score": 10}},
+                {"label": "FFO/债务", "path": "corporate_profile.financial.ffo_to_debt_pct", "unit": "%", "weight": 0.25, "source": "标普方法论/待补充", "scoring": {"type": "higher_better", "cutoffs": [[60,100],[40,85],[20,70],[10,50],[5,30]], "floor_score": 10}}
+              ]}
+            ]
+          },
+          "external_credit": {
+            "label": "外部信用",
+            "groups": [
+              {"id": "registry", "label": "主体与税务", "weight": 0.3, "indicators": [
+                {"label": "主体正常经营", "path": "corporate_profile.external.normal_operation", "weight": 0.55, "source": "工商信息", "scoring": {"type": "boolean", "true_score": 100, "false_score": 0}},
+                {"label": "纳税信用等级", "path": "external.tax_credit_level", "weight": 0.45, "source": "税务信用", "scoring": {"type": "categorical", "scores": {"A": 100, "B": 75, "C": 45, "D": 15}, "default": 50}}
+              ]},
+              {"id": "judicial", "label": "司法信用", "weight": 0.35, "indicators": [
+                {"label": "失信记录", "path": "external.dishonesty_count", "unit": "条", "weight": 0.4, "source": "司法信息", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,20]], "floor_score": 0}},
+                {"label": "被执行记录", "path": "external.enforcement_count", "unit": "条", "weight": 0.35, "source": "司法信息", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,25]], "floor_score": 0}},
+                {"label": "涉诉案件", "path": "external.legal_cases_count", "unit": "宗", "weight": 0.25, "source": "司法信息", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,85],[3,65],[5,45],[10,25]], "floor_score": 10}}
+              ]},
+              {"id": "compliance", "label": "经营合规", "weight": 0.2, "indicators": [
+                {"label": "经营异常", "path": "external.operating_abnormal_count", "unit": "条", "weight": 0.5, "source": "工商信息", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,55],[3,25]], "floor_score": 10}},
+                {"label": "行政处罚", "path": "external.admin_penalty_count", "unit": "条", "weight": 0.5, "source": "公共信用", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,70],[3,40],[5,20]], "floor_score": 10}}
+              ]},
+              {"id": "association", "label": "关联与股权", "weight": 0.15, "indicators": [
+                {"label": "股权冻结", "path": "external.equity_freeze_count", "unit": "条", "weight": 0.5, "source": "司法信息", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,45],[3,20]], "floor_score": 5}},
+                {"label": "关联方高风险", "path": "external.related_party_high_risk", "weight": 0.5, "source": "股权穿透", "scoring": {"type": "boolean", "true_score": 20, "false_score": 100}}
+              ]}
+            ]
+          },
+          "transaction_behavior": {
+            "label": "交易行为",
+            "groups": [
+              {"id": "performance", "label": "履约与质量", "weight": 0.45, "indicators": [
+                {"label": "交付达成率", "path": "internal.delivery_fulfillment_rate", "unit": "%", "weight": 0.4, "source": "ERP/合同", "scoring": {"type": "higher_better", "cutoffs": [[0.98,100],[0.95,85],[0.9,70],[0.8,45]], "floor_score": 20}},
+                {"label": "发票匹配率", "path": "internal.invoice_match_rate", "unit": "%", "weight": 0.3, "source": "ERP/财务", "scoring": {"type": "higher_better", "cutoffs": [[0.98,100],[0.95,85],[0.9,70],[0.8,45]], "floor_score": 20}},
+                {"label": "合同争议次数", "path": "internal.contract_dispute_count", "unit": "次", "weight": 0.3, "source": "合同系统", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[1,75],[2,45],[4,20]], "floor_score": 10}}
+              ]},
+              {"id": "receivables", "label": "应收与回款", "weight": 0.55, "indicators": [
+                {"label": "逾期率", "path": "financial.overdue_rate", "unit": "%", "weight": 0.4, "source": "ERP/应收", "scoring": {"type": "lower_better", "cutoffs": [[0,100],[0.03,85],[0.1,65],[0.2,35]], "floor_score": 10}},
+                {"label": "平均回款周期", "path": "financial.avg_collection_days", "unit": "天", "weight": 0.3, "source": "ERP/应收", "scoring": {"type": "lower_better", "cutoffs": [[30,100],[45,85],[60,70],[90,45],[120,25]], "floor_score": 10}},
+                {"label": "额度使用率", "path": "financial.limit_utilization_rate", "unit": "%", "weight": 0.3, "source": "授信系统", "scoring": {"type": "lower_better", "cutoffs": [[0.5,100],[0.7,85],[0.85,70],[1,45]], "floor_score": 20}}
+              ]}
+            ]
+          }
+        }
+      }
+    },
     "pharma": {
       "extends": "general",
       "name": "医药流通行业模板",
@@ -375,8 +556,14 @@
           }
         }
       ],
-      "tech_scorecard": {
-        "base_max_score": 100,
+    "tech_scorecard": {
+      "methodology": {
+        "source_document": "科创企业基本评价模型.docx",
+        "source_location": "产品/工作/面客材料",
+        "evidence_requirement": "每项实际评分均需提供佐证材料或依据",
+        "score_formula": "总分=基础评分+加分项+减分项"
+      },
+      "base_max_score": 100,
         "bonus_max_score": 90,
         "deduction_min_score": -80,
         "base_modules": [
