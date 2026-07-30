@@ -23,6 +23,10 @@ class ApprovalCaseRecord(Base):
     row_version: Mapped[int] = mapped_column(Integer, default=1)
     stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     stage_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    assigned_to: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    assigned_to_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assignment_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -108,6 +112,131 @@ class ModelReleaseRecord(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     published_by: Mapped[str] = mapped_column(String(128))
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class CreditAuthorityPolicyRecord(Base):
+    __tablename__ = "credit_authority_policies"
+    __table_args__ = (
+        Index("ix_authority_policies_status_created", "status", "created_at"),
+        Index(
+            "uq_authority_policies_one_active",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active IS TRUE"),
+        ),
+        Index(
+            "uq_authority_policies_one_scheduled",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'scheduled'"),
+            postgresql_where=text("status = 'scheduled'"),
+        ),
+        UniqueConstraint("policy_version", name="uq_authority_policy_version"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    policy_version: Mapped[str] = mapped_column(String(128), index=True)
+    base_policy_version: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    config_json: Mapped[dict] = mapped_column(JSON)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    impact_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    impact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    impact_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    restore_source_policy_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    restore_source_policy_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    change_reason: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    schedule_cancelled_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    schedule_cancelled_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    schedule_cancel_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class AuthorityPolicyActivationRunRecord(Base):
+    __tablename__ = "authority_policy_activation_runs"
+    __table_args__ = (
+        Index("ix_authority_activation_runs_status_created", "status", "created_at"),
+        Index("ix_authority_activation_runs_incident_created", "incident_status", "created_at"),
+        UniqueConstraint("run_key", name="uq_authority_activation_run_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_key: Mapped[str] = mapped_column(String(128), index=True)
+    trigger_type: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    scheduled_policy_id: Mapped[str | None] = mapped_column(ForeignKey("credit_authority_policies.id"), nullable=True, index=True)
+    scheduled_policy_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    scheduled_effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    active_policy_before: Mapped[str] = mapped_column(String(128))
+    active_policy_after: Mapped[str] = mapped_column(String(128))
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    incident_status: Mapped[str] = mapped_column(String(32), default="not_applicable", index=True)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acknowledged_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledgement_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolved_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_of_run_id: Mapped[str | None] = mapped_column(ForeignKey("authority_policy_activation_runs.id"), nullable=True, index=True)
+    resolved_by_run_id: Mapped[str | None] = mapped_column(ForeignKey("authority_policy_activation_runs.id"), nullable=True)
+    actor_subject: Mapped[str] = mapped_column(String(128))
+    actor_name: Mapped[str] = mapped_column(String(128))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class AuthorityPolicyEvidenceAnchorRecord(Base):
+    __tablename__ = "authority_policy_evidence_anchors"
+    __table_args__ = (
+        Index("ix_authority_evidence_anchors_policy_issued", "policy_id", "issued_at"),
+        UniqueConstraint("anchor_hash", name="uq_authority_policy_evidence_anchors_anchor_hash"),
+        UniqueConstraint("policy_id", "package_hash", name="uq_authority_evidence_anchor_policy_package"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    policy_id: Mapped[str] = mapped_column(ForeignKey("credit_authority_policies.id"), index=True)
+    policy_version: Mapped[str] = mapped_column(String(128), index=True)
+    schema_version: Mapped[str] = mapped_column(String(64))
+    package_json: Mapped[dict] = mapped_column(JSON)
+    package_hash: Mapped[str] = mapped_column(String(64), index=True)
+    anchor_hash: Mapped[str] = mapped_column(String(64))
+    integrity_passed: Mapped[bool] = mapped_column(Boolean, index=True)
+    issued_by: Mapped[str] = mapped_column(String(128), index=True)
+    issued_by_name: Mapped[str] = mapped_column(String(128))
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    revoked_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
 
 
 class ModelOutcomeRecord(Base):
@@ -525,6 +654,7 @@ class DocumentCorrectionRecord(Base):
     __tablename__ = "document_corrections"
     __table_args__ = (
         Index("ix_document_corrections_scope_status", "counterparty_id", "case_id", "status", "created_at"),
+        Index("ix_document_corrections_sla_status", "status", "sla_due_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -541,6 +671,17 @@ class DocumentCorrectionRecord(Base):
     requested_by: Mapped[str] = mapped_column(String(128), index=True)
     requested_by_name: Mapped[str] = mapped_column(String(128))
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    assigned_role: Mapped[str] = mapped_column(String(64), index=True)
+    assigned_to: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    assigned_to_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assignment_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sla_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    sla_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    reminder_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extension_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_extension_hours: Mapped[int] = mapped_column(Integer, default=0)
     resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     resolved_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -555,18 +696,21 @@ class NotificationRecord(Base):
     __tablename__ = "notifications"
     __table_args__ = (
         Index("ix_notifications_role_status_created", "recipient_role", "status", "created_at"),
+        Index("ix_notifications_subject_status_created", "recipient_subject", "status", "created_at"),
         UniqueConstraint("dedup_key", name="uq_notifications_dedup_key"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    case_id: Mapped[str] = mapped_column(ForeignKey("approval_cases.case_id"), index=True)
-    counterparty_id: Mapped[str] = mapped_column(String(128), index=True)
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("approval_cases.case_id"), index=True, nullable=True)
+    counterparty_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
     recipient_role: Mapped[str] = mapped_column(String(64), index=True)
+    recipient_subject: Mapped[str | None] = mapped_column(String(128), nullable=True)
     category: Mapped[str] = mapped_column(String(32), index=True)
     level: Mapped[str] = mapped_column(String(32), index=True)
     severity: Mapped[str] = mapped_column(String(16), index=True)
     title: Mapped[str] = mapped_column(String(255))
     message: Mapped[str] = mapped_column(Text)
+    action_json: Mapped[dict] = mapped_column(JSON, default=dict)
     dedup_key: Mapped[str] = mapped_column(String(512), unique=True)
     status: Mapped[str] = mapped_column(String(16), default="unread", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

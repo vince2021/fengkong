@@ -18,12 +18,12 @@ OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", f"{OIDC_ISSUER.rstrip('/')}/protocol/
 
 ROLE_PERMISSIONS = {
     "client": {"documents:upload", "documents:view", "approvals:view", "approvals:act", "notifications:view", "notifications:act", "facilities:view", "indicator_data:view", "indicator_data:manage"},
-    "relationship_manager": {"counterparties:view", "documents:upload", "documents:view", "approvals:create", "approvals:view", "approvals:act", "ratings:run", "ratings:view", "models:view", "notifications:view", "notifications:act", "facilities:view", "facilities:transact", "risk_events:create", "reports:view", "data_governance:view", "data_governance:import", "data_governance:resolve", "indicator_data:view", "indicator_data:manage"},
-    "risk_manager": {"counterparties:view", "documents:view", "documents:review", "approvals:view", "approvals:act", "ratings:run", "ratings:view", "models:view", "models:review", "audit:view", "notifications:view", "notifications:act", "operations:view", "facilities:view", "facilities:review", "facilities:scan", "facilities:control", "facility_alerts:act", "risk_events:create", "reports:view", "reports:generate", "decisions:view", "data_governance:view", "data_governance:import", "data_governance:resolve", "data_governance:review", "indicator_data:view", "indicator_data:manage", "indicator_data:review"},
-    "model_admin": {"counterparties:view", "approvals:view", "approvals:act", "ratings:run", "ratings:view", "models:view", "models:manage", "notifications:view", "notifications:act", "data_governance:view", "indicator_data:view", "indicator_data:manage"},
-    "approver": {"counterparties:view", "documents:view", "documents:review", "approvals:view", "approvals:act", "ratings:view", "models:view", "notifications:view", "notifications:act", "facilities:view", "facilities:control", "facility_alerts:act", "reports:view", "reports:generate", "decisions:view", "data_governance:view", "data_governance:review", "indicator_data:view", "indicator_data:review"},
-    "auditor": {"counterparties:view", "documents:view", "approvals:view", "ratings:view", "models:view", "audit:view", "operations:view", "facilities:view", "reports:view", "decisions:view", "data_governance:view", "indicator_data:view"},
-    "operations": {"approvals:view", "audit:view", "notifications:view", "notifications:act", "operations:view", "sla:scan", "facilities:view", "facilities:transact", "facilities:scan", "facility_alerts:act", "risk_events:create"},
+    "relationship_manager": {"counterparties:view", "documents:upload", "documents:view", "approvals:create", "approvals:view", "approvals:act", "ratings:run", "ratings:view", "models:view", "notifications:view", "notifications:act", "facilities:view", "facilities:transact", "risk_events:create", "reports:view", "data_governance:view", "data_governance:import", "data_governance:resolve", "indicator_data:view", "indicator_data:manage", "authority_policy:view"},
+    "risk_manager": {"counterparties:view", "documents:view", "documents:review", "approvals:view", "approvals:act", "ratings:run", "ratings:view", "models:view", "models:review", "audit:view", "notifications:view", "notifications:act", "operations:view", "facilities:view", "facilities:review", "facilities:scan", "facilities:control", "facility_alerts:act", "risk_events:create", "reports:view", "reports:generate", "decisions:view", "data_governance:view", "data_governance:import", "data_governance:resolve", "data_governance:review", "indicator_data:view", "indicator_data:manage", "indicator_data:review", "authority_policy:view", "authority_policy:review", "authority_policy:anchor", "authority_policy:anchor_revoke"},
+    "model_admin": {"counterparties:view", "approvals:view", "approvals:act", "ratings:run", "ratings:view", "models:view", "models:manage", "notifications:view", "notifications:act", "data_governance:view", "indicator_data:view", "indicator_data:manage", "authority_policy:view", "authority_policy:manage"},
+    "approver": {"counterparties:view", "documents:view", "documents:review", "approvals:view", "approvals:act", "ratings:view", "models:view", "notifications:view", "notifications:act", "facilities:view", "facilities:control", "facility_alerts:act", "reports:view", "reports:generate", "decisions:view", "data_governance:view", "data_governance:review", "indicator_data:view", "indicator_data:review", "authority_policy:view", "authority_policy:manage", "authority_policy:review"},
+    "auditor": {"counterparties:view", "documents:view", "approvals:view", "ratings:view", "models:view", "audit:view", "operations:view", "facilities:view", "reports:view", "decisions:view", "data_governance:view", "indicator_data:view", "authority_policy:view", "authority_policy:anchor", "authority_policy:anchor_revoke"},
+    "operations": {"approvals:view", "audit:view", "notifications:view", "notifications:act", "operations:view", "sla:scan", "corrections:act", "tasks:manage", "facilities:view", "facilities:transact", "facilities:scan", "facility_alerts:act", "risk_events:create"},
     "admin": {"*"},
 }
 
@@ -42,9 +42,11 @@ APPROVAL_STAGE_ROLES = {
 DEV_PRINCIPALS = {
     "dev-client": {"sub": "client-demo", "name": "演示客户", "roles": ["client"], "counterparty_id": "cp_supplier_low_001"},
     "dev-manager": {"sub": "manager-demo", "name": "客户经理", "roles": ["relationship_manager"]},
+    "dev-manager-peer": {"sub": "manager-peer-demo", "name": "客户经理乙", "roles": ["relationship_manager"]},
     "dev-risk": {"sub": "risk-demo", "name": "风控经理", "roles": ["risk_manager"]},
     "dev-model-admin": {"sub": "model-demo", "name": "模型管理员", "roles": ["model_admin"]},
     "dev-approver": {"sub": "approver-demo", "name": "授信审批人", "roles": ["approver"]},
+    "dev-approver-peer": {"sub": "approver-peer-demo", "name": "授信审批人乙", "roles": ["approver"]},
     "dev-auditor": {"sub": "auditor-demo", "name": "审计人员", "roles": ["auditor"]},
     "dev-operations": {"sub": "operations-demo", "name": "运营值班", "roles": ["operations"]},
     "dev-admin": {"sub": "admin-demo", "name": "平台管理员", "roles": ["admin"]},

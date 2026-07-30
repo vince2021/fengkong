@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api, devIdentities, getToken, setToken } from "./api";
+import AuthorityPolicyCenter from "./AuthorityPolicyCenter";
 import ModelLab from "./ModelLab";
 import OperationsCenter from "./OperationsCenter";
 import PostCreditCenter from "./PostCreditCenter";
-import type { ApprovalAction, ApprovalCase, Counterparty, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile } from "./types";
+import type { ApprovalAction, ApprovalCase, Counterparty, CreditAuthority, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile, TaskAction } from "./types";
 
 type PageKey = "overview" | "counterparties" | "approvals" | "models" | "documents" | "operations" | "facilities";
 
@@ -48,7 +49,7 @@ function App() {
   const [counterparties, setCounterparties] = useState<Counterparty[]>([]);
   const [cases, setCases] = useState<ApprovalCase[]>([]);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
-  const [documentFocus, setDocumentFocus] = useState<{ counterpartyId: string; caseId?: string } | null>(null);
+  const [documentFocus, setDocumentFocus] = useState<{ counterpartyId: string; caseId?: string; correctionId?: string } | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<ApprovalCase | null>(null);
   const [busy, setBusy] = useState(true);
@@ -98,6 +99,23 @@ function App() {
   function openDocuments(counterpartyId: string, caseId?: string) {
     setDocumentFocus({ counterpartyId, caseId });
     setPage("documents");
+  }
+
+  function openNotificationTarget(action: TaskAction) {
+    if (action.page === "documents" && action.counterparty_id) {
+      setDocumentFocus({
+        counterpartyId: action.counterparty_id,
+        caseId: action.case_id,
+        correctionId: action.correction_id,
+      });
+      setPage("documents");
+      return;
+    }
+    if (action.page === "approvals" && action.case_id) {
+      setSelectedCaseId(action.case_id);
+      void refreshCases(action.case_id).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
+      setPage("approvals");
+    }
   }
 
   async function refreshCases(focusId?: string) {
@@ -156,10 +174,10 @@ function App() {
           <div className="page-content">
             {page === "overview" && <Overview counterparties={counterparties} cases={cases} documents={documents} identity={selectedIdentity} onNavigate={setPage} />}
             {page === "counterparties" && <CounterpartyCenter rows={counterparties} canRate={Boolean(can("ratings:run"))} canViewDataGovernance={Boolean(can("data_governance:view"))} canImportData={Boolean(can("data_governance:import"))} canResolveData={Boolean(can("data_governance:resolve"))} canReviewData={Boolean(can("data_governance:review"))} onResult={(text) => setNotice({ kind: "success", text })} onError={(text) => setNotice({ kind: "error", text })} />}
-            {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onNotice={setNotice} />}
+            {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewDocuments={Boolean(can("documents:view"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} canViewAuthorityPolicy={Boolean(can("authority_policy:view"))} canManageAuthorityPolicy={Boolean(can("authority_policy:manage"))} canReviewAuthorityPolicy={Boolean(can("authority_policy:review"))} canAnchorAuthorityPolicy={Boolean(can("authority_policy:anchor"))} canRevokeAuthorityPolicyAnchor={Boolean(can("authority_policy:anchor_revoke"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onNotice={setNotice} />}
             {page === "models" && <ModelLab counterparties={counterparties} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} onNotice={setNotice} />}
             {page === "documents" && <DocumentCenter rows={documents} counterparties={counterparties} cases={cases} principal={principal} focus={documentFocus} canUpload={Boolean(can("documents:upload"))} canReview={Boolean(can("documents:review"))} onSwitchToReviewer={() => switchIdentity("dev-risk")} onRefresh={async () => setDocuments(await api.documents())} onNotice={setNotice} />}
-            {page === "operations" && <OperationsCenter canViewOperations={Boolean(can("operations:view"))} canViewNotifications={Boolean(can("notifications:view"))} canScan={Boolean(can("sla:scan"))} onNotice={setNotice} />}
+            {page === "operations" && <OperationsCenter canViewTasks={Boolean(can("approvals:view"))} canViewOperations={Boolean(can("operations:view"))} canManageTasks={Boolean(can("tasks:manage"))} canViewNotifications={Boolean(can("notifications:view"))} canScan={Boolean(can("sla:scan"))} canActCorrections={Boolean(can("corrections:act"))} onNavigate={openNotificationTarget} onNotice={setNotice} />}
             {page === "facilities" && <PostCreditCenter canView={Boolean(can("facilities:view"))} canTransact={Boolean(can("facilities:transact"))} canReview={Boolean(can("facilities:review"))} canScan={Boolean(can("facilities:scan"))} canActAlerts={Boolean(can("facility_alerts:act"))} canCreateRiskEvents={Boolean(can("risk_events:create"))} canControl={Boolean(can("facilities:control"))} onNotice={setNotice} />}
           </div>
         )}
@@ -455,7 +473,7 @@ function renderEnterpriseValue(value: unknown): string {
   return String(value);
 }
 
-function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, canAdvance, canViewReports, canGenerateReports, canViewDecisionGovernance, onSelect, onRefresh, onOpenDocuments, onNotice }: { rows: ApprovalCase[]; counterparties: Counterparty[]; selected: ApprovalCase | null; principal: Principal | null; canCreate: boolean; canAdvance: boolean; canViewReports: boolean; canGenerateReports: boolean; canViewDecisionGovernance: boolean; onSelect: (id: string) => void; onRefresh: (id?: string) => Promise<void>; onOpenDocuments: (counterpartyId: string, caseId?: string) => void; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
+function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, canAdvance, canViewDocuments, canViewReports, canGenerateReports, canViewDecisionGovernance, canViewAuthorityPolicy, canManageAuthorityPolicy, canReviewAuthorityPolicy, canAnchorAuthorityPolicy, canRevokeAuthorityPolicyAnchor, onSelect, onRefresh, onOpenDocuments, onNotice }: { rows: ApprovalCase[]; counterparties: Counterparty[]; selected: ApprovalCase | null; principal: Principal | null; canCreate: boolean; canAdvance: boolean; canViewDocuments: boolean; canViewReports: boolean; canGenerateReports: boolean; canViewDecisionGovernance: boolean; canViewAuthorityPolicy: boolean; canManageAuthorityPolicy: boolean; canReviewAuthorityPolicy: boolean; canAnchorAuthorityPolicy: boolean; canRevokeAuthorityPolicyAnchor: boolean; onSelect: (id: string) => void; onRefresh: (id?: string) => Promise<void>; onOpenDocuments: (counterpartyId: string, caseId?: string) => void; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
   const [creating, setCreating] = useState(false);
   const [newParty, setNewParty] = useState(counterparties[0]?.id ?? "");
   async function create() {
@@ -464,7 +482,7 @@ function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, 
     catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "创建失败" }); }
     finally { setCreating(false); }
   }
-  return <div className="approval-layout">
+  return <><div className="approval-layout">
     <section className="panel case-list-panel">
       <PanelHeader eyebrow="CASE QUEUE" title="申请队列" action={canCreate ? <button className="square-button" onClick={() => void create()} disabled={!newParty || creating}>＋</button> : undefined} />
       {canCreate && <select className="full-select" value={newParty} onChange={(event) => setNewParty(event.target.value)}>{counterparties.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
@@ -475,14 +493,14 @@ function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, 
         <PanelHeader eyebrow={selected.case_id} title={selected.counterparty_name} action={<div className="case-header-badges"><SlaBadge value={selected.sla_status} /><StatusBadge value={selected.status} /></div>} />
         <div className="workflow-strip">{selected.progress?.map((step) => <div key={step.序号} className={`workflow-step ${step.状态 === "已完成" ? "done" : step.状态 === "处理中" ? "active" : ""}`}><span>{step.状态 === "已完成" ? "✓" : step.序号}</span><strong>{step.审批环节}</strong><small>{step.负责角色}</small></div>)}</div>
         <div className="case-work-grid">
-          <div><h3>当前办理环节</h3><div className="current-stage"><span>{stageMeta[selected.current_stage]?.label}</span><p>负责角色：{stageMeta[selected.current_stage]?.owner}</p><small>{formatSla(selected)} · 提交校验数据版本 v{selected.row_version}</small></div>{!isTerminal(selected.status) && <StageActionForm caseItem={selected} counterparty={counterparties.find((item) => item.id === selected.counterparty_id)} disabled={!canAdvance || !canHandleStage(principal, selected.current_stage)} onOpenDocuments={() => onOpenDocuments(selected.counterparty_id, selected.case_id)} onDone={async () => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: "当前环节已完成，流程已进入下一阶段" }); }} onError={(text) => onNotice({ kind: "error", text })} />}{!isTerminal(selected.status) && canAdvance && <CaseActionPanel caseItem={selected} principal={principal} onDone={async (message) => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: message }); }} onError={(text) => onNotice({ kind: "error", text })} />}</div>
+          <div><h3>当前办理环节</h3><div className="current-stage"><span>{stageMeta[selected.current_stage]?.label}</span><p>负责角色：{caseOwnerLabel(selected)}</p><small>{formatSla(selected)} · 提交校验数据版本 v{selected.row_version}</small></div>{!isTerminal(selected.status) && <StageActionForm caseItem={selected} counterparty={counterparties.find((item) => item.id === selected.counterparty_id)} principal={principal} disabled={!canAdvance || !canHandleCase(principal, selected)} canViewDocuments={canViewDocuments} onOpenDocuments={() => onOpenDocuments(selected.counterparty_id, selected.case_id)} onDone={async (message) => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: message ?? "当前环节已完成，流程已进入下一阶段" }); }} onError={(text) => onNotice({ kind: "error", text })} />}{!isTerminal(selected.status) && canAdvance && <CaseActionPanel caseItem={selected} principal={principal} onDone={async (message) => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: message }); }} onError={(text) => onNotice({ kind: "error", text })} />}</div>
           <div><h3>处理时间线</h3>{selected.timeline.length ? <div className="timeline">{selected.timeline.map((event, index) => <div key={`${event.处理时间}-${index}`}><i /><strong>{event.环节}</strong><span>{event.处理结果}</span><small>{event.处理人} · {event.处理时间}</small></div>)}</div> : <EmptyState title="尚未开始办理" detail="完成客户注册后，这里会形成不可抵赖的处理轨迹。" />}</div>
         </div>
         {canViewDecisionGovernance && <DecisionGovernancePanel caseItem={selected} onNotice={onNotice} />}
         {canViewReports && <CreditReportCenter caseItem={selected} canGenerate={canGenerateReports} onNotice={onNotice} />}
       </> : <EmptyState title="暂无可查看申请" detail="切换至客户经理身份可创建第一笔申请。" />}
     </section>
-  </div>;
+  </div>{canViewAuthorityPolicy && <AuthorityPolicyCenter principal={principal} canManage={canManageAuthorityPolicy} canReview={canReviewAuthorityPolicy} canAnchor={canAnchorAuthorityPolicy} canRevokeAnchor={canRevokeAuthorityPolicyAnchor} onNotice={onNotice} />}</>;
 }
 
 function DecisionGovernancePanel({ caseItem, onNotice }: { caseItem: ApprovalCase; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
@@ -572,7 +590,7 @@ function CreditReportCenter({ caseItem, canGenerate, onNotice }: { caseItem: App
   </section>;
 }
 
-function StageActionForm({ caseItem, counterparty, disabled, onOpenDocuments, onDone, onError }: { caseItem: ApprovalCase; counterparty?: Counterparty; disabled: boolean; onOpenDocuments: () => void; onDone: () => Promise<void>; onError: (text: string) => void }) {
+function StageActionForm({ caseItem, counterparty, principal, disabled, canViewDocuments, onOpenDocuments, onDone, onError }: { caseItem: ApprovalCase; counterparty?: Counterparty; principal: Principal | null; disabled: boolean; canViewDocuments: boolean; onOpenDocuments: () => void; onDone: (message?: string) => Promise<void>; onError: (text: string) => void }) {
   const defaults = useMemo(() => stageDefaults(caseItem.current_stage, counterparty, caseItem.data), [caseItem.current_stage, counterparty, caseItem.data]);
   const [values, setValues] = useState<Record<string, string>>(defaults);
   const [submitting, setSubmitting] = useState(false);
@@ -584,7 +602,7 @@ function StageActionForm({ caseItem, counterparty, disabled, onOpenDocuments, on
     void api.models().then(setModels).catch((error: Error) => onError(error.message));
   }, [caseItem.current_stage]);
   useEffect(() => {
-    if (!counterparty || !["document_upload", "supplement"].includes(caseItem.current_stage)) {
+    if (!canViewDocuments || !counterparty || !["document_upload", "supplement"].includes(caseItem.current_stage)) {
       setDocumentGate(null);
       return;
     }
@@ -593,11 +611,15 @@ function StageActionForm({ caseItem, counterparty, disabled, onOpenDocuments, on
       .then((result) => { if (active) setDocumentGate(result); })
       .catch((error: Error) => { if (active) onError(error.message); });
     return () => { active = false; };
-  }, [caseItem.case_id, caseItem.current_stage, caseItem.row_version, counterparty?.id]);
+  }, [canViewDocuments, caseItem.case_id, caseItem.current_stage, caseItem.row_version, counterparty?.id]);
   const fields = stageFields[caseItem.current_stage] ?? [];
   const decisionAdjusted = caseItem.current_stage === "final_strategy" && isDecisionAdjusted(values, caseItem.data.credit_proposal ?? {});
   const automated = ["document_upload", "supplement", "model_selection", "scoring", "credit_proposal"].includes(caseItem.current_stage);
   const documentGateReady = documentGate ? isDocumentGateReady(caseItem, documentGate) : null;
+  const authority = creditAuthority(caseItem);
+  if (caseItem.current_stage === "final_strategy" && authority?.status === "pending") {
+    return <CreditAuthorityPanel caseItem={caseItem} authority={authority} principal={principal} disabled={disabled} onDone={onDone} onError={onError} />;
+  }
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSubmitting(true);
@@ -611,7 +633,33 @@ function StageActionForm({ caseItem, counterparty, disabled, onOpenDocuments, on
     catch (error) { onError(error instanceof Error ? error.message : "提交失败"); }
     finally { setSubmitting(false); }
   }
-  return <form className="stage-form" onSubmit={(event) => void submit(event)}>{fields.map((field) => <label key={field.key} className={field.key.startsWith("adjustment_") || field.key === "compensating_controls" ? "governance-field" : ""}><span>{field.label}{decisionAdjusted && ["adjustment_reason_category", "adjustment_reason"].includes(field.key) ? " *" : ""}</span>{field.key === "template_key" ? <select value={values.template_key ?? "general"} onChange={(event) => setValues({ ...values, template_key: event.target.value })}>{models.map((model) => <option key={model.key} value={model.key}>{model.name} / {model.version}</option>)}</select> : field.kind === "select" ? <select required={decisionAdjusted && field.key === "adjustment_reason_category"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>{field.options?.map((option) => <option key={option || "empty"} value={option}>{option || "请选择"}</option>)}</select> : <input required={decisionAdjusted && field.key === "adjustment_reason"} minLength={field.key === "adjustment_reason" ? 10 : undefined} type={field.kind === "number" ? "number" : "text"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} placeholder={field.placeholder} />}</label>)}{caseItem.current_stage === "final_strategy" && <DecisionVariancePreview values={values} proposal={caseItem.data.credit_proposal ?? {}} adjusted={decisionAdjusted} />}{caseItem.current_stage === "model_selection" && counterparty?.data_quality?.recommended_model === "corporate_credit_v2" && <div className="model-fit-note"><span>模型适配建议</span><strong>材料增强型工商企业信用模型</strong><p>已识别三年财务、行业和外部风险材料；内部订单、应收与逾期数据仍需补充。</p></div>}{["document_upload", "supplement"].includes(caseItem.current_stage) && <DocumentStageGate checklist={documentGate} ready={documentGateReady === true} onOpen={onOpenDocuments} />}{automated && <div className="automation-note"><span>AI</span><p>{automationDescriptions[caseItem.current_stage]}</p></div>}<button className="primary-button full" disabled={disabled || submitting || (caseItem.current_stage === "model_selection" && !values.template_key) || (["document_upload", "supplement"].includes(caseItem.current_stage) && documentGateReady !== true)}>{disabled ? "当前身份无权处理此环节" : submitting ? "正在执行可信编排…" : automationButtonLabels[caseItem.current_stage] ?? `完成${stageMeta[caseItem.current_stage]?.label}`}</button></form>;
+  return <form className="stage-form" onSubmit={(event) => void submit(event)}>{fields.map((field) => <label key={field.key} className={field.key.startsWith("adjustment_") || field.key === "compensating_controls" ? "governance-field" : ""}><span>{field.label}{decisionAdjusted && ["adjustment_reason_category", "adjustment_reason"].includes(field.key) ? " *" : ""}</span>{field.key === "template_key" ? <select value={values.template_key ?? "general"} onChange={(event) => setValues({ ...values, template_key: event.target.value })}>{models.map((model) => <option key={model.key} value={model.key}>{model.name} / {model.version}</option>)}</select> : field.kind === "select" ? <select required={decisionAdjusted && field.key === "adjustment_reason_category"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>{field.options?.map((option) => <option key={option || "empty"} value={option}>{option || "请选择"}</option>)}</select> : <input required={decisionAdjusted && field.key === "adjustment_reason"} minLength={field.key === "adjustment_reason" ? 10 : undefined} type={field.kind === "number" ? "number" : "text"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} placeholder={field.placeholder} />}</label>)}{caseItem.current_stage === "final_strategy" && <DecisionVariancePreview values={values} proposal={caseItem.data.credit_proposal ?? {}} adjusted={decisionAdjusted} />}{caseItem.current_stage === "model_selection" && counterparty?.data_quality?.recommended_model === "corporate_credit_v2" && <div className="model-fit-note"><span>模型适配建议</span><strong>材料增强型工商企业信用模型</strong><p>已识别三年财务、行业和外部风险材料；内部订单、应收与逾期数据仍需补充。</p></div>}{canViewDocuments && ["document_upload", "supplement"].includes(caseItem.current_stage) && <DocumentStageGate checklist={documentGate} ready={documentGateReady === true} onOpen={onOpenDocuments} />}{automated && <div className="automation-note"><span>AI</span><p>{automationDescriptions[caseItem.current_stage]}</p></div>}<button className="primary-button full" disabled={disabled || submitting || (caseItem.current_stage === "model_selection" && !values.template_key) || (canViewDocuments && ["document_upload", "supplement"].includes(caseItem.current_stage) && documentGateReady !== true)}>{disabled ? "当前身份无权处理此环节" : submitting ? "正在执行可信编排…" : automationButtonLabels[caseItem.current_stage] ?? `完成${stageMeta[caseItem.current_stage]?.label}`}</button></form>;
+}
+
+function CreditAuthorityPanel({ caseItem, authority, principal, disabled, onDone, onError }: { caseItem: ApprovalCase; authority: CreditAuthority; principal: Principal | null; disabled: boolean; onDone: (message?: string) => Promise<void>; onError: (text: string) => void }) {
+  const [comment, setComment] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const current = authority.slots.find((slot) => slot.status === "pending");
+  const duplicateSigner = Boolean(principal && authority.slots.some((slot) => slot.status === "approved" && slot.signed_by === principal.subject));
+  const actionDisabled = disabled || duplicateSigner;
+  const roleLabel: Record<string, string> = { risk_manager: "风控经理", approver: "授信审批人" };
+  async function submit(decision: "approve" | "reject") {
+    if (!current) return;
+    setSubmitting(true);
+    try {
+      await api.signoffApprovalCase(caseItem.case_id, caseItem.row_version, current.key, decision, comment.trim());
+      setComment("");
+      const isLastSlot = authority.slots.filter((slot) => slot.status === "pending").length === 1;
+      await onDone(decision === "reject" ? "会签已否决，授信申请已终止" : isLastSlot ? "全部授权会签已完成，请提交最终策略" : "授权会签已记录，任务已流转至下一席位");
+    } catch (error) { onError(error instanceof Error ? error.message : "授权会签提交失败"); }
+    finally { setSubmitting(false); }
+  }
+  return <section className="authority-panel">
+    <header><div><span>AUTHORITY MATRIX · {authority.policy.version}</span><strong>{authority.tier_label}授权会签</strong><p>{authority.reason} · 策略哈希 {authority.policy.config_hash.slice(0, 12)}</p></div><b>{authority.slots.filter((slot) => slot.status === "approved").length}/{authority.slots.length}</b></header>
+    <div className="authority-basis"><span>建议额度 <b>{money.format(authority.basis.suggested_limit)}</b></span><span>模型评级 <b>{authority.basis.rating}</b></span><span>准入策略 <b>{authority.basis.access_strategy}</b></span></div>
+    <div className="authority-slots">{authority.slots.map((slot, index) => <div key={slot.key} className={`${slot.status} ${slot.key === current?.key ? "current" : ""}`}><i>{index + 1}</i><span><b>{slot.label}</b><small>{slot.status === "approved" ? `${slot.signed_by_name} · 已同意` : slot.status === "rejected" ? `${slot.signed_by_name} · 已否决` : slot.key === current?.key ? `当前待 ${roleLabel[slot.role] ?? slot.role} 处理` : "等待前序会签"}</small>{slot.comment && <em>{slot.comment}</em>}</span></div>)}</div>
+    {current && <div className="authority-action"><label><span>会签意见</span><textarea value={comment} onChange={(event) => setComment(event.target.value)} maxLength={1000} placeholder={`请填写${current.label}的独立判断依据（至少 5 个字）`} /></label><div><button type="button" className="action-submit danger" disabled={actionDisabled || submitting || comment.trim().length < 5} onClick={() => void submit("reject")}>否决申请</button><button type="button" className="primary-button" disabled={actionDisabled || submitting || comment.trim().length < 5} onClick={() => void submit("approve")}>{submitting ? "正在签署…" : `同意并流转至下一席位`}</button></div>{duplicateSigner ? <small>四眼原则：你已签署前序席位，请切换另一名授信审批人。</small> : disabled && <small>请切换为当前会签席位对应的身份：{roleLabel[current.role] ?? current.role}</small>}</div>}
+  </section>;
 }
 
 function DocumentStageGate({ checklist, ready, onOpen }: { checklist: DocumentChecklist | null; ready: boolean; onOpen: () => void }) {
@@ -731,6 +779,7 @@ function isTerminal(status: string): boolean { return ["已完成", "已拒绝",
 
 function formatSla(caseItem: ApprovalCase): string {
   if (caseItem.sla_status === "已停止") return "SLA 已停止";
+  if (caseItem.sla_status === "已暂停") return "等待补件，主流程 SLA 已暂停";
   if (caseItem.remaining_seconds === null) return "SLA 未设置";
   const seconds = Math.abs(caseItem.remaining_seconds);
   const hours = Math.floor(seconds / 3600);
@@ -738,9 +787,9 @@ function formatSla(caseItem: ApprovalCase): string {
   return caseItem.remaining_seconds < 0 ? `已超时 ${hours}小时${minutes}分` : `剩余 ${hours}小时${minutes}分`;
 }
 
-function SlaBadge({ value, compact = false }: { value: ApprovalCase["sla_status"]; compact?: boolean }) { const tone = value === "已超时" ? "danger" : value === "即将超时" ? "warning" : value === "正常" ? "success" : "neutral"; return <span className={`sla-badge ${tone} ${compact ? "compact" : ""}`}>{compact ? value : `SLA ${value}`}</span>; }
+function SlaBadge({ value, compact = false }: { value: ApprovalCase["sla_status"]; compact?: boolean }) { const tone = value === "已超时" ? "danger" : value === "即将超时" ? "warning" : value === "正常" ? "success" : value === "已暂停" ? "paused" : "neutral"; return <span className={`sla-badge ${tone} ${compact ? "compact" : ""}`}>{compact ? value : `SLA ${value}`}</span>; }
 
-function DocumentCenter({ rows, counterparties, cases, principal, focus, canUpload, canReview, onSwitchToReviewer, onRefresh, onNotice }: { rows: DocumentRecord[]; counterparties: Counterparty[]; cases: ApprovalCase[]; principal: Principal | null; focus: { counterpartyId: string; caseId?: string } | null; canUpload: boolean; canReview: boolean; onSwitchToReviewer: () => void; onRefresh: () => Promise<void>; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
+function DocumentCenter({ rows, counterparties, cases, principal, focus, canUpload, canReview, onSwitchToReviewer, onRefresh, onNotice }: { rows: DocumentRecord[]; counterparties: Counterparty[]; cases: ApprovalCase[]; principal: Principal | null; focus: { counterpartyId: string; caseId?: string; correctionId?: string } | null; canUpload: boolean; canReview: boolean; onSwitchToReviewer: () => void; onRefresh: () => Promise<void>; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
   const availableParties = useMemo(() => principal?.roles.includes("client") && principal.counterparty_id
     ? [{ id: principal.counterparty_id, name: "本企业" }]
     : counterparties.map((item) => ({ id: item.id, name: item.name })), [counterparties, principal]);
@@ -758,6 +807,8 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
   const [linkingId, setLinkingId] = useState("");
   const [prechecks, setPrechecks] = useState<Record<string, DocumentPrecheck>>({});
   const [corrections, setCorrections] = useState<DocumentCorrection[]>([]);
+  const [correctionComparisons, setCorrectionComparisons] = useState<Record<string, DocumentVersionComparison>>({});
+  const [comparisonUnavailableIds, setComparisonUnavailableIds] = useState<string[]>([]);
   const [correctionId, setCorrectionId] = useState("");
   const matchingCases = cases.filter((item) => item.counterparty_id === partyId);
   const selectedParty = counterparties.find((item) => item.id === partyId);
@@ -782,8 +833,21 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
     } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "资料自动预检加载失败" }); }
   }, [partyId, caseId, onNotice]);
   const loadCorrections = useCallback(async () => {
-    if (!partyId) return setCorrections([]);
-    try { setCorrections(await api.documentCorrections(partyId, caseId || undefined)); }
+    if (!partyId) {
+      setCorrections([]);
+      setCorrectionComparisons({});
+      return setComparisonUnavailableIds([]);
+    }
+    try {
+      const nextCorrections = await api.documentCorrections(partyId, caseId || undefined);
+      setCorrections(nextCorrections);
+      const comparisonResults = await Promise.all(nextCorrections.filter((item) => item.version_document_ids.length >= 2).map(async (item) => {
+        try { return { correctionId: item.id, comparison: await api.documentCorrectionComparison(item.id) }; }
+        catch { return { correctionId: item.id, comparison: null }; }
+      }));
+      setCorrectionComparisons(Object.fromEntries(comparisonResults.filter((item): item is { correctionId: string; comparison: DocumentVersionComparison } => Boolean(item.comparison)).map((item) => [item.correctionId, item.comparison])));
+      setComparisonUnavailableIds(comparisonResults.filter((item) => !item.comparison).map((item) => item.correctionId));
+    }
     catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "补件任务加载失败" }); }
   }, [partyId, caseId, onNotice]);
   useEffect(() => {
@@ -800,8 +864,13 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
     setPartyId(focus.counterpartyId);
     setTemplateKey(inferDocumentTemplate(counterparties.find((item) => item.id === focus.counterpartyId)));
     setCaseId(focus.caseId ?? "");
-    setCorrectionId("");
-  }, [focus?.counterpartyId, focus?.caseId, availableParties, counterparties]);
+    setCorrectionId(focus.correctionId ?? "");
+  }, [focus?.counterpartyId, focus?.caseId, focus?.correctionId, availableParties, counterparties]);
+  useEffect(() => {
+    if (!selectedCorrection) return;
+    setDocumentType(selectedCorrection.document_type);
+    requestAnimationFrame(() => window.document.querySelector(".document-correction-center")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }, [selectedCorrection?.id]);
   useEffect(() => { void loadChecklist(); }, [loadChecklist, rows]);
   useEffect(() => { void loadPrechecks(); }, [loadPrechecks, rows]);
   useEffect(() => { void loadCorrections(); }, [loadCorrections, rows]);
@@ -847,7 +916,7 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
   return <div className="document-layout">
     <section className={`panel document-review-handoff ${canReview ? "reviewer" : "uploader"}`}><div><span>{canReview ? "REVIEW QUEUE" : "FOUR-EYE HANDOFF"}</span><h2>{canReview ? "独立核验工作队列" : pendingRows.length ? "资料已上传，等待独立核验" : "上传后由风控独立核验"}</h2><p>{canReview ? `当前企业有 ${reviewablePendingRows.length} 份资料可核验${selfUploadedPendingRows.length ? `，另有 ${selfUploadedPendingRows.length} 份由本人上传，须交由其他复核人` : ""}。` : "上传人与核验人必须分离；仅完成上传不能推进审批，需由风控经理逐份完成五项检查。"}</p></div><div className="review-handoff-metrics"><span><b>{selectedRows.length}</b>已上传</span><span><b>{pendingRows.length}</b>待核验</span><span><b>{selectedRows.filter((item) => item.review_status === "verified").length}</b>已通过</span><span className={precheckAttentionCount ? "attention" : ""}><b>{precheckAttentionCount}</b>预检提醒</span></div>{canReview ? <button disabled={!reviewablePendingRows.length} onClick={() => reviewablePendingRows[0] && startReview(reviewablePendingRows[0])}>{reviewablePendingRows.length ? "开始核验下一份" : "当前队列已处理"}</button> : pendingRows.length > 0 ? <button onClick={onSwitchToReviewer}>切换风控经理核验</button> : <small>上传资料后，这里会自动形成待核验任务。</small>}</section>
     {caseId && unlinkedRows.length > 0 && <section className="panel case-document-linker"><div><span>EXISTING DOCUMENTS</span><h2>已有资料尚未计入当前申请</h2><p>以下资料属于同一企业，但上传时未关联审批单。关联后仍需独立核验，核验通过才会计入门禁。</p></div><div className="case-document-link-list">{unlinkedRows.map((item) => <div key={item.id}><span><strong>{item.document_type}</strong><small>{item.original_name}</small></span>{canUpload ? <button disabled={Boolean(linkingId)} onClick={() => void linkExistingDocument(item)}>{linkingId === item.id ? "正在关联…" : "关联本申请"}</button> : <em>请由客户经理关联</em>}</div>)}</div></section>}
-    {caseId && <DocumentCorrectionPanel corrections={corrections} rows={rows} canUpload={canUpload} canReview={canReview} onPrepareUpload={prepareCorrectionUpload} onReview={startReview} />}
+    {caseId && <DocumentCorrectionPanel corrections={corrections} comparisons={correctionComparisons} comparisonUnavailableIds={comparisonUnavailableIds} rows={rows} canUpload={canUpload} canReview={canReview} onPrepareUpload={prepareCorrectionUpload} onReview={startReview} />}
     <section className="panel document-checklist-panel"><PanelHeader eyebrow="DOCUMENT CHECKLIST" title="客户资料逐项接收与核验" action={checklist && <span className="count-chip">{checklist.summary.verified_count}/{checklist.summary.required_count} 项核验</span>} /><label className="document-template-selector"><span>资料清单模板</span><select value={templateKey} onChange={(event) => setTemplateKey(event.target.value)}><option value="general">通用企业资料清单</option><option value="tech_enterprise_basic">科创企业专项资料清单</option></select><small>已按企业类型推荐，可根据本次拟选模型调整</small></label>{checklist ? <><div className="document-checklist-summary"><div><span>资料清单</span><strong>{checklist.summary.total_count}</strong><small>{templateKey === "tech_enterprise_basic" ? "含科创专项资料" : "通用企业资料"}</small></div><div><span>已上传</span><strong>{checklist.summary.uploaded_count}</strong><small>{checklist.summary.pending_count} 项待检查</small></div><div className={checklist.summary.missing_required_count ? "warning" : "pass"}><span>必需资料缺口</span><strong>{checklist.summary.missing_required_count}</strong><small>{checklist.summary.exception_count} 项检查异常</small></div></div><div className="document-checklist-list">{checklist.items.map((item) => <article id={item.document ? `document-${item.document.id}` : undefined} className={item.status} key={item.key}><header><div><i>{item.required ? "必" : "选"}</i><span><strong>{item.document_type}</strong><small>{item.description}</small></span></div><b>{documentChecklistStatus(item.status)}</b></header>{item.document ? <><div className="document-linked-file"><span>{item.document.original_name}</span><code>{item.document.sha256.slice(0, 16)}…</code><button onClick={() => void api.downloadDocument(item.document!).catch((error: Error) => onNotice({ kind: "error", text: error.message }))}>下载</button>{canReview && item.document.review_status === "pending_review" && item.document.uploaded_by !== principal?.subject ? <button className="secondary" onClick={() => startReview(item.document!)}>逐项检查</button> : item.document.review_status === "pending_review" ? <em className="document-handoff-note">{item.document.uploaded_by === principal?.subject ? "本人上传，需他人核验" : "待风控经理核验"}</em> : null}</div><DocumentPrecheckCard precheck={prechecks[item.document.id]} />{reviewingId === item.document.id && <div className="document-review-form"><div>{checklist.review_checks.map((check) => <label key={check.key}><span>{check.label}</span><select value={reviewChecks[check.key] ?? "pass"} onChange={(event) => setReviewChecks({ ...reviewChecks, [check.key]: event.target.value as DocumentCheckResult["status"] })}><option value="pass">通过</option><option value="fail">不通过</option><option value="not_applicable">不适用</option></select></label>)}</div><label><span>检查意见</span><textarea value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} /></label><footer><button className="reject" disabled={reviewing} onClick={() => void submitReview(item.document!, "reject")}>驳回</button><button className="secondary" disabled={reviewing} onClick={() => void submitReview(item.document!, "needs_supplement")}>要求补充</button><button disabled={reviewing} onClick={() => void submitReview(item.document!, "verify")}>核验通过</button></footer></div>}{item.document.review_comment && <p className="document-review-comment">检查意见：{item.document.review_comment}{item.document.reviewed_by_name ? ` · ${item.document.reviewed_by_name}` : ""}</p>}</> : canUpload ? <button className="document-upload-shortcut" onClick={() => setDocumentType(item.document_type)}>选择此项上传</button> : <p>尚未上传</p>}</article>)}</div></> : <div className="model-loading">正在生成资料逐项清单…</div>}</section>
     {canUpload && <section className="panel upload-panel">
       <PanelHeader eyebrow={selectedCorrection ? "CORRECTION UPLOAD" : "SECURE UPLOAD"} title={selectedCorrection ? "补交替换资料" : "单项资料上传"} />
@@ -870,8 +939,10 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
 }
 
 function documentChecklistStatus(status: string): string { return ({ missing: "未上传", pending_review: "待检查", verified: "已核验", needs_supplement: "待补充", rejected: "已驳回" } as Record<string, string>)[status] ?? status; }
-function DocumentCorrectionPanel({ corrections, rows, canUpload, canReview, onPrepareUpload, onReview }: {
+function DocumentCorrectionPanel({ corrections, comparisons, comparisonUnavailableIds, rows, canUpload, canReview, onPrepareUpload, onReview }: {
   corrections: DocumentCorrection[];
+  comparisons: Record<string, DocumentVersionComparison>;
+  comparisonUnavailableIds: string[];
   rows: DocumentRecord[];
   canUpload: boolean;
   canReview: boolean;
@@ -892,6 +963,19 @@ function DocumentCorrectionPanel({ corrections, rows, canUpload, canReview, onPr
     completeness: "要件完整性",
     legibility: "清晰可读",
   };
+  const roleLabels: Record<DocumentCorrection["assigned_role"], string> = {
+    client: "企业客户",
+    relationship_manager: "客户经理",
+    risk_manager: "风控经理",
+    approver: "授信审批人",
+  };
+  const slaLabels: Record<DocumentCorrection["sla_status"], string> = {
+    normal: "时限正常",
+    due_soon: "即将超时",
+    overdue: "已超时",
+    escalated: "升级催办",
+    stopped: "已停止计时",
+  };
   const ordered = [...corrections].sort((left, right) => {
     const activeRank = (item: DocumentCorrection) => item.status === "open" || item.status === "resubmitted" ? 0 : 1;
     return activeRank(left) - activeRank(right) || (right.updated_at ?? "").localeCompare(left.updated_at ?? "");
@@ -901,17 +985,24 @@ function DocumentCorrectionPanel({ corrections, rows, canUpload, canReview, onPr
     {!ordered.length ? <div className="correction-empty"><strong>当前申请没有补件任务</strong><p>风控核验选择“要求补充”后，系统会在此生成任务并持续保留历次资料版本。</p></div> : <div className="correction-task-list">{ordered.map((correction) => {
       const versions = correction.version_document_ids.map((id) => rows.find((row) => row.id === id)).filter((row): row is DocumentRecord => Boolean(row));
       const currentDocument = rows.find((row) => row.id === correction.current_document_id);
+      const comparison = comparisons[correction.id];
       const active = correction.status === "open" || correction.status === "resubmitted";
       return <article className={`correction-task ${correction.status} ${active ? "" : "history"}`} key={correction.id}>
         <header>
           <div><strong>{correction.document_type}</strong><small>补交 {correction.attempt_count} 次 · {correction.requested_by_name} 发起</small></div>
-          <span>{statusLabels[correction.status]}</span>
+          <div className="correction-status-stack"><span>{statusLabels[correction.status]}</span><i className={correction.sla_status}>{slaLabels[correction.sla_status]}</i></div>
         </header>
+        <div className={`correction-sla-strip ${correction.sla_status}`}>
+          <span><small>当前责任</small><strong>{roleLabels[correction.assigned_role]}</strong></span>
+          <span><small>SLA 截止</small><strong>{correction.sla_due_at ? dateTime.format(new Date(correction.sla_due_at)) : "—"}</strong></span>
+          <span><small>剩余时限</small><strong>{formatCorrectionRemaining(correction)}</strong></span>
+        </div>
         <p>{correction.reason}</p>
         {correction.failed_check_keys.length > 0 && <div className="correction-checks">{correction.failed_check_keys.map((key) => <em key={key}>{checkLabels[key] ?? key}</em>)}</div>}
         <div className="correction-version-chain">
           {versions.map((version, index) => <span key={version.id}><b>V{index + 1}</b><small title={version.original_name}>{version.original_name}</small></span>)}
         </div>
+        {comparison ? <DocumentVersionComparisonCard comparison={comparison} /> : correction.version_document_ids.length >= 2 ? <div className={`correction-comparison-loading ${comparisonUnavailableIds.includes(correction.id) ? "unavailable" : ""}`}>{comparisonUnavailableIds.includes(correction.id) ? "版本差异暂不可用，请打开两个版本人工核对" : "正在生成最近两个版本的差异…"}</div> : null}
         <footer>
           <small>{correction.status === "open" ? "等待客户经理提交替换版本" : correction.status === "resubmitted" ? "新版本已锁定，等待风控独立复核" : `${correction.resolved_by_name ?? "风控经理"} · ${correction.resolved_at ? dateTime.format(new Date(correction.resolved_at)) : "已处理"}`}</small>
           {correction.status === "open" && canUpload && <button onClick={() => onPrepareUpload(correction)}>重新上传</button>}
@@ -920,6 +1011,54 @@ function DocumentCorrectionPanel({ corrections, rows, canUpload, canReview, onPr
       </article>;
     })}</div>}
   </section>;
+}
+function formatCorrectionRemaining(correction: DocumentCorrection): string {
+  if (correction.sla_status === "stopped") return "任务已处理";
+  const seconds = correction.remaining_seconds;
+  const absoluteMinutes = Math.ceil(Math.abs(seconds) / 60);
+  const hours = Math.floor(absoluteMinutes / 60);
+  const minutes = absoluteMinutes % 60;
+  const duration = `${hours ? `${hours}小时` : ""}${minutes ? `${minutes}分钟` : hours ? "" : "不足1分钟"}`;
+  return seconds < 0 ? `已超 ${duration}` : duration;
+}
+function DocumentVersionComparisonCard({ comparison }: { comparison: DocumentVersionComparison }) {
+  const readinessLabels = {
+    ready_for_manual_review: "可进入人工复核",
+    attention_required: "仍有异常待核对",
+    blocked: "存在阻断项",
+  };
+  const trendLabels = { improved: "整体改善", regressed: "风险上升", unchanged: "无明显改善" };
+  const statusLabels: Record<DocumentPrecheck["overall_status"], string> = {
+    pass: "通过",
+    warning: "提醒",
+    manual_review: "人工确认",
+    block: "阻断",
+  };
+  const changedChecks = comparison.check_changes.filter((item) => item.trend !== "unchanged" || item.current_status !== "pass");
+  const changedFields = comparison.field_changes.filter((item) => item.change_type !== "unchanged");
+  return <details className={`correction-comparison ${comparison.readiness}`} open={comparison.readiness !== "ready_for_manual_review"}>
+    <summary>
+      <span>版本智能差异</span>
+      <strong>{readinessLabels[comparison.readiness]}</strong>
+      <small>{trendLabels[comparison.overall_trend]} · 上一版本 → 当前版本</small>
+    </summary>
+    <div className="comparison-metrics">
+      <span className="resolved"><b>{comparison.summary.resolved_count}</b>已解决</span>
+      <span className={comparison.summary.remaining_count ? "remaining" : ""}><b>{comparison.summary.remaining_count}</b>仍存在</span>
+      <span className={comparison.summary.new_issue_count ? "new" : ""}><b>{comparison.summary.new_issue_count}</b>新增异常</span>
+      <span><b>{comparison.summary.changed_field_count}</b>字段变化</span>
+    </div>
+    {changedChecks.length > 0 && <section className="comparison-change-list">
+      <header><strong>预检项变化</strong><small>旧版本 → 新版本</small></header>
+      {changedChecks.map((item) => <p className={item.trend} key={item.key}><span>{item.label}</span><em>{statusLabels[item.previous_status]} → {statusLabels[item.current_status]}</em><small>{item.current_detail}</small></p>)}
+    </section>}
+    {changedFields.length > 0 && <section className="comparison-field-list">
+      <header><strong>识别字段变化</strong><small>仅展示有变化字段</small></header>
+      {changedFields.map((item) => <p className={item.change_type} key={item.key}><span>{item.label}</span><small>{item.previous_value ?? "未识别"} → {item.current_value ?? "未识别"}</small><em>{item.change_type === "resolved" ? "已修正" : item.change_type === "introduced" ? "新增不一致" : item.change_type === "unresolved" ? "旧异常未重新识别" : "值已变化"}</em></p>)}
+    </section>}
+    <p className="comparison-recommendation">{comparison.recommendation}</p>
+    <footer>{comparison.disclaimer}</footer>
+  </details>;
 }
 function DocumentPrecheckCard({ precheck }: { precheck?: DocumentPrecheck }) {
   if (!precheck) return <div className="document-precheck loading">正在执行自动预检…</div>;
@@ -945,6 +1084,30 @@ function canHandleStage(principal: Principal | null, stage: string): boolean {
   if (!principal) return false;
   if (principal.roles.includes("admin")) return true;
   return (stageRoles[stage] ?? []).some((role) => principal.roles.includes(role));
+}
+
+function creditAuthority(caseItem: ApprovalCase): CreditAuthority | undefined {
+  return caseItem.data._workflow?.credit_authority as CreditAuthority | undefined;
+}
+
+function canHandleCase(principal: Principal | null, caseItem: ApprovalCase): boolean {
+  if (!principal) return false;
+  if (principal.roles.includes("admin")) return true;
+  const authority = creditAuthority(caseItem);
+  if (caseItem.current_stage === "final_strategy" && authority?.status === "pending") {
+    const current = authority.slots.find((slot) => slot.status === "pending");
+    const alreadySigned = authority.slots.some((slot) => slot.status === "approved" && slot.signed_by === principal.subject);
+    return Boolean(current && principal.roles.includes(current.role) && !alreadySigned);
+  }
+  return canHandleStage(principal, caseItem.current_stage);
+}
+
+function caseOwnerLabel(caseItem: ApprovalCase): string {
+  const authority = creditAuthority(caseItem);
+  if (caseItem.current_stage === "final_strategy" && authority?.status === "pending") {
+    return authority.slots.find((slot) => slot.status === "pending")?.label ?? "授权会签";
+  }
+  return stageMeta[caseItem.current_stage]?.owner ?? "待分配";
 }
 
 export default App;

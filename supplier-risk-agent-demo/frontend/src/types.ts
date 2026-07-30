@@ -224,6 +224,385 @@ export type WorkflowProgress = {
   状态: "已完成" | "处理中" | "待处理" | "已终止";
 };
 
+export type CreditAuthoritySlot = {
+  key: string;
+  role: "risk_manager" | "approver";
+  label: string;
+  status: "pending" | "approved" | "rejected";
+  decision: "approve" | "reject" | null;
+  comment: string | null;
+  signed_by: string | null;
+  signed_by_name: string | null;
+  signed_at: string | null;
+};
+
+export type CreditAuthority = {
+  version: string;
+  tier: "standard" | "enhanced" | "committee";
+  tier_label: string;
+  reason: string;
+  policy: { id: string | null; version: string; config_hash: string; source: "builtin" | "published" };
+  basis: { suggested_limit: number; rating: string; access_strategy: string };
+  slots: CreditAuthoritySlot[];
+  status: "pending" | "approved" | "rejected";
+};
+
+export type AuthorityPolicySlot = {
+  key: string;
+  role: "risk_manager" | "approver";
+  label: string;
+};
+
+export type AuthorityPolicyTier = {
+  label: string;
+  reason: string;
+  slots: AuthorityPolicySlot[];
+};
+
+export type AuthorityPolicyConfig = {
+  standard_limit: number;
+  enhanced_limit: number;
+  low_risk_ratings: string[];
+  high_risk_ratings: string[];
+  restricted_strategies: string[];
+  prohibited_strategies: string[];
+  tiers: Record<"standard" | "enhanced" | "committee", AuthorityPolicyTier>;
+};
+
+export type AuthorityPolicySnapshot = {
+  id: string | null;
+  policy_version: string;
+  config_hash: string;
+  config: AuthorityPolicyConfig;
+  source: "builtin" | "published";
+};
+
+export type AuthorityPolicyConfigDiff = {
+  version: string;
+  overall_direction: "tightened" | "relaxed" | "mixed" | "neutral" | "unchanged";
+  summary: {
+    changed_field_count: number;
+    tightened_count: number;
+    relaxed_count: number;
+    mixed_count: number;
+    neutral_count: number;
+  };
+  changes: Array<{
+    key: string;
+    label: string;
+    category: "limit_threshold" | "risk_set" | "signoff_slots" | "tier_metadata";
+    before: unknown;
+    after: unknown;
+    direction: "tightened" | "relaxed" | "mixed" | "neutral";
+    rationale: string;
+    added?: string[];
+    removed?: string[];
+  }>;
+  method_note: string;
+};
+
+export type AuthorityPolicyImpact = {
+  version: string;
+  generated_at: string;
+  base_policy_version: string;
+  base_config_hash: string;
+  candidate_policy_version: string;
+  candidate_config_hash: string;
+  config_diff?: AuthorityPolicyConfigDiff;
+  input_snapshot_hash: string;
+  release_gate: {
+    passed: boolean;
+    status: "pass" | "blocked";
+    summary: string;
+    gates: Array<{ key: string; label: string; passed: boolean; actual: number; threshold: string }>;
+  };
+  sample_profile: {
+    portfolio_count: number;
+    eligible_count: number;
+    skipped_count: number;
+    calculation_error_count: number;
+    coverage_rate: number;
+  };
+  summary: {
+    changed_count: number;
+    escalated_count: number;
+    deescalated_count: number;
+    slot_changed_count: number;
+    additional_signoffs: number;
+    removed_signoffs: number;
+    escalated_limit: number;
+    deescalated_limit: number;
+  };
+  before_distribution: Record<"standard" | "enhanced" | "committee", number>;
+  after_distribution: Record<"standard" | "enhanced" | "committee", number>;
+  migration_matrix: Record<"standard" | "enhanced" | "committee", Record<"standard" | "enhanced" | "committee", number>>;
+  details: Array<{
+    counterparty_id: string;
+    counterparty_name: string;
+    counterparty_type: "supplier" | "customer";
+    template_key: string;
+    model_version: string;
+    model_config_hash: string;
+    rating: string;
+    access_strategy: string;
+    suggested_limit: number;
+    before_tier: "standard" | "enhanced" | "committee";
+    before_tier_label: string;
+    after_tier: "standard" | "enhanced" | "committee";
+    after_tier_label: string;
+    direction: "escalated" | "deescalated" | "unchanged";
+    before_signoff_count: number;
+    after_signoff_count: number;
+    signoff_delta: number;
+    drivers: string[];
+  }>;
+  skipped_samples: Array<{ counterparty_id: string; counterparty_name: string; template_key: string; reason: string }>;
+  calculation_errors: Array<{ counterparty_id: string; counterparty_name: string; template_key: string; reason: string }>;
+};
+
+export type AuthorityPolicyScenarioComparison = {
+  version: string;
+  generated_at: string;
+  base_policy_version: string;
+  base_config_hash: string;
+  input_snapshot_hash: string;
+  sample_profile: AuthorityPolicyImpact["sample_profile"];
+  lowest_workload_key: string | null;
+  highest_control_key: string | null;
+  lowest_workload_keys: string[];
+  highest_control_keys: string[];
+  scenarios: Array<{
+    key: string;
+    name: string;
+    description: string;
+    config: AuthorityPolicyConfig;
+    config_hash: string;
+    impact: AuthorityPolicyImpact;
+    metrics: {
+      total_signoffs: number;
+      average_signoffs: number;
+      standard_count: number;
+      enhanced_count: number;
+      committee_count: number;
+      enhanced_review_count: number;
+      control_intensity_index: number;
+    };
+  }>;
+};
+
+export type AuthorityPolicyRecord = {
+  id: string;
+  policy_version: string;
+  base_policy_version: string;
+  status: "draft" | "pending_review" | "scheduled" | "published" | "rejected" | "cancelled";
+  config: AuthorityPolicyConfig;
+  config_hash: string;
+  impact: AuthorityPolicyImpact | null;
+  impact_hash: string | null;
+  impact_evaluated_at: string | null;
+  restore_source_policy_id: string | null;
+  restore_source_policy_version: string | null;
+  change_reason: string;
+  created_by: string;
+  created_by_name: string;
+  submitted_at: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
+  effective_at: string | null;
+  activated_at: string | null;
+  published_at: string | null;
+  superseded_at: string | null;
+  schedule_cancelled_at: string | null;
+  schedule_cancelled_by: string | null;
+  schedule_cancelled_by_name: string | null;
+  schedule_cancel_reason: string | null;
+  is_active: boolean;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type AuthorityPolicyActivationRun = {
+  id: string;
+  run_key: string;
+  trigger_type: "manual" | "scheduler";
+  status: "no_due" | "activated" | "blocked";
+  scheduled_policy_id: string | null;
+  scheduled_policy_version: string | null;
+  scheduled_effective_at: string | null;
+  active_policy_before: string;
+  active_policy_after: string;
+  error_message: string | null;
+  incident_status: "not_applicable" | "open" | "acknowledged" | "resolved";
+  acknowledged_by: string | null;
+  acknowledged_by_name: string | null;
+  acknowledged_at: string | null;
+  acknowledgement_note: string | null;
+  resolved_by: string | null;
+  resolved_by_name: string | null;
+  resolved_at: string | null;
+  resolution_type: "activated" | "retry_activated" | "schedule_cancelled" | null;
+  resolution_note: string | null;
+  retry_of_run_id: string | null;
+  resolved_by_run_id: string | null;
+  actor_subject: string;
+  actor_name: string;
+  started_at: string;
+  completed_at: string | null;
+  row_version: number;
+  created_at: string | null;
+};
+
+export type AuthorityPolicyActivationStatus = {
+  scheduled_policy: AuthorityPolicyRecord | null;
+  scheduler_health: {
+    state: "idle" | "healthy" | "attention" | "overdue" | "blocked";
+    message: string;
+    scan_interval_minutes: number;
+    checked_at: string;
+    last_scheduler_run: AuthorityPolicyActivationRun | null;
+    next_expected_scan_at: string | null;
+    overdue_seconds: number;
+  };
+  unresolved_incident_count: number;
+  unresolved_incidents: AuthorityPolicyActivationRun[];
+  recent_runs: AuthorityPolicyActivationRun[];
+};
+
+export type AuthorityPolicyActivationScan = {
+  run: AuthorityPolicyActivationRun;
+  run_at: string;
+  due_count: number;
+  activated_count: number;
+  activated_policy: AuthorityPolicyRecord | null;
+  idempotent: boolean;
+};
+
+export type AuthorityPolicyEvidence = {
+  schema_version: "authority-policy-evidence-v1";
+  generated_at: string;
+  package_hash: string;
+  package_hash_algorithm: "SHA-256";
+  policy: AuthorityPolicyRecord;
+  activation_runs: AuthorityPolicyActivationRun[];
+  notifications_by_run: Record<string, Array<{
+    id: string;
+    recipient_role: string;
+    status: "unread" | "read" | "resolved";
+    severity: "info" | "warning" | "critical";
+    dedup_key: string;
+    created_at: string | null;
+    read_at: string | null;
+  }>>;
+  audit: {
+    policy_lifecycle: AuthorityPolicyEvidenceAuditChain;
+    activation_runs: Record<string, AuthorityPolicyEvidenceAuditChain>;
+  };
+  integrity: {
+    passed: boolean;
+    unresolved_incident_count: number;
+    checks: Array<{
+      key: string;
+      label: string;
+      passed: boolean;
+      applicable: boolean;
+      detail: string;
+    }>;
+  };
+};
+
+export type AuthorityPolicyEvidenceAnchor = {
+  id: string;
+  policy_id: string;
+  policy_version: string;
+  schema_version: string;
+  package_hash: string;
+  anchor_hash: string;
+  anchor_hash_valid: boolean;
+  package_unchanged: boolean;
+  audit_valid: boolean;
+  registry_valid: boolean;
+  status: "active" | "revoked";
+  trust_eligible: boolean;
+  integrity_passed: boolean;
+  issued_by: string;
+  issued_by_name: string;
+  issued_at: string;
+  revoked_by: string | null;
+  revoked_by_name: string | null;
+  revoked_at: string | null;
+  revocation_reason: string | null;
+  row_version: number;
+  created_at: string | null;
+  idempotent?: boolean;
+  package?: AuthorityPolicyEvidence;
+  audit?: AuthorityPolicyEvidenceAuditChain;
+  package_verification?: {
+    verified: boolean;
+    trust_level: "self_sealed" | "externally_anchored" | "invalid";
+    computed_package_hash: string;
+    expected_package_hash: string | null;
+    checks: Array<{
+      key: string;
+      label: string;
+      passed: boolean;
+      applicable: boolean;
+      detail: string;
+    }>;
+    note: string;
+  };
+};
+
+export type AuthorityPolicyEvidenceAuditChain = {
+  aggregate_type: string;
+  aggregate_id: string;
+  valid: boolean;
+  event_count: number;
+  terminal_hash: string;
+  events: Array<{
+    id: string;
+    event_type: string;
+    actor: string;
+    payload: Record<string, unknown>;
+    previous_hash: string;
+    event_hash: string;
+    expected_hash: string;
+    hash_valid: boolean;
+    created_at: string | null;
+  }>;
+};
+
+export type AuthorityPolicyEvidenceComparison = {
+  schema_version: "authority-policy-evidence-comparison-v1";
+  generated_at: string;
+  comparison_hash: string;
+  comparison_hash_algorithm: "SHA-256";
+  base: AuthorityPolicyEvidenceComparisonSummary;
+  candidate: AuthorityPolicyEvidenceComparisonSummary;
+  config_diff: AuthorityPolicyConfigDiff;
+  evidence_delta: {
+    lifecycle_event_count: number;
+    activation_run_count: number;
+    unresolved_incident_count: number;
+    newly_failed_checks: string[];
+    resolved_checks: string[];
+  };
+};
+
+export type AuthorityPolicyEvidenceComparisonSummary = {
+  policy_id: string;
+  policy_version: string;
+  status: string;
+  config_hash: string;
+  package_hash: string;
+  integrity_passed: boolean;
+  lifecycle_event_count: number;
+  activation_run_count: number;
+  unresolved_incident_count: number;
+};
+
 export type ApprovalCase = {
   case_id: string;
   counterparty_id: string;
@@ -236,7 +615,11 @@ export type ApprovalCase = {
   row_version: number;
   stage_started_at: string | null;
   stage_due_at: string | null;
-  sla_status: "正常" | "即将超时" | "已超时" | "已停止" | "未设置";
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  assigned_at: string | null;
+  assignment_expires_at: string | null;
+  sla_status: "正常" | "即将超时" | "已超时" | "已暂停" | "已停止" | "未设置";
   remaining_seconds: number | null;
   created_at: string | null;
   updated_at: string | null;
@@ -396,12 +779,86 @@ export type DocumentCorrection = {
   requested_by: string;
   requested_by_name: string;
   requested_at: string | null;
+  assigned_role: "client" | "relationship_manager" | "risk_manager" | "approver";
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  assigned_at: string | null;
+  assignment_expires_at: string | null;
+  sla_started_at: string | null;
+  sla_due_at: string | null;
+  sla_status: "normal" | "due_soon" | "overdue" | "escalated" | "stopped";
+  remaining_seconds: number;
+  reminder_count: number;
+  last_reminded_at: string | null;
+  extension_count: number;
+  total_extension_hours: number;
   resolved_by: string | null;
   resolved_by_name: string | null;
   resolved_at: string | null;
   row_version: number;
   created_at: string | null;
   updated_at: string | null;
+};
+
+export type DocumentCorrectionTask = DocumentCorrection & {
+  counterparty_name: string;
+  recent_actions: Array<{
+    event_type: "correction_manually_reminded" | "correction_reassigned" | "correction_sla_extended";
+    actor: string;
+    reason: string;
+    detail: string;
+    created_at: string | null;
+  }>;
+};
+
+export type DocumentVersionComparison = {
+  correction_id: string;
+  document_type: string;
+  from_document: {
+    id: string;
+    original_name: string;
+    sha256: string;
+    size_bytes: number;
+    created_at: string | null;
+  };
+  to_document: {
+    id: string;
+    original_name: string;
+    sha256: string;
+    size_bytes: number;
+    created_at: string | null;
+  };
+  overall_trend: "improved" | "regressed" | "unchanged";
+  readiness: "ready_for_manual_review" | "attention_required" | "blocked";
+  summary: {
+    resolved_count: number;
+    remaining_count: number;
+    new_issue_count: number;
+    changed_field_count: number;
+  };
+  requested_check_keys: string[];
+  check_changes: Array<{
+    key: string;
+    label: string;
+    previous_status: DocumentPrecheck["overall_status"];
+    current_status: DocumentPrecheck["overall_status"];
+    trend: "improved" | "regressed" | "unchanged";
+    previous_detail: string | null;
+    current_detail: string | null;
+  }>;
+  field_changes: Array<{
+    key: string;
+    label: string;
+    previous_value: string | null;
+    current_value: string | null;
+    previous_matches_expected: boolean | null;
+    current_matches_expected: boolean | null;
+    previous_confidence: number | null;
+    current_confidence: number | null;
+    change_type: "resolved" | "introduced" | "unresolved" | "changed" | "unchanged";
+  }>;
+  recommendation: string;
+  disclaimer: string;
 };
 
 export type DocumentChecklistItem = {
@@ -930,28 +1387,114 @@ export type ModelGovernanceNotification = {
 
 export type ApiErrorShape = { detail?: string };
 
+export type TaskAction = {
+  page?: "documents" | "approvals";
+  counterparty_id?: string;
+  case_id?: string;
+  correction_id?: string;
+};
+
 export type NotificationRecord = {
   id: string;
-  case_id: string;
-  counterparty_id: string;
+  case_id: string | null;
+  counterparty_id: string | null;
   recipient_role: string;
+  recipient_subject: string | null;
   category: string;
-  level: "due_soon" | "overdue" | "escalated";
+  level: "due_soon" | "overdue" | "escalated" | "reminder" | "assignment" | "extension" | "task_created" | "resubmitted" | "reopened" | "completed" | "resumed" | "supervisor_reminder" | "lease_due_soon" | "lease_expired" | "policy_blocked";
   severity: "info" | "warning" | "critical";
   title: string;
   message: string;
-  status: "unread" | "read";
+  action: TaskAction;
+  status: "unread" | "read" | "resolved";
   created_at: string | null;
   read_at: string | null;
+};
+
+export type PersonalTask = {
+  id: string;
+  task_type: "approval" | "correction";
+  title: string;
+  description: string;
+  counterparty_id: string;
+  counterparty_name: string;
+  case_id: string | null;
+  stage: string;
+  stage_label: string;
+  correction_id: string | null;
+  document_type: string | null;
+  status: string;
+  sla_status: "normal" | "due_soon" | "overdue" | "escalated";
+  due_at: string | null;
+  remaining_seconds: number | null;
+  owner_roles: string[];
+  viewer_mode: "owner" | "collaborator";
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  assigned_at: string | null;
+  assignment_expires_at: string | null;
+  lease_remaining_seconds: number | null;
+  assignment_expired: boolean;
+  assignment_state: "unassigned" | "mine" | "assigned_other";
+  can_release: boolean;
+  row_version: number;
+  action: TaskAction;
+};
+
+export type PersonalTaskAssignment = {
+  task_type: "approval" | "correction";
+  task_id: string;
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  assigned_at: string | null;
+  assignment_expires_at: string | null;
+  lease_remaining_seconds: number | null;
+  row_version: number;
+};
+
+export type PersonalTaskQueue = {
+  generated_at: string;
+  summary: {
+    total: number;
+    returned: number;
+    truncated: boolean;
+    approval: number;
+    correction: number;
+    due_soon: number;
+    overdue: number;
+    escalated: number;
+  };
+  tasks: PersonalTask[];
+};
+
+export type TeamTask = PersonalTask & {
+  can_force_release: boolean;
+};
+
+export type TeamTaskBoard = {
+  generated_at: string;
+  summary: {
+    total: number;
+    returned: number;
+    truncated: boolean;
+    claimed: number;
+    unassigned: number;
+    expired: number;
+    at_risk: number;
+  };
+  role_load: Array<{ role: string; total: number; claimed: number; unassigned: number; risk: number }>;
+  assignee_load: Array<{ subject: string | null; name: string; total: number; risk: number }>;
+  tasks: TeamTask[];
 };
 
 export type OperationsSummary = {
   generated_at: string;
   total_cases: number;
   active_cases: number;
-  sla: { normal: number; due_soon: number; overdue: number; escalated: number };
+  sla: { normal: number; due_soon: number; overdue: number; escalated: number; paused: number };
+  correction_sla: { active: number; normal: number; due_soon: number; overdue: number; escalated: number };
   unread_notifications: { total: number; info: number; warning: number; critical: number };
-  last_scan: { run_id: string; run_at: string | null; actor: string; active_cases_scanned: number; notifications_created: number } | null;
+  last_scan: { run_id: string; run_at: string | null; actor: string; active_cases_scanned: number; active_corrections_scanned: number; notifications_created: number; expired_assignments_released: number } | null;
   stage_distribution: Array<{ stage: string; label: string; count: number }>;
 };
 
@@ -962,7 +1505,12 @@ export type SlaScanResult = {
   due_soon_cases: number;
   overdue_cases: number;
   escalated_cases: number;
+  active_corrections_scanned: number;
+  due_soon_corrections: number;
+  overdue_corrections: number;
+  escalated_corrections: number;
   notifications_created: number;
+  expired_assignments_released: number;
 };
 
 export type CreditFacility = {

@@ -6,15 +6,18 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from backend.authority_policy_repository import AuthorityPolicyRepository
+from backend.credit_authority import build_credit_authority, current_authority_slot, ensure_credit_authority, record_authority_signoff
 from backend.decision_governance import build_decision_variance, validate_decision_variance
-from backend.dependencies import get_approval_repository, get_credit_facility_repository, get_decision_governance_repository, get_demo_repository, get_document_repository, get_enterprise_data_repository, get_enterprise_indicator_observation_repository, get_model_governance_repository, get_object_storage, get_rating_run_repository
+from backend.dependencies import get_approval_repository, get_authority_policy_repository, get_credit_facility_repository, get_decision_governance_repository, get_demo_repository, get_document_repository, get_enterprise_data_repository, get_enterprise_indicator_observation_repository, get_model_governance_repository, get_object_storage, get_rating_run_repository
 from backend.document_policy import ALLOWED_DOCUMENT_TYPES, INITIAL_DOCUMENT_TYPES, INITIAL_SUPPORTING_TYPES, SUPPLEMENT_REQUIRED_TYPES
 from backend.indicator_observations import apply_effective_observations
 from backend.rating_input_mapping import prepare_rating_input, readiness_summary
 from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditFacilityRepository, DecisionGovernanceRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, RatingRunRepository, content_hash
-from backend.schemas import ApprovalActionRequest, ApprovalAdvanceRequest, ApprovalAutomateRequest, ApprovalCaseCreate
+from backend.schemas import ApprovalActionRequest, ApprovalAdvanceRequest, ApprovalAutomateRequest, ApprovalCaseCreate, ApprovalSignoffRequest
 from backend.security import Principal, enforce_approval_stage_role, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
+from backend.task_lease import assignment_values_are_active
 from rating.approval_workflow import WORKFLOW_STAGES, advance_approval_case, build_workflow_progress, create_approval_case, stage_index, stage_label
 from rating.enterprise_indicator_pool import evaluate_indicator_pool
 from rating.scorecard import rate_counterparty
@@ -31,12 +34,26 @@ ACTION_ROLES = {
 }
 
 
+def _enforce_personal_task_owner(principal: Principal, case: dict) -> None:
+    active_assignment = assignment_values_are_active(
+        case.get("assigned_to"),
+        case.get("assignment_expires_at"),
+        case.get("assigned_at"),
+    )
+    if active_assignment and case["assigned_to"] != principal.subject and "admin" not in principal.roles:
+        raise HTTPException(status_code=409, detail=f"当前审批任务已由{case.get('assigned_to_name') or '其他人员'}认领")
+
+
 @router.get("")
 def list_approval_cases(
     repository: ApprovalCaseRepository = Depends(get_approval_repository),
     principal: Principal = Depends(require_permissions("approvals:view")),
 ) -> list[dict]:
-    return repository.list(principal.counterparty_id if "client" in principal.roles else None)
+    cases = repository.list(principal.counterparty_id if "client" in principal.roles else None)
+    for case in cases:
+        if case["current_stage"] == "final_strategy":
+            ensure_credit_authority(case)
+    return cases
 
 
 @router.post("", status_code=201)
@@ -63,6 +80,8 @@ def get_case(
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     enforce_counterparty_scope(principal, case["counterparty_id"])
+    if case["current_stage"] == "final_strategy":
+        ensure_credit_authority(case)
     return {**case, "progress": build_workflow_progress(case)}
 
 
@@ -82,6 +101,7 @@ def advance_case(
         raise HTTPException(status_code=409, detail="审批流程已经终止")
     enforce_counterparty_scope(principal, case["counterparty_id"])
     enforce_approval_stage_role(principal, case["current_stage"])
+    _enforce_personal_task_owner(principal, case)
     if case["current_stage"] in AUTOMATED_STAGES:
         raise HTTPException(status_code=409, detail="当前环节必须通过自动编排接口执行")
     if request.expected_row_version != case["row_version"]:
@@ -90,6 +110,25 @@ def advance_case(
     payload = deepcopy(request.payload)
     try:
         if case["current_stage"] == "final_strategy":
+            authority = ensure_credit_authority(case)
+            if authority["status"] != "approved":
+                pending = current_authority_slot(case)
+                label = pending.get("label") if pending else "授权会签"
+                raise ValueError(f"最终策略尚未通过全部授权会签，当前待处理：{label}")
+            final_approver = next(
+                (
+                    slot
+                    for slot in reversed(authority["slots"])
+                    if slot.get("role") == "approver" and slot.get("status") == "approved"
+                ),
+                None,
+            )
+            if (
+                "admin" not in principal.roles
+                and final_approver
+                and final_approver.get("signed_by") != principal.subject
+            ):
+                raise HTTPException(status_code=403, detail="最终策略必须由最后一名有权审批会签人提交")
             payload.pop("decision_variance", None)
             variance = build_decision_variance(case.get("data", {}).get("credit_proposal", {}), payload)
             validate_decision_variance(variance)
@@ -153,6 +192,7 @@ def act_on_case(
         workflow_data = updated["data"].setdefault("_workflow", {})
         workflow_data["required_supplement_types"] = sorted(set(request.required_document_types))
         workflow_data["return_reason"] = request.reason
+        workflow_data.pop("credit_authority", None)
         updated["current_stage"] = "supplement"
         updated["status"] = "待补件"
     elif request.action == "reject":
@@ -183,6 +223,75 @@ def act_on_case(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/{case_id}/signoffs")
+def signoff_case(
+    case_id: str,
+    request: ApprovalSignoffRequest,
+    repository: ApprovalCaseRepository = Depends(get_approval_repository),
+    principal: Principal = Depends(require_permissions("approvals:act")),
+) -> dict:
+    case = repository.get(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="审批申请不存在")
+    if case["status"] in TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="审批流程已经终止")
+    if case["current_stage"] != "final_strategy":
+        raise HTTPException(status_code=409, detail="授权会签仅在最终策略环节开放")
+    enforce_counterparty_scope(principal, case["counterparty_id"])
+    _enforce_personal_task_owner(principal, case)
+    if request.expected_row_version != case["row_version"]:
+        raise HTTPException(status_code=409, detail=f"审批记录版本已变化，当前版本为 {case['row_version']}")
+
+    updated = deepcopy(case)
+    authority = ensure_credit_authority(updated)
+    try:
+        signed_slot = record_authority_signoff(
+            authority,
+            slot_key=request.slot_key,
+            decision=request.decision,
+            comment=request.comment,
+            signer_subject=principal.subject,
+            signer_name=principal.name,
+            signer_roles=principal.roles,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    rejected = request.decision == "reject"
+    if rejected:
+        updated["status"] = "已拒绝"
+    updated["timeline"].append(
+        {
+            "类型": "授权会签",
+            "环节": stage_label(case["current_stage"]),
+            "处理人": principal.name,
+            "处理时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "处理结果": f"{signed_slot['label']}：{'同意' if not rejected else '否决'}；{request.comment}",
+        }
+    )
+    try:
+        saved = repository.save(
+            updated,
+            actor=principal.name,
+            event_type="approval_authority_signoff_recorded",
+            expected_row_version=request.expected_row_version,
+            audit_payload={
+                "authority_tier": authority["tier"],
+                "slot_key": request.slot_key,
+                "decision": request.decision,
+                "comment": request.comment,
+                "signer_subject": principal.subject,
+                "authority_status": authority["status"],
+            },
+            release_assignment=True,
+        )
+        return {**saved, "progress": build_workflow_progress(saved)}
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/{case_id}/automate")
 def automate_case_stage(
     case_id: str,
@@ -195,6 +304,7 @@ def automate_case_stage(
     run_repository: RatingRunRepository = Depends(get_rating_run_repository),
     enterprise_data_repository: EnterpriseDataRepository = Depends(get_enterprise_data_repository),
     indicator_observation_repository: EnterpriseIndicatorObservationRepository = Depends(get_enterprise_indicator_observation_repository),
+    authority_policy_repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
     case = approval_repository.get(case_id)
@@ -207,6 +317,7 @@ def automate_case_stage(
         raise HTTPException(status_code=409, detail="当前环节不支持自动编排")
     enforce_counterparty_scope(principal, case["counterparty_id"])
     enforce_approval_stage_role(principal, stage)
+    _enforce_personal_task_owner(principal, case)
     if request.expected_row_version != case["row_version"]:
         raise HTTPException(status_code=409, detail=f"审批记录版本已变化，当前版本为 {case['row_version']}")
 
@@ -330,6 +441,11 @@ def automate_case_stage(
         updated = advance_approval_case(case, payload, principal.name)
         if stage == "supplement":
             updated["data"].get("_workflow", {}).pop("required_supplement_types", None)
+        if stage == "credit_proposal":
+            updated["data"].setdefault("_workflow", {})["credit_authority"] = build_credit_authority(
+                updated,
+                authority_policy_repository.active_snapshot(),
+            )
         return approval_repository.save(updated, actor=principal.name, event_type=f"approval_{stage}_automated", expected_row_version=request.expected_row_version)
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

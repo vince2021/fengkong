@@ -78,7 +78,7 @@ def build_workflow_progress(case: dict) -> list[dict]:
         elif case["status"] == "已完成":
             status = "已完成"
         elif index == current_index:
-            status = "处理中"
+            status = "待补件" if case["status"] == "待补件" else "处理中"
         else:
             status = "待处理"
         rows.append({"序号": index + 1, "审批环节": stage["label"], "负责角色": stage["owner"], "状态": status})

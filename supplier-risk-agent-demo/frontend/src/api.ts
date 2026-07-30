@@ -1,4 +1,4 @@
-import type { ApiErrorShape, ApprovalAction, ApprovalCase, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentPrecheck, DocumentRecord, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule } from "./types";
+import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule, TeamTaskBoard } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 const TOKEN_KEY = "risk-platform.dev-token";
@@ -8,9 +8,10 @@ export const devIdentities = [
   { token: "dev-manager", label: "客户经理", description: "发起申请并推动业务环节" },
   { token: "dev-risk", label: "风控经理", description: "选择模型、评级与风险复核" },
   { token: "dev-approver", label: "授信审批人", description: "审批额度、账期与最终策略" },
+  { token: "dev-approver-peer", label: "授信审批人乙", description: "委员会级授信第二独立签署人" },
   { token: "dev-client", label: "企业客户", description: "维护本企业资料" },
   { token: "dev-model-admin", label: "模型管理员", description: "模型治理与配置" },
-  { token: "dev-auditor", label: "审计人员", description: "只读审计与追溯" },
+  { token: "dev-auditor", label: "审计人员", description: "审计追溯与可信锚点签发" },
   { token: "dev-operations", label: "运营值班", description: "运行 SLA 扫描与升级催办" },
   { token: "dev-admin", label: "平台管理员", description: "本地演示全权限" },
 ] as const;
@@ -75,6 +76,52 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ action, reason, expected_row_version: rowVersion, required_document_types: requiredDocumentTypes }),
     }),
+  signoffApprovalCase: (id: string, rowVersion: number, slotKey: string, decision: "approve" | "reject", comment: string) =>
+    request<ApprovalCase>(`/approval-cases/${id}/signoffs`, {
+      method: "POST",
+      body: JSON.stringify({ slot_key: slotKey, decision, comment, expected_row_version: rowVersion }),
+    }),
+  authorityPolicies: () => request<AuthorityPolicyRecord[]>("/authority-policies"),
+  activeAuthorityPolicy: () => request<AuthorityPolicySnapshot>("/authority-policies/active"),
+  evaluateAuthorityPolicy: (policyVersion: string, config: AuthorityPolicyConfig) =>
+    request<AuthorityPolicyImpact>("/authority-policies/impact", { method: "POST", body: JSON.stringify({ policy_version: policyVersion, config }) }),
+  compareAuthorityPolicyScenarios: (scenarios: Array<{ key: string; name: string; description: string; config: AuthorityPolicyConfig }>) =>
+    request<AuthorityPolicyScenarioComparison>("/authority-policies/scenarios", { method: "POST", body: JSON.stringify({ scenarios }) }),
+  createAuthorityPolicyRestoreDraft: (payload: { source_policy_ref: string; policy_version: string; change_reason: string }) =>
+    request<AuthorityPolicyRecord>("/authority-policies/restore-drafts", { method: "POST", body: JSON.stringify(payload) }),
+  createAuthorityPolicy: (payload: { policy_version: string; change_reason: string; config: AuthorityPolicyConfig }) =>
+    request<AuthorityPolicyRecord>("/authority-policies", { method: "POST", body: JSON.stringify(payload) }),
+  updateAuthorityPolicy: (id: string, payload: { expected_row_version: number; change_reason: string; config: AuthorityPolicyConfig }) =>
+    request<AuthorityPolicyRecord>(`/authority-policies/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  submitAuthorityPolicy: (id: string, rowVersion: number) =>
+    request<AuthorityPolicyRecord>(`/authority-policies/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
+  reviewAuthorityPolicy: (id: string, rowVersion: number, decision: "publish" | "reject", comment: string, effectiveAt?: string) =>
+    request<AuthorityPolicyRecord>(`/authority-policies/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment, effective_at: effectiveAt }) }),
+  authorityPolicyActivationStatus: () =>
+    request<AuthorityPolicyActivationStatus>("/authority-policies/activation-status"),
+  authorityPolicyEvidence: (id: string) =>
+    request<AuthorityPolicyEvidence>(`/authority-policies/${id}/evidence`),
+  authorityPolicyEvidenceAnchors: (id: string) =>
+    request<AuthorityPolicyEvidenceAnchor[]>(`/authority-policies/${id}/evidence/anchors`),
+  issueAuthorityPolicyEvidenceAnchor: (id: string) =>
+    request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/${id}/evidence/anchors`, { method: "POST" }),
+  authorityPolicyEvidenceAnchor: (anchorId: string) =>
+    request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/evidence/anchors/${anchorId}`),
+  revokeAuthorityPolicyEvidenceAnchor: (anchorId: string, rowVersion: number, reason: string) =>
+    request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/evidence/anchors/${anchorId}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({ expected_row_version: rowVersion, reason }),
+    }),
+  compareAuthorityPolicyEvidence: (basePolicyId: string, candidatePolicyId: string) =>
+    request<AuthorityPolicyEvidenceComparison>(`/authority-policies/evidence/compare?base_policy_id=${encodeURIComponent(basePolicyId)}&candidate_policy_id=${encodeURIComponent(candidatePolicyId)}`),
+  activateDueAuthorityPolicy: (payload?: { run_key?: string; trigger_type?: "manual" | "scheduler" }) =>
+    request<AuthorityPolicyActivationScan>("/authority-policies/activation-scan", { method: "POST", body: payload ? JSON.stringify(payload) : undefined }),
+  acknowledgeAuthorityPolicyActivation: (runId: string, rowVersion: number, note: string) =>
+    request<AuthorityPolicyActivationRun>(`/authority-policies/activation-runs/${runId}/acknowledge`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, note }) }),
+  retryAuthorityPolicyActivation: (runId: string, rowVersion: number, note: string, runKey?: string) =>
+    request<AuthorityPolicyActivationScan>(`/authority-policies/activation-runs/${runId}/retry`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, note, run_key: runKey }) }),
+  cancelAuthorityPolicySchedule: (id: string, rowVersion: number, reason: string) =>
+    request<AuthorityPolicyRecord>(`/authority-policies/${id}/cancel-schedule`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
   creditReports: (caseId: string) => request<CreditReport[]>(`/credit-reports?case_id=${encodeURIComponent(caseId)}`),
   createCreditReport: (caseId: string) => request<CreditReport>("/credit-reports", { method: "POST", body: JSON.stringify({ case_id: caseId }) }),
   decisionVariances: (caseId?: string) => request<DecisionVariance[]>(`/decision-governance/variances${caseId ? `?case_id=${encodeURIComponent(caseId)}` : ""}`),
@@ -206,6 +253,8 @@ export const api = {
     if (caseId) query.set("case_id", caseId);
     return request<DocumentCorrection[]>(`/documents/corrections${query.size ? `?${query}` : ""}`);
   },
+  documentCorrectionComparison: (correctionId: string) =>
+    request<DocumentVersionComparison>(`/documents/corrections/${correctionId}/comparison`),
   uploadDocument: (counterpartyId: string, documentType: string, file: File, caseId?: string, correctionId?: string) => {
     const body = new FormData();
     body.set("counterparty_id", counterpartyId);
@@ -234,6 +283,18 @@ export const api = {
   },
   notifications: (unreadOnly = false) => request<NotificationRecord[]>(`/notifications?unread_only=${unreadOnly}`),
   markNotificationRead: (id: string) => request<NotificationRecord>(`/notifications/${id}/read`, { method: "POST" }),
+  personalTasks: () => request<PersonalTaskQueue>("/operations/my-tasks"),
+  assignPersonalTask: (taskType: "approval" | "correction", taskId: string, action: "claim" | "renew" | "release", expectedRowVersion: number) =>
+    request<PersonalTaskAssignment>(`/operations/my-tasks/${taskType}/${taskId}/assignment`, { method: "POST", body: JSON.stringify({ action, expected_row_version: expectedRowVersion }) }),
+  teamTasks: () => request<TeamTaskBoard>("/operations/team-tasks"),
+  releaseTeamTask: (taskType: "approval" | "correction", taskId: string, expectedRowVersion: number, reason: string) =>
+    request<PersonalTaskAssignment>(`/operations/team-tasks/${taskType}/${taskId}/release`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
+  remindTeamTask: (taskType: "approval" | "correction", taskId: string, expectedRowVersion: number, reason: string) =>
+    request<NotificationRecord>(`/operations/team-tasks/${taskType}/${taskId}/remind`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
   operationsSummary: () => request<OperationsSummary>("/operations/sla/summary"),
   runSlaScan: () => request<SlaScanResult>("/operations/sla/scan", { method: "POST" }),
+  documentCorrectionWorkbench: (activeOnly = true) =>
+    request<DocumentCorrectionTask[]>(`/operations/document-corrections?active_only=${activeOnly}`),
+  actOnDocumentCorrection: (id: string, payload: { expected_row_version: number; action: "remind" | "reassign" | "extend"; reason: string; assigned_role?: DocumentCorrection["assigned_role"]; extension_hours?: number }) =>
+    request<DocumentCorrectionTask>(`/operations/document-corrections/${id}/actions`, { method: "POST", body: JSON.stringify(payload) }),
 };

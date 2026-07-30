@@ -10,10 +10,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from backend.dependencies import get_approval_repository, get_demo_repository, get_document_repository, get_object_storage
+from backend.document_comparison import build_document_version_comparison
 from backend.document_policy import ALLOWED_DOCUMENT_TYPES, DOCUMENT_REVIEW_CHECKS, build_document_checklist
 from backend.document_precheck import precheck_document
-from backend.repository import ApprovalCaseRepository, DemoRepository, DocumentRepository
-from backend.repository import ConcurrentUpdateError
+from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, DemoRepository, DocumentRepository, TaskOwnershipConflict
 from backend.schemas import DocumentCaseLinkRequest, DocumentReviewRequest
 from backend.security import Principal, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
@@ -90,10 +90,14 @@ async def upload_document(
             },
             principal.name,
             correction_id,
+            principal.subject,
         )
     except (LookupError, ValueError) as exc:
         storage.delete(object_key)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except TaskOwnershipConflict as exc:
+        storage.delete(object_key)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
         storage.delete(object_key)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -143,6 +147,45 @@ def get_document_corrections(
     for row in rows:
         enforce_counterparty_scope(principal, row["counterparty_id"])
     return rows
+
+
+@router.get("/corrections/{correction_id}/comparison")
+def get_document_correction_comparison(
+    correction_id: str,
+    principal: Principal = Depends(require_permissions("documents:view")),
+    demo_repository: DemoRepository = Depends(get_demo_repository),
+    repository: DocumentRepository = Depends(get_document_repository),
+    storage: ObjectStorage = Depends(get_object_storage),
+) -> dict:
+    correction = repository.get_correction(correction_id)
+    if not correction:
+        raise HTTPException(status_code=404, detail="补件任务不存在")
+    enforce_counterparty_scope(principal, correction["counterparty_id"])
+    version_ids = correction["version_document_ids"]
+    if len(version_ids) < 2:
+        raise HTTPException(status_code=422, detail="补件任务尚无可比较的替换版本")
+    previous_document = repository.get(version_ids[-2])
+    current_document = repository.get(version_ids[-1])
+    if not previous_document or not current_document:
+        raise HTTPException(status_code=409, detail="补件版本链引用的资料不存在")
+    if current_document["id"] != correction["current_document_id"]:
+        raise HTTPException(status_code=409, detail="补件当前版本与版本链不一致")
+    counterparty = demo_repository.get_counterparty(correction["counterparty_id"])
+    try:
+        previous_content = storage.get(previous_document["object_key"])
+    except FileNotFoundError:
+        previous_content = b""
+    try:
+        current_content = storage.get(current_document["object_key"])
+    except FileNotFoundError:
+        current_content = b""
+    return build_document_version_comparison(
+        correction,
+        previous_document,
+        current_document,
+        precheck_document(previous_document, previous_content, counterparty),
+        precheck_document(current_document, current_content, counterparty),
+    )
 
 
 @router.get("/prechecks")
@@ -219,6 +262,8 @@ def review_document(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except TaskOwnershipConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

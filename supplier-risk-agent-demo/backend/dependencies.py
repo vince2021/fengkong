@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
+from backend.authority_policy_repository import AuthorityPolicyRepository
 from backend.database import get_db_session
 from backend.repository import ApprovalCaseRepository, AuditRepository, CreditFacilityRepository, CreditReportRepository, DecisionGovernanceRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, ModelMonitoringRepository, NotificationRepository, PortfolioRatingBatchRepository, RatingRunRepository
 from backend.storage import ObjectStorage, build_object_storage
@@ -18,6 +19,10 @@ def get_demo_repository() -> DemoRepository:
 
 def get_approval_repository(session: Session = Depends(get_db_session)) -> ApprovalCaseRepository:
     return ApprovalCaseRepository(session)
+
+
+def get_authority_policy_repository(session: Session = Depends(get_db_session)) -> AuthorityPolicyRepository:
+    return AuthorityPolicyRepository(session)
 
 
 def get_rating_run_repository(session: Session = Depends(get_db_session)) -> RatingRunRepository:

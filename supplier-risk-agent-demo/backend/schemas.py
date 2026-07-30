@@ -104,6 +104,25 @@ class DocumentCaseLinkRequest(VersionedActionRequest):
     case_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
 
 
+class DocumentCorrectionActionRequest(VersionedActionRequest):
+    action: Literal["remind", "reassign", "extend"]
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    assigned_role: Literal["client", "relationship_manager", "risk_manager", "approver"] | None = None
+    extension_hours: int | None = Field(default=None, ge=1, le=72)
+
+
+class PersonalTaskAssignmentRequest(VersionedActionRequest):
+    action: Literal["claim", "renew", "release"]
+
+
+class SupervisorTaskReleaseRequest(VersionedActionRequest):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class SupervisorTaskReminderRequest(VersionedActionRequest):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
 class ModelOutcomeCreate(BaseModel):
     external_observation_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
     source: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
@@ -292,6 +311,95 @@ class ApprovalActionRequest(BaseModel):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=1000)]
     expected_row_version: int = Field(ge=1)
     required_document_types: list[str] = Field(default_factory=list, max_length=5)
+
+
+class ApprovalSignoffRequest(BaseModel):
+    slot_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=64)]
+    decision: Literal["approve", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    expected_row_version: int = Field(ge=1)
+
+
+class AuthorityPolicySlot(BaseModel):
+    key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=64)]
+    role: Literal["risk_manager", "approver"]
+    label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
+
+
+class AuthorityPolicyTier(BaseModel):
+    label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=64)]
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=500)]
+    slots: list[AuthorityPolicySlot] = Field(min_length=1, max_length=6)
+
+
+class AuthorityPolicyConfig(BaseModel):
+    standard_limit: float = Field(gt=0, le=10_000_000_000)
+    enhanced_limit: float = Field(gt=0, le=10_000_000_000)
+    low_risk_ratings: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)]] = Field(min_length=1, max_length=20)
+    high_risk_ratings: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=16)]] = Field(min_length=1, max_length=20)
+    restricted_strategies: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]] = Field(default_factory=list, max_length=20)
+    prohibited_strategies: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]] = Field(min_length=1, max_length=20)
+    tiers: dict[Literal["standard", "enhanced", "committee"], AuthorityPolicyTier]
+
+
+class AuthorityPolicyImpactRequest(BaseModel):
+    policy_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    config: AuthorityPolicyConfig
+
+
+class AuthorityPolicyScenarioItem(BaseModel):
+    key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=32, pattern=r"^[a-z0-9_-]+$")]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=32)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=200)]
+    config: AuthorityPolicyConfig
+
+
+class AuthorityPolicyScenarioCompareRequest(BaseModel):
+    scenarios: list[AuthorityPolicyScenarioItem] = Field(min_length=2, max_length=5)
+
+
+class AuthorityPolicyRestoreDraftRequest(BaseModel):
+    source_policy_ref: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    policy_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class AuthorityPolicyCreate(BaseModel):
+    policy_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    config: AuthorityPolicyConfig
+
+
+class AuthorityPolicyUpdate(VersionedActionRequest):
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    config: AuthorityPolicyConfig
+
+
+class AuthorityPolicyReview(VersionedActionRequest):
+    decision: Literal["publish", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    effective_at: datetime | None = None
+
+
+class AuthorityPolicyScheduleCancel(VersionedActionRequest):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class AuthorityPolicyEvidenceAnchorRevoke(VersionedActionRequest):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
+
+
+class AuthorityPolicyActivationScanRequest(BaseModel):
+    run_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")] | None = None
+    trigger_type: Literal["manual", "scheduler"] = "manual"
+
+
+class AuthorityPolicyActivationIncidentAction(VersionedActionRequest):
+    note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class AuthorityPolicyActivationRetry(AuthorityPolicyActivationIncidentAction):
+    run_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")] | None = None
 
 
 class ApiError(BaseModel):

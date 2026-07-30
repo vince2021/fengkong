@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database import AUTO_CREATE_SCHEMA, initialize_database
-from backend.routers import approvals, audit, auth, counterparties, credit_facilities, credit_reports, decision_governance, documents, enterprise_data, health, indicator_observations, model_governance, models, notifications, operations
+from backend.routers import approvals, audit, auth, authority_policies, counterparties, credit_facilities, credit_reports, decision_governance, documents, enterprise_data, health, indicator_observations, model_governance, models, notifications, operations
 from backend.security import validate_security_configuration
 
 
@@ -31,6 +31,7 @@ app.include_router(health.router, prefix=API_PREFIX)
 app.include_router(counterparties.router, prefix=API_PREFIX)
 app.include_router(models.router, prefix=API_PREFIX)
 app.include_router(approvals.router, prefix=API_PREFIX)
+app.include_router(authority_policies.router, prefix=API_PREFIX)
 app.include_router(audit.router, prefix=API_PREFIX)
 app.include_router(auth.router, prefix=API_PREFIX)
 app.include_router(documents.router, prefix=API_PREFIX)

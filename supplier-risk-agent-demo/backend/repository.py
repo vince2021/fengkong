@@ -8,14 +8,17 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord
+from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
-from rating.approval_workflow import STAGE_SLA_HOURS
+from backend.security import APPROVAL_STAGE_ROLES
+from backend.task_lease import assignment_is_active, clear_assignment
+from rating.approval_workflow import STAGE_SLA_HOURS, stage_label
 from rating.risk_screening_policy import get_risk_screening_policy
 from rating.template_resolver import resolve_template
 
@@ -24,6 +27,10 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 
 
 class ConcurrentUpdateError(RuntimeError):
+    pass
+
+
+class TaskOwnershipConflict(RuntimeError):
     pass
 
 
@@ -1240,9 +1247,10 @@ class ApprovalCaseRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def save(self, case: dict, actor: str = "system", event_type: str = "approval_case_updated", expected_row_version: int | None = None, audit_payload: dict | None = None, commit: bool = True) -> dict:
+    def save(self, case: dict, actor: str = "system", event_type: str = "approval_case_updated", expected_row_version: int | None = None, audit_payload: dict | None = None, commit: bool = True, release_assignment: bool = False) -> dict:
         record = self.session.get(ApprovalCaseRecord, case["case_id"])
         previous_stage = record.current_stage if record else None
+        previous_status = record.status if record else None
         if record is None:
             record = ApprovalCaseRecord(case_id=case["case_id"], counterparty_id=case["counterparty_id"], counterparty_name=case["counterparty_name"], current_stage=case["current_stage"], status=case["status"])
             self.session.add(record)
@@ -1254,7 +1262,15 @@ class ApprovalCaseRepository:
             record.completed_stages = deepcopy(case["completed_stages"])
             record.case_data = deepcopy(case["data"])
             record.timeline = deepcopy(case["timeline"])
-            if previous_stage != case["current_stage"] or not record.stage_due_at:
+            if previous_stage != case["current_stage"] or previous_status != case["status"] or release_assignment:
+                clear_assignment(record)
+            if case["status"] == "待补件":
+                record.stage_due_at = None
+            elif case["status"] == "处理中" and (
+                previous_stage != case["current_stage"]
+                or previous_status == "待补件"
+                or not record.stage_due_at
+            ):
                 now = datetime.now(timezone.utc)
                 record.stage_started_at = now
                 record.stage_due_at = now + timedelta(hours=STAGE_SLA_HOURS.get(case["current_stage"], 24))
@@ -1548,7 +1564,7 @@ class DocumentRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def create(self, metadata: dict, actor: str, correction_id: str | None = None) -> dict:
+    def create(self, metadata: dict, actor: str, correction_id: str | None = None, assignment_subject: str | None = None) -> dict:
         metadata.setdefault("created_at", datetime.now(timezone.utc))
         record = DocumentRecord(**metadata)
         correction = None
@@ -1558,6 +1574,8 @@ class DocumentRepository:
                 raise LookupError("补件任务不存在")
             if correction.status != "open":
                 raise ValueError("补件任务当前不允许上传替换资料")
+            if assignment_is_active(correction) and correction.assigned_to != assignment_subject:
+                raise TaskOwnershipConflict(f"补件任务已由{correction.assigned_to_name or '其他人员'}认领")
             if correction.counterparty_id != record.counterparty_id or correction.case_id != record.case_id or correction.document_type != record.document_type:
                 raise ValueError("替换资料与补件任务的企业、审批单或资料类型不匹配")
         self.session.add(record)
@@ -1576,6 +1594,8 @@ class DocumentRepository:
             correction.current_document_id = record.id
             correction.version_document_ids_json = version_ids
             correction.status = "resubmitted"
+            correction.assigned_role, correction.sla_started_at, correction.sla_due_at = correction_sla_window("resubmitted", datetime.now(timezone.utc))
+            clear_assignment(correction)
             correction.attempt_count += 1
             correction.resolved_by = None
             correction.resolved_by_name = None
@@ -1585,7 +1605,21 @@ class DocumentRepository:
                 correction.id,
                 "correction_resubmitted",
                 actor,
-                {"replacement_document_id": record.id, "attempt_count": correction.attempt_count, "version_document_ids": version_ids},
+                {
+                    "replacement_document_id": record.id,
+                    "attempt_count": correction.attempt_count,
+                    "version_document_ids": version_ids,
+                    "assigned_role": correction.assigned_role,
+                    "sla_due_at": correction.sla_due_at.isoformat(),
+                },
+            )
+            self._notify_correction_lifecycle(
+                correction,
+                event="resubmitted",
+                roles={correction.assigned_role},
+                level="resubmitted",
+                title="补件新版本待复核",
+                message=f"{correction.document_type} 已提交第 {correction.attempt_count} 个替换版本，请完成独立复核。",
             )
         try:
             self.session.commit()
@@ -1618,6 +1652,231 @@ class DocumentRepository:
         if case_id:
             statement = statement.where(DocumentCorrectionRecord.case_id == case_id)
         return [_document_correction_to_dict(row) for row in self.session.scalars(statement).all()]
+
+    def list_correction_workbench(self, active_only: bool = True) -> list[dict]:
+        statement = select(DocumentCorrectionRecord).order_by(
+            DocumentCorrectionRecord.sla_due_at.asc(),
+            DocumentCorrectionRecord.created_at.desc(),
+        )
+        if active_only:
+            statement = statement.where(DocumentCorrectionRecord.status.in_(["open", "resubmitted"]))
+        records = self.session.scalars(statement).all()
+        if not records:
+            return []
+        case_ids = {record.case_id for record in records if record.case_id}
+        case_names = {
+            row.case_id: row.counterparty_name
+            for row in self.session.scalars(select(ApprovalCaseRecord).where(ApprovalCaseRecord.case_id.in_(case_ids))).all()
+        } if case_ids else {}
+        record_ids = [record.id for record in records]
+        action_events = self.session.scalars(
+            select(AuditEventRecord)
+            .where(
+                AuditEventRecord.aggregate_type == "document_correction",
+                AuditEventRecord.aggregate_id.in_(record_ids),
+            )
+            .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+        ).all()
+        raw_events_by_id: dict[str, list[dict]] = {}
+        for event in action_events:
+            raw_events_by_id.setdefault(event.aggregate_id, []).append(_audit_to_dict(event))
+        action_event_types = {"correction_manually_reminded", "correction_reassigned", "correction_sla_extended"}
+        events_by_id = {
+            record_id: [
+                {
+                    "event_type": event["event_type"],
+                    "actor": event["actor"],
+                    "reason": event["payload"].get("reason", ""),
+                    "detail": event["payload"].get("detail", ""),
+                    "created_at": event["created_at"],
+                }
+                for event in reversed(_order_hash_chain(events))
+                if event["event_type"] in action_event_types
+            ][:5]
+            for record_id, events in raw_events_by_id.items()
+        }
+        result = []
+        for record in records:
+            item = _document_correction_to_dict(record)
+            item["counterparty_name"] = case_names.get(record.case_id, record.counterparty_id)
+            item["recent_actions"] = events_by_id.get(record.id, [])
+            result.append(item)
+        return result
+
+    def _notify_correction_lifecycle(
+        self,
+        correction: DocumentCorrectionRecord,
+        *,
+        event: str,
+        roles: set[str],
+        level: str,
+        title: str,
+        message: str,
+        severity: str = "info",
+        action_page: str = "documents",
+    ) -> None:
+        if not correction.case_id:
+            return
+        notifications = NotificationRepository(self.session)
+        for role in sorted(roles):
+            notifications.create_if_absent(
+                {
+                    "case_id": correction.case_id,
+                    "counterparty_id": correction.counterparty_id,
+                    "recipient_role": role,
+                    "category": "document_correction",
+                    "level": level,
+                    "severity": severity,
+                    "title": title,
+                    "message": message,
+                    "action_json": {
+                        "page": action_page,
+                        "counterparty_id": correction.counterparty_id,
+                        "case_id": correction.case_id,
+                        "correction_id": correction.id,
+                    },
+                    "dedup_key": f"correction-lifecycle:{correction.id}:{event}:{correction.attempt_count}:{role}",
+                    "status": "unread",
+                }
+            )
+
+    def act_on_correction(
+        self,
+        correction_id: str,
+        expected_row_version: int,
+        action: str,
+        reason: str,
+        actor: str,
+        assigned_role: str | None = None,
+        extension_hours: int | None = None,
+    ) -> dict:
+        record = self.session.get(DocumentCorrectionRecord, correction_id)
+        if not record:
+            raise LookupError("补件任务不存在")
+        if record.status not in {"open", "resubmitted"}:
+            raise ValueError("已结束的补件任务不能继续处置")
+        if record.row_version != expected_row_version:
+            raise ConcurrentUpdateError("补件任务已被其他人员更新，请刷新后重试")
+        now = datetime.now(timezone.utc)
+        event_type: str
+        event_payload = {"action": action, "reason": reason}
+        notification_roles: set[str] = set()
+        notification_level: str
+        notification_title: str
+        notification_message: str
+
+        if action == "remind":
+            if not record.case_id:
+                raise ValueError("未关联审批申请的补件任务不能发送站内催办")
+            if record.last_reminded_at and (now - correction_as_utc(record.last_reminded_at)).total_seconds() < MIN_MANUAL_REMINDER_INTERVAL_SECONDS:
+                raise ValueError("同一补件任务两次人工催办至少间隔 30 分钟")
+            record.reminder_count += 1
+            record.last_reminded_at = now
+            notification_roles = {record.assigned_role}
+            if record.status == "open":
+                notification_roles.add("client")
+            notification_level = "reminder"
+            notification_title = "补件任务人工催办"
+            notification_message = f"{record.document_type} 补件任务待处理，请在 {record.sla_due_at.isoformat()} 前完成。催办原因：{reason}"
+            event_type = "correction_manually_reminded"
+            event_payload.update(
+                {
+                    "reminder_count": record.reminder_count,
+                    "recipient_roles": sorted(notification_roles),
+                    "detail": f"第 {record.reminder_count} 次人工催办",
+                }
+            )
+        elif action == "reassign":
+            allowed_roles = {
+                "open": {"client", "relationship_manager"},
+                "resubmitted": {"risk_manager", "approver"},
+            }[record.status]
+            if assigned_role not in allowed_roles:
+                raise ValueError("目标角色不具备当前补件节点的实际处理权限")
+            if assigned_role == record.assigned_role:
+                raise ValueError("目标角色与当前责任角色相同")
+            previous_role = record.assigned_role
+            previous_assignee = record.assigned_to
+            previous_assignee_name = record.assigned_to_name
+            record.assigned_role = assigned_role
+            clear_assignment(record)
+            notification_roles = {assigned_role}
+            notification_level = "assignment"
+            notification_title = "补件任务已转派"
+            notification_message = f"{record.document_type} 补件任务已转派给当前角色，截止时间 {record.sla_due_at.isoformat()}。转派原因：{reason}"
+            event_type = "correction_reassigned"
+            event_payload.update(
+                {
+                    "previous_role": previous_role,
+                    "previous_assignee": previous_assignee,
+                    "previous_assignee_name": previous_assignee_name,
+                    "assigned_role": assigned_role,
+                    "detail": f"{previous_role} → {assigned_role}",
+                }
+            )
+        elif action == "extend":
+            if not extension_hours:
+                raise ValueError("延期操作必须指定延期小时数")
+            if record.extension_count >= MAX_CORRECTION_EXTENSION_COUNT:
+                raise ValueError("单个补件任务最多允许延期 3 次")
+            if record.total_extension_hours + extension_hours > MAX_TOTAL_CORRECTION_EXTENSION_HOURS:
+                raise ValueError("单个补件任务累计延期不能超过 168 小时")
+            previous_due_at = record.sla_due_at
+            record.sla_due_at = record.sla_due_at + timedelta(hours=extension_hours)
+            record.extension_count += 1
+            record.total_extension_hours += extension_hours
+            notification_roles = {record.assigned_role}
+            if record.status == "open":
+                notification_roles.add("client")
+            notification_level = "extension"
+            notification_title = "补件任务 SLA 已延期"
+            notification_message = f"{record.document_type} 补件任务延期 {extension_hours} 小时，新截止时间 {record.sla_due_at.isoformat()}。延期原因：{reason}"
+            event_type = "correction_sla_extended"
+            event_payload.update(
+                {
+                    "extension_hours": extension_hours,
+                    "previous_due_at": previous_due_at.isoformat(),
+                    "sla_due_at": record.sla_due_at.isoformat(),
+                    "extension_count": record.extension_count,
+                    "total_extension_hours": record.total_extension_hours,
+                    "detail": f"延期 {extension_hours} 小时",
+                }
+            )
+        else:
+            raise ValueError("不支持的补件处置动作")
+
+        try:
+            self.session.flush()
+            self.audit.append("document_correction", record.id, event_type, actor, event_payload)
+            if record.case_id:
+                notifications = NotificationRepository(self.session)
+                for role in sorted(notification_roles):
+                    notifications.create_if_absent(
+                        {
+                            "case_id": record.case_id,
+                            "counterparty_id": record.counterparty_id,
+                            "recipient_role": role,
+                            "category": "document_correction",
+                            "level": notification_level,
+                            "severity": "warning" if action == "remind" else "info",
+                            "title": notification_title,
+                            "message": notification_message,
+                            "action_json": {
+                                "page": "documents",
+                                "counterparty_id": record.counterparty_id,
+                                "case_id": record.case_id,
+                                "correction_id": record.id,
+                            },
+                            "dedup_key": f"correction-action:{record.id}:{record.row_version}:{action}:{role}",
+                            "status": "unread",
+                        }
+                    )
+            self.session.commit()
+        except StaleDataError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("补件任务已被其他人员更新，请刷新后重试") from exc
+        self.session.refresh(record)
+        return _document_correction_to_dict(record)
 
     def link_case(
         self,
@@ -1669,6 +1928,14 @@ class DocumentRepository:
             raise ConcurrentUpdateError("资料检查状态已更新，请刷新后重试")
         if record.uploaded_by == actor_subject:
             raise PermissionError("资料上传人与检查人必须分离")
+        active_correction = self.session.scalars(
+            select(DocumentCorrectionRecord).where(
+                DocumentCorrectionRecord.current_document_id == document_id,
+                DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
+            ).order_by(DocumentCorrectionRecord.created_at.desc())
+        ).first()
+        if active_correction and assignment_is_active(active_correction) and active_correction.assigned_to != actor_subject:
+            raise TaskOwnershipConflict(f"补件任务已由{active_correction.assigned_to_name or '其他人员'}认领")
         if decision == "verify" and any(item.get("status") != "pass" for item in checks):
             raise ValueError("核验通过要求全部检查项均为通过，不能包含不通过或不适用")
         record.checklist_json = deepcopy(checks)
@@ -1726,6 +1993,7 @@ class DocumentRepository:
         now = datetime.now(timezone.utc)
         failed_check_keys = [item["key"] for item in checks if item.get("status") != "pass"]
         if decision == "needs_supplement":
+            assigned_role, sla_started_at, sla_due_at = correction_sla_window("open", now)
             if not correction:
                 correction = DocumentCorrectionRecord(
                     id=str(uuid4()),
@@ -1742,6 +2010,9 @@ class DocumentRepository:
                     requested_by=actor_subject,
                     requested_by_name=actor_name,
                     requested_at=now,
+                    assigned_role=assigned_role,
+                    sla_started_at=sla_started_at,
+                    sla_due_at=sla_due_at,
                 )
                 self.session.add(correction)
                 event_type = "correction_requested"
@@ -1752,30 +2023,220 @@ class DocumentRepository:
                 correction.requested_by = actor_subject
                 correction.requested_by_name = actor_name
                 correction.requested_at = now
+                correction.assigned_role = assigned_role
+                clear_assignment(correction)
+                correction.sla_started_at = sla_started_at
+                correction.sla_due_at = sla_due_at
                 correction.resolved_by = None
                 correction.resolved_by_name = None
                 correction.resolved_at = None
                 event_type = "correction_reopened"
             self.session.flush()
+            self._pause_approval_case_for_correction(correction, actor_name, event_type)
             self.audit.append(
                 "document_correction",
                 correction.id,
                 event_type,
                 actor_name,
-                {"document_id": document.id, "reason": comment, "failed_check_keys": failed_check_keys, "attempt_count": correction.attempt_count},
+                {
+                    "document_id": document.id,
+                    "reason": comment,
+                    "failed_check_keys": failed_check_keys,
+                    "attempt_count": correction.attempt_count,
+                    "assigned_role": correction.assigned_role,
+                    "sla_due_at": correction.sla_due_at.isoformat(),
+                },
+            )
+            self._notify_correction_lifecycle(
+                correction,
+                event=event_type,
+                roles={"client", "relationship_manager"},
+                level="task_created" if event_type == "correction_requested" else "reopened",
+                title="新增补件任务" if event_type == "correction_requested" else "补件任务已重新打开",
+                message=f"{correction.document_type} 需补充，请在 {correction.sla_due_at.isoformat()} 前提交替换资料。原因：{comment}",
+                severity="warning",
             )
         elif correction and correction.status == "resubmitted":
-            correction.status = "closed" if decision == "verify" else "rejected"
-            correction.resolved_by = actor_subject
-            correction.resolved_by_name = actor_name
-            correction.resolved_at = now
+            if decision == "verify":
+                correction.status = "closed"
+                clear_assignment(correction)
+                correction.resolved_by = actor_subject
+                correction.resolved_by_name = actor_name
+                correction.resolved_at = now
+                self.session.flush()
+                resumed_case = self._resume_approval_case_after_corrections(correction, actor_name)
+                event_type = "correction_closed"
+            else:
+                assigned_role, sla_started_at, sla_due_at = correction_sla_window("open", now)
+                correction.status = "open"
+                correction.reason = comment
+                correction.failed_check_keys_json = failed_check_keys
+                correction.requested_by = actor_subject
+                correction.requested_by_name = actor_name
+                correction.requested_at = now
+                correction.assigned_role = assigned_role
+                clear_assignment(correction)
+                correction.sla_started_at = sla_started_at
+                correction.sla_due_at = sla_due_at
+                correction.resolved_by = None
+                correction.resolved_by_name = None
+                correction.resolved_at = None
+                self.session.flush()
+                self._pause_approval_case_for_correction(correction, actor_name, "correction_resubmission_rejected")
+                event_type = "correction_resubmission_rejected"
+                resumed_case = None
             self.audit.append(
                 "document_correction",
                 correction.id,
-                "correction_closed" if decision == "verify" else "correction_rejected",
+                event_type,
                 actor_name,
-                {"document_id": document.id, "decision": decision, "comment": comment, "attempt_count": correction.attempt_count},
+                {
+                    "document_id": document.id,
+                    "decision": decision,
+                    "comment": comment,
+                    "failed_check_keys": failed_check_keys,
+                    "attempt_count": correction.attempt_count,
+                    "status": correction.status,
+                    "assigned_role": correction.assigned_role,
+                    "sla_due_at": correction.sla_due_at.isoformat(),
+                },
             )
+            if decision == "verify":
+                self._notify_correction_lifecycle(
+                    correction,
+                    event=event_type,
+                    roles={"client", "relationship_manager"},
+                    level="completed",
+                    title="补件资料已核验通过",
+                    message=f"{correction.document_type} 的替换版本已核验通过，补件任务已完成。",
+                    action_page="approvals",
+                )
+                if resumed_case:
+                    self._notify_correction_lifecycle(
+                        correction,
+                        event="approval_resumed",
+                        roles=set(APPROVAL_STAGE_ROLES.get(resumed_case.current_stage, set())),
+                        level="resumed",
+                        title="审批流程已恢复",
+                        message=f"全部补件任务已完成，{stage_label(resumed_case.current_stage)}环节已恢复并重新计算 SLA。",
+                        action_page="approvals",
+                    )
+            else:
+                self._notify_correction_lifecycle(
+                    correction,
+                    event=event_type,
+                    roles={"client", "relationship_manager"},
+                    level="reopened",
+                    title="补件新版本未通过",
+                    message=f"{correction.document_type} 的替换版本未通过复核，请重新提交。原因：{comment}",
+                    severity="warning",
+                )
+
+    def _pause_approval_case_for_correction(
+        self,
+        correction: DocumentCorrectionRecord,
+        actor_name: str,
+        source_event: str,
+    ) -> None:
+        if not correction.case_id:
+            return
+        case = self.session.get(ApprovalCaseRecord, correction.case_id)
+        if not case or case.status in {"已完成", "已拒绝", "已撤回"}:
+            return
+        case.status = "待补件"
+        case.stage_due_at = None
+        clear_assignment(case)
+        data = deepcopy(case.case_data or {})
+        workflow = data.setdefault("_workflow", {})
+        correction_ids = self.session.scalars(
+            select(DocumentCorrectionRecord.id).where(
+                DocumentCorrectionRecord.case_id == correction.case_id,
+                DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
+            ).order_by(DocumentCorrectionRecord.created_at, DocumentCorrectionRecord.id)
+        ).all()
+        workflow["active_document_correction_ids"] = correction_ids
+        workflow["document_correction_paused_at"] = datetime.now(timezone.utc).isoformat()
+        case.case_data = data
+        timeline = list(case.timeline or [])
+        timeline.append(
+            {
+                "类型": "资料退补",
+                "环节": stage_label(case.current_stage),
+                "处理人": actor_name,
+                "处理时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "处理结果": f"{correction.document_type} 需补充，审批 SLA 已暂停",
+            }
+        )
+        case.timeline = timeline
+        self.session.flush()
+        self.audit.append(
+            "approval_case",
+            case.case_id,
+            "approval_paused_for_document_correction",
+            actor_name,
+            {
+                "correction_id": correction.id,
+                "document_type": correction.document_type,
+                "source_event": source_event,
+                "active_document_correction_ids": correction_ids,
+                "stage": case.current_stage,
+            },
+        )
+
+    def _resume_approval_case_after_corrections(
+        self,
+        correction: DocumentCorrectionRecord,
+        actor_name: str,
+    ) -> ApprovalCaseRecord | None:
+        if not correction.case_id:
+            return None
+        case = self.session.get(ApprovalCaseRecord, correction.case_id)
+        if not case or case.status != "待补件":
+            return None
+        remaining = self.session.scalars(
+            select(DocumentCorrectionRecord.id).where(
+                DocumentCorrectionRecord.case_id == correction.case_id,
+                DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
+            ).order_by(DocumentCorrectionRecord.created_at, DocumentCorrectionRecord.id)
+        ).all()
+        data = deepcopy(case.case_data or {})
+        workflow = data.setdefault("_workflow", {})
+        workflow["active_document_correction_ids"] = list(remaining)
+        case.case_data = data
+        if remaining:
+            self.session.flush()
+            return None
+        now = datetime.now(timezone.utc)
+        case.status = "处理中"
+        case.stage_started_at = now
+        case.stage_due_at = now + timedelta(hours=STAGE_SLA_HOURS.get(case.current_stage, 24))
+        workflow["document_correction_resumed_at"] = now.isoformat()
+        case.case_data = data
+        timeline = list(case.timeline or [])
+        timeline.append(
+            {
+                "类型": "补件恢复",
+                "环节": stage_label(case.current_stage),
+                "处理人": actor_name,
+                "处理时间": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "处理结果": "全部补件任务已核验通过，审批流程恢复并重新计算环节 SLA",
+            }
+        )
+        case.timeline = timeline
+        self.session.flush()
+        self.audit.append(
+            "approval_case",
+            case.case_id,
+            "approval_resumed_after_document_corrections",
+            actor_name,
+            {
+                "correction_id": correction.id,
+                "stage": case.current_stage,
+                "stage_started_at": case.stage_started_at.isoformat(),
+                "stage_due_at": case.stage_due_at.isoformat(),
+            },
+        )
+        return case
 
 
 class NotificationRepository:
@@ -1799,10 +2260,21 @@ class NotificationRepository:
             return _notification_to_dict(existing), False
         return _notification_to_dict(record), True
 
-    def list(self, recipient_roles: tuple[str, ...] | None = None, status: str | None = None, counterparty_id: str | None = None, limit: int = 100) -> list[dict]:
+    def list(self, recipient_roles: tuple[str, ...] | None = None, recipient_subject: str | None = None, status: str | None = None, counterparty_id: str | None = None, limit: int = 100) -> list[dict]:
         statement = select(NotificationRecord).order_by(NotificationRecord.created_at.desc(), NotificationRecord.id.desc()).limit(limit)
         if recipient_roles is not None:
-            statement = statement.where(NotificationRecord.recipient_role.in_(recipient_roles))
+            broadcast_scope = and_(
+                NotificationRecord.recipient_subject.is_(None),
+                NotificationRecord.recipient_role.in_(recipient_roles),
+            )
+            statement = statement.where(
+                or_(
+                    NotificationRecord.recipient_subject == recipient_subject,
+                    broadcast_scope,
+                )
+                if recipient_subject
+                else broadcast_scope
+            )
         if status:
             statement = statement.where(NotificationRecord.status == status)
         if counterparty_id:
@@ -1817,7 +2289,7 @@ class NotificationRepository:
         record = self.session.get(NotificationRecord, notification_id)
         if not record:
             return None
-        if record.status != "read":
+        if record.status == "unread":
             record.status = "read"
             record.read_at = datetime.now(timezone.utc)
             self.audit.append("notification", record.id, "notification_read", actor, {"case_id": record.case_id, "recipient_role": record.recipient_role})
@@ -2235,6 +2707,9 @@ def clear_persistent_data(session: Session) -> None:
     session.execute(delete(ModelSnapshotRecord))
     session.execute(delete(ModelReleaseRecord))
     session.execute(delete(ModelChangeRecord))
+    session.execute(delete(AuthorityPolicyActivationRunRecord))
+    session.execute(delete(AuthorityPolicyEvidenceAnchorRecord))
+    session.execute(delete(CreditAuthorityPolicyRecord))
     session.execute(delete(ApprovalCaseRecord))
     session.commit()
 
@@ -2253,6 +2728,10 @@ def _case_to_dict(record: ApprovalCaseRecord) -> dict:
         "row_version": record.row_version,
         "stage_started_at": record.stage_started_at.isoformat() if record.stage_started_at else None,
         "stage_due_at": record.stage_due_at.isoformat() if record.stage_due_at else None,
+        "assigned_to": record.assigned_to,
+        "assigned_to_name": record.assigned_to_name,
+        "assigned_at": record.assigned_at.isoformat() if record.assigned_at else None,
+        "assignment_expires_at": record.assignment_expires_at.isoformat() if record.assignment_expires_at else None,
         "sla_status": sla_status,
         "remaining_seconds": remaining_seconds,
         "created_at": record.created_at.isoformat() if record.created_at else None,
@@ -2263,6 +2742,8 @@ def _case_to_dict(record: ApprovalCaseRecord) -> dict:
 def _approval_sla(record: ApprovalCaseRecord) -> tuple[str, int | None]:
     if record.status in {"已完成", "已拒绝", "已撤回"}:
         return "已停止", 0
+    if record.status == "待补件":
+        return "已暂停", 0
     if not record.stage_due_at:
         return "未设置", None
     due_at = record.stage_due_at if record.stage_due_at.tzinfo else record.stage_due_at.replace(tzinfo=timezone.utc)
@@ -2477,6 +2958,7 @@ def _document_to_dict(record: DocumentRecord) -> dict:
 
 
 def _document_correction_to_dict(record: DocumentCorrectionRecord) -> dict:
+    sla = correction_sla_snapshot(record.status, record.sla_due_at)
     return {
         "id": record.id,
         "counterparty_id": record.counterparty_id,
@@ -2492,6 +2974,18 @@ def _document_correction_to_dict(record: DocumentCorrectionRecord) -> dict:
         "requested_by": record.requested_by,
         "requested_by_name": record.requested_by_name,
         "requested_at": record.requested_at.isoformat() if record.requested_at else None,
+        "assigned_role": record.assigned_role,
+        "assigned_to": record.assigned_to,
+        "assigned_to_name": record.assigned_to_name,
+        "assigned_at": record.assigned_at.isoformat() if record.assigned_at else None,
+        "assignment_expires_at": record.assignment_expires_at.isoformat() if record.assignment_expires_at else None,
+        "sla_started_at": record.sla_started_at.isoformat() if record.sla_started_at else None,
+        "sla_due_at": record.sla_due_at.isoformat() if record.sla_due_at else None,
+        "reminder_count": record.reminder_count,
+        "last_reminded_at": record.last_reminded_at.isoformat() if record.last_reminded_at else None,
+        "extension_count": record.extension_count,
+        "total_extension_hours": record.total_extension_hours,
+        **sla,
         "resolved_by": record.resolved_by,
         "resolved_by_name": record.resolved_by_name,
         "resolved_at": record.resolved_at.isoformat() if record.resolved_at else None,
@@ -2507,11 +3001,13 @@ def _notification_to_dict(record: NotificationRecord) -> dict:
         "case_id": record.case_id,
         "counterparty_id": record.counterparty_id,
         "recipient_role": record.recipient_role,
+        "recipient_subject": record.recipient_subject,
         "category": record.category,
         "level": record.level,
         "severity": record.severity,
         "title": record.title,
         "message": record.message,
+        "action": deepcopy(record.action_json or {}),
         "status": record.status,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "read_at": record.read_at.isoformat() if record.read_at else None,

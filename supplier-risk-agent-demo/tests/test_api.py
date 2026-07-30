@@ -3,16 +3,20 @@ from __future__ import annotations
 import unittest
 import hashlib
 import io
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import zipfile
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 import backend.database as database
-from backend.db_models import ApprovalCaseRecord, CreditFacilityRecord, CreditReportRecord, ModelReleaseRecord, RatingRunRecord
+from backend.authority_policy_repository import AuthorityPolicyRepository, BUILTIN_POLICY_VERSION, DEFAULT_AUTHORITY_POLICY_CONFIG, policy_config_hash, verify_authority_policy_evidence_package
+from backend.credit_authority import build_credit_authority
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord
 from backend.dependencies import demo_repository, get_object_storage
 from backend.main import app
 from backend.repository import ModelMonitoringRepository, RatingRunRepository, clear_persistent_data, content_hash
@@ -60,6 +64,24 @@ class ApiTest(unittest.TestCase):
             f"/api/v1/documents/{document['id']}/review",
             json={"decision": decision, "comment": "逐项检查完成", "checks": checks, "expected_row_version": document["row_version"]},
             headers={"Authorization": "Bearer dev-risk"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def _approve_current_authority(self, case_id: str, token: str = "dev-approver") -> dict:
+        headers = {"Authorization": f"Bearer {token}"}
+        case = self.client.get(f"/api/v1/approval-cases/{case_id}", headers=headers).json()
+        authority = case["data"]["_workflow"]["credit_authority"]
+        slot = next(item for item in authority["slots"] if item["status"] == "pending")
+        response = self.client.post(
+            f"/api/v1/approval-cases/{case_id}/signoffs",
+            json={
+                "expected_row_version": case["row_version"],
+                "slot_key": slot["key"],
+                "decision": "approve",
+                "comment": "独立复核授权条件符合制度要求",
+            },
+            headers=headers,
         )
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
@@ -1354,11 +1376,11 @@ class ApiTest(unittest.TestCase):
             }
             session.commit()
             session.refresh(record)
-            row_version = record.row_version
+        authorized = self._approve_current_authority(created["case_id"])
 
         completed = self.client.post(
             f"/api/v1/approval-cases/{created['case_id']}/advance",
-            json={"expected_row_version": row_version, "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            json={"expected_row_version": authorized["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
             headers=approver,
         )
         self.assertEqual(completed.status_code, 200)
@@ -1469,11 +1491,11 @@ class ApiTest(unittest.TestCase):
             }
             session.commit()
             session.refresh(record)
-            row_version = record.row_version
+        authorized = self._approve_current_authority(created["case_id"])
 
         rejected_activation = self.client.post(
             f"/api/v1/approval-cases/{created['case_id']}/advance",
-            json={"expected_row_version": row_version, "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 120000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            json={"expected_row_version": authorized["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 120000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
             headers=approver,
         )
         self.assertEqual(rejected_activation.status_code, 422)
@@ -1505,6 +1527,1374 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(rejected_case.json()["decision_variance_record"]["materiality"], "material")
         self.assertEqual(self.client.get("/api/v1/credit-facilities", headers=risk).json(), [])
 
+    def test_committee_authority_signoff_routes_roles_and_blocks_duplicate_signer(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        approver_peer = {"Authorization": "Bearer dev-approver-peer"}
+        created = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=manager).json()
+        with database.SessionLocal() as session:
+            record = session.get(ApprovalCaseRecord, created["case_id"])
+            record.current_stage = "final_strategy"
+            record.status = "处理中"
+            record.completed_stages = ["registration", "document_upload", "supplement", "approval_submit", "model_selection", "scoring", "credit_proposal"]
+            record.case_data = {
+                "scoring": {"rating": "A"},
+                "credit_proposal": {"suggested_limit": 25_000_000, "suggested_payment_term_days": 30, "access_strategy": "准入"},
+            }
+            session.commit()
+
+        risk_tasks = self.client.get("/api/v1/operations/my-tasks", headers=risk).json()["tasks"]
+        approver_tasks = self.client.get("/api/v1/operations/my-tasks", headers=approver).json()["tasks"]
+        self.assertTrue(any(item["case_id"] == created["case_id"] for item in risk_tasks))
+        self.assertFalse(any(item["case_id"] == created["case_id"] for item in approver_tasks))
+
+        case = self.client.get(f"/api/v1/approval-cases/{created['case_id']}", headers=approver).json()
+        authority = case["data"]["_workflow"]["credit_authority"]
+        self.assertEqual(authority["tier"], "committee")
+        premature = self.client.post(
+            f"/api/v1/approval-cases/{created['case_id']}/signoffs",
+            json={"expected_row_version": case["row_version"], "slot_key": "risk_concurrence", "decision": "approve", "comment": "审批人不能替代风控会签"},
+            headers=approver,
+        )
+        self.assertEqual(premature.status_code, 403)
+
+        after_risk = self._approve_current_authority(created["case_id"], "dev-risk")
+        after_primary = self._approve_current_authority(created["case_id"], "dev-approver")
+        primary_queue = self.client.get("/api/v1/operations/my-tasks", headers=approver).json()["tasks"]
+        peer_queue = self.client.get("/api/v1/operations/my-tasks", headers=approver_peer).json()["tasks"]
+        self.assertFalse(any(item["case_id"] == created["case_id"] for item in primary_queue))
+        self.assertTrue(any(item["case_id"] == created["case_id"] for item in peer_queue))
+        duplicate_claim = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{created['case_id']}/assignment",
+            json={"expected_row_version": after_primary["row_version"], "action": "claim"},
+            headers=approver,
+        )
+        self.assertEqual(duplicate_claim.status_code, 403)
+        duplicate = self.client.post(
+            f"/api/v1/approval-cases/{created['case_id']}/signoffs",
+            json={"expected_row_version": after_primary["row_version"], "slot_key": "approver_secondary", "decision": "approve", "comment": "同一审批人重复签署第二席位"},
+            headers=approver,
+        )
+        self.assertEqual(duplicate.status_code, 422)
+        self.assertIn("不能重复", duplicate.json()["detail"])
+        authorized = self._approve_current_authority(created["case_id"], "dev-approver-peer")
+        self.assertEqual(authorized["data"]["_workflow"]["credit_authority"]["status"], "approved")
+
+        non_final_signer = self.client.post(
+            f"/api/v1/approval-cases/{created['case_id']}/advance",
+            json={"expected_row_version": authorized["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 25_000_000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            headers=approver,
+        )
+        self.assertEqual(non_final_signer.status_code, 403)
+        self.assertIn("最后一名", non_final_signer.json()["detail"])
+        completed = self.client.post(
+            f"/api/v1/approval-cases/{created['case_id']}/advance",
+            json={"expected_row_version": authorized["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 25_000_000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            headers=approver_peer,
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual(completed.json()["status"], "已完成")
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={created['case_id']}", headers=risk).json()
+        signoffs = [item for item in audit if item["event_type"] == "approval_authority_signoff_recorded"]
+        self.assertEqual(len(signoffs), 3)
+
+    def test_authority_policy_draft_four_eye_publish_and_stale_base_gate(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        model_admin = {"Authorization": "Bearer dev-model-admin"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        risk = {"Authorization": "Bearer dev-risk"}
+
+        active = self.client.get("/api/v1/authority-policies/active", headers=manager)
+        self.assertEqual(active.status_code, 200)
+        self.assertEqual(active.json()["policy_version"], BUILTIN_POLICY_VERSION)
+        self.assertEqual(active.json()["source"], "builtin")
+        forbidden = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-FORBIDDEN", "change_reason": "客户经理无权创建策略", "config": DEFAULT_AUTHORITY_POLICY_CONFIG},
+            headers=manager,
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
+        invalid_config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        invalid_config["enhanced_limit"] = invalid_config["standard_limit"]
+        invalid = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-INVALID", "change_reason": "验证额度门槛错误", "config": invalid_config},
+            headers=model_admin,
+        )
+        self.assertEqual(invalid.status_code, 422)
+        self.assertIn("必须大于", invalid.json()["detail"])
+
+        config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        config["standard_limit"] = 3_000_000
+        config["enhanced_limit"] = 12_000_000
+        impact_preview = self.client.post(
+            "/api/v1/authority-policies/impact",
+            json={"policy_version": "AUTH-2026.08", "config": config},
+            headers=model_admin,
+        )
+        self.assertEqual(impact_preview.status_code, 200, impact_preview.text)
+        self.assertTrue(impact_preview.json()["release_gate"]["passed"])
+        self.assertEqual(impact_preview.json()["config_diff"]["overall_direction"], "tightened")
+        self.assertEqual(impact_preview.json()["config_diff"]["summary"]["tightened_count"], 2)
+        self.assertEqual(impact_preview.json()["sample_profile"]["portfolio_count"], 14)
+        self.assertGreaterEqual(impact_preview.json()["sample_profile"]["eligible_count"], 5)
+        self.assertEqual(
+            sum(sum(row.values()) for row in impact_preview.json()["migration_matrix"].values()),
+            impact_preview.json()["sample_profile"]["eligible_count"],
+        )
+        forbidden_impact = self.client.post(
+            "/api/v1/authority-policies/impact",
+            json={"policy_version": "AUTH-FORBIDDEN", "config": config},
+            headers=manager,
+        )
+        self.assertEqual(forbidden_impact.status_code, 403)
+        relaxed_config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        relaxed_config["standard_limit"] = 7_500_000
+        relaxed_config["enhanced_limit"] = 30_000_000
+        relaxed_config["low_risk_ratings"].append("BBB")
+        relaxed_config["high_risk_ratings"] = ["D"]
+        conservative_config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        conservative_config["standard_limit"] = 3_000_000
+        conservative_config["enhanced_limit"] = 12_000_000
+        conservative_config["low_risk_ratings"] = ["AAA", "AA"]
+        conservative_config["high_risk_ratings"] = ["BBB", "BB", "B", "C", "D"]
+        scenario_payload = {
+            "scenarios": [
+                {"key": "relaxed", "name": "宽松情景", "description": "额度上调并减少高风险直接触发范围", "config": relaxed_config},
+                {"key": "baseline", "name": "基准情景", "description": "完整沿用当前生效授权策略配置", "config": DEFAULT_AUTHORITY_POLICY_CONFIG},
+                {"key": "conservative", "name": "审慎情景", "description": "额度下调并扩大高风险直接触发范围", "config": conservative_config},
+            ]
+        }
+        forbidden_scenarios = self.client.post(
+            "/api/v1/authority-policies/scenarios",
+            json=scenario_payload,
+            headers=manager,
+        )
+        self.assertEqual(forbidden_scenarios.status_code, 403)
+        scenario_response = self.client.post(
+            "/api/v1/authority-policies/scenarios",
+            json=scenario_payload,
+            headers=model_admin,
+        )
+        self.assertEqual(scenario_response.status_code, 200, scenario_response.text)
+        scenario_comparison = scenario_response.json()
+        self.assertEqual(len(scenario_comparison["scenarios"]), 3)
+        self.assertEqual(scenario_comparison["sample_profile"]["portfolio_count"], 14)
+        self.assertGreaterEqual(scenario_comparison["sample_profile"]["eligible_count"], 5)
+        self.assertEqual(
+            {row["impact"]["input_snapshot_hash"] for row in scenario_comparison["scenarios"]},
+            {scenario_comparison["input_snapshot_hash"]},
+        )
+        scenario_by_key = {row["key"]: row for row in scenario_comparison["scenarios"]}
+        self.assertEqual(scenario_by_key["baseline"]["impact"]["summary"]["changed_count"], 0)
+        self.assertEqual(scenario_by_key["baseline"]["impact"]["config_diff"]["overall_direction"], "unchanged")
+        self.assertEqual(scenario_by_key["relaxed"]["impact"]["config_diff"]["overall_direction"], "relaxed")
+        self.assertEqual(scenario_by_key["conservative"]["impact"]["config_diff"]["overall_direction"], "tightened")
+        self.assertGreaterEqual(
+            scenario_by_key["conservative"]["metrics"]["committee_count"],
+            scenario_by_key["relaxed"]["metrics"]["committee_count"],
+        )
+        self.assertIn(scenario_comparison["lowest_workload_key"], scenario_by_key)
+        self.assertIn(scenario_comparison["highest_control_key"], scenario_by_key)
+        self.assertTrue(set(scenario_comparison["lowest_workload_keys"]).issubset(scenario_by_key))
+        self.assertTrue(set(scenario_comparison["highest_control_keys"]).issubset(scenario_by_key))
+        duplicate_scenario_payload = deepcopy(scenario_payload)
+        duplicate_scenario_payload["scenarios"][1]["key"] = "relaxed"
+        duplicate_scenarios = self.client.post(
+            "/api/v1/authority-policies/scenarios",
+            json=duplicate_scenario_payload,
+            headers=model_admin,
+        )
+        self.assertEqual(duplicate_scenarios.status_code, 422)
+        self.assertIn("不能重复", duplicate_scenarios.json()["detail"])
+        first = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-2026.08", "change_reason": "根据试点风险偏好收紧额度授权门槛", "config": config},
+            headers=model_admin,
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertTrue(first.json()["impact"]["release_gate"]["passed"])
+        self.assertEqual(first.json()["impact"]["candidate_config_hash"], first.json()["config_hash"])
+        self.assertEqual(first.json()["impact_hash"], policy_config_hash(first.json()["impact"]))
+        stale_candidate = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-2026.09", "change_reason": "并行草稿用于验证基线漂移门禁", "config": DEFAULT_AUTHORITY_POLICY_CONFIG},
+            headers=approver,
+        ).json()
+        duplicate = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-2026.08", "change_reason": "重复版本号验证", "config": config},
+            headers=model_admin,
+        )
+        self.assertEqual(duplicate.status_code, 422)
+
+        missing_diff_impact = deepcopy(stale_candidate["impact"])
+        missing_diff_impact.pop("config_diff")
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(
+                    impact_json=missing_diff_impact,
+                    impact_hash=policy_config_hash(missing_diff_impact),
+                )
+            )
+            session.commit()
+        missing_diff_submit = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/submit",
+            json={"expected_row_version": stale_candidate["row_version"]},
+            headers=approver,
+        )
+        self.assertEqual(missing_diff_submit.status_code, 422)
+        self.assertIn("差异审阅包", missing_diff_submit.json()["detail"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(
+                    impact_json=stale_candidate["impact"],
+                    impact_hash=policy_config_hash(stale_candidate["impact"]),
+                )
+            )
+            session.commit()
+
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(impact_hash="0" * 64)
+            )
+            session.commit()
+        tampered_impact = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/submit",
+            json={"expected_row_version": stale_candidate["row_version"]},
+            headers=approver,
+        )
+        self.assertEqual(tampered_impact.status_code, 422)
+        self.assertIn("影响评估完整性", tampered_impact.json()["detail"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(impact_hash=policy_config_hash(stale_candidate["impact"]))
+            )
+            session.commit()
+        stale_impact = deepcopy(stale_candidate["impact"])
+        stale_impact["input_snapshot_hash"] = "f" * 64
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(impact_json=stale_impact, impact_hash=policy_config_hash(stale_impact))
+            )
+            session.commit()
+        stale_snapshot = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/submit",
+            json={"expected_row_version": stale_candidate["row_version"]},
+            headers=approver,
+        )
+        self.assertEqual(stale_snapshot.status_code, 422)
+        self.assertIn("样本或模型快照已变化", stale_snapshot.json()["detail"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(
+                    impact_json=stale_candidate["impact"],
+                    impact_hash=policy_config_hash(stale_candidate["impact"]),
+                )
+            )
+            session.commit()
+
+        stale_submitted_response = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/submit",
+            json={"expected_row_version": stale_candidate["row_version"]},
+            headers=approver,
+        )
+        self.assertEqual(stale_submitted_response.status_code, 200, stale_submitted_response.text)
+        stale_submitted = stale_submitted_response.json()
+        self_review = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/review",
+            json={"expected_row_version": stale_submitted["row_version"], "decision": "publish", "comment": "创建人尝试审核本人草稿"},
+            headers=approver,
+        )
+        self.assertEqual(self_review.status_code, 403)
+
+        submitted = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/submit",
+            json={"expected_row_version": first.json()["row_version"]},
+            headers=model_admin,
+        )
+        self.assertEqual(submitted.status_code, 200)
+        published = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/review",
+            json={"expected_row_version": submitted.json()["row_version"], "decision": "publish", "comment": "独立复核额度边界和会签模板，批准发布"},
+            headers=risk,
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        self.assertTrue(published.json()["is_active"])
+
+        active = self.client.get("/api/v1/authority-policies/active", headers=manager).json()
+        self.assertEqual(active["policy_version"], "AUTH-2026.08")
+        self.assertEqual(active["config"]["standard_limit"], 3_000_000)
+        authority = build_credit_authority(
+            {"data": {"scoring": {"rating": "A"}, "credit_proposal": {"suggested_limit": 4_000_000, "access_strategy": "准入"}}},
+            active,
+        )
+        self.assertEqual(authority["tier"], "enhanced")
+        self.assertEqual(authority["policy"]["version"], "AUTH-2026.08")
+        self.assertEqual(authority["policy"]["config_hash"], active["config_hash"])
+        forbidden_evidence = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence",
+            headers={"Authorization": "Bearer dev-client"},
+        )
+        self.assertEqual(forbidden_evidence.status_code, 403)
+        evidence = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence",
+            headers=manager,
+        )
+        self.assertEqual(evidence.status_code, 200, evidence.text)
+        self.assertTrue(evidence.json()["integrity"]["passed"])
+        self.assertEqual(evidence.json()["schema_version"], "authority-policy-evidence-v1")
+        self.assertEqual(evidence.json()["policy"]["policy_version"], "AUTH-2026.08")
+        self.assertEqual(evidence.json()["package_hash_algorithm"], "SHA-256")
+        self.assertEqual(len(evidence.json()["package_hash"]), 64)
+        evidence_body = {
+            key: value
+            for key, value in evidence.json().items()
+            if key not in {"generated_at", "package_hash", "package_hash_algorithm"}
+        }
+        self.assertEqual(evidence.json()["package_hash"], policy_config_hash(evidence_body))
+        self.assertEqual(
+            [item["event_type"] for item in evidence.json()["audit"]["policy_lifecycle"]["events"]],
+            ["authority_policy_draft_created", "authority_policy_submitted", "authority_policy_published"],
+        )
+        repeated_evidence = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence",
+            headers=manager,
+        )
+        self.assertEqual(repeated_evidence.json()["package_hash"], evidence.json()["package_hash"])
+        self_sealed_verification = verify_authority_policy_evidence_package(evidence.json())
+        self.assertTrue(self_sealed_verification["verified"])
+        self.assertEqual(self_sealed_verification["trust_level"], "self_sealed")
+        anchored_verification = verify_authority_policy_evidence_package(
+            evidence.json(),
+            evidence.json()["package_hash"].upper(),
+        )
+        self.assertTrue(anchored_verification["verified"])
+        self.assertEqual(anchored_verification["trust_level"], "externally_anchored")
+        tampered_package = deepcopy(evidence.json())
+        tampered_package["policy"]["change_reason"] = "离线文件内容已被修改"
+        tampered_verification = verify_authority_policy_evidence_package(
+            tampered_package,
+            evidence.json()["package_hash"],
+        )
+        self.assertFalse(tampered_verification["verified"])
+        self.assertEqual(tampered_verification["trust_level"], "invalid")
+        self.assertFalse(
+            verify_authority_policy_evidence_package(
+                evidence.json(),
+                "not-a-sha256",
+            )["verified"]
+        )
+        rehashed_audit_tamper = deepcopy(evidence.json())
+        rehashed_audit_tamper["audit"]["policy_lifecycle"]["events"][0]["hash_valid"] = False
+        rehashed_audit_body = {
+            key: value
+            for key, value in rehashed_audit_tamper.items()
+            if key not in {"generated_at", "package_hash", "package_hash_algorithm"}
+        }
+        rehashed_audit_tamper["package_hash"] = policy_config_hash(rehashed_audit_body)
+        rehashed_audit_verification = verify_authority_policy_evidence_package(rehashed_audit_tamper)
+        self.assertFalse(rehashed_audit_verification["verified"])
+        malformed_package = deepcopy(evidence.json())
+        malformed_package["audit"] = []
+        malformed_result = verify_authority_policy_evidence_package(malformed_package)
+        self.assertFalse(malformed_result["verified"])
+        self.assertEqual(malformed_result["trust_level"], "invalid")
+        forbidden_manager_anchor = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=manager,
+        )
+        self.assertEqual(forbidden_manager_anchor.status_code, 403)
+        forbidden_model_admin_anchor = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=model_admin,
+        )
+        self.assertEqual(forbidden_model_admin_anchor.status_code, 403)
+        auditor = {"Authorization": "Bearer dev-auditor"}
+        issued_anchor = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=auditor,
+        )
+        self.assertEqual(issued_anchor.status_code, 201, issued_anchor.text)
+        anchor = issued_anchor.json()
+        self.assertFalse(anchor["idempotent"])
+        self.assertEqual(anchor["policy_id"], first.json()["id"])
+        self.assertEqual(anchor["policy_version"], "AUTH-2026.08")
+        self.assertEqual(anchor["package_hash"], evidence.json()["package_hash"])
+        self.assertEqual(len(anchor["anchor_hash"]), 64)
+        self.assertTrue(anchor["anchor_hash_valid"])
+        self.assertTrue(anchor["package_unchanged"])
+        self.assertTrue(anchor["audit_valid"])
+        self.assertTrue(anchor["registry_valid"])
+        self.assertEqual(anchor["status"], "active")
+        self.assertTrue(anchor["trust_eligible"])
+        self.assertEqual(anchor["row_version"], 1)
+        self.assertIsNone(anchor["revoked_at"])
+        self.assertTrue(anchor["integrity_passed"])
+        self.assertEqual(anchor["package"]["package_hash"], evidence.json()["package_hash"])
+        self.assertEqual(anchor["package"]["policy"], evidence.json()["policy"])
+        self.assertTrue(anchor["package_verification"]["verified"])
+        self.assertEqual(anchor["package_verification"]["trust_level"], "externally_anchored")
+        repeated_anchor = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=auditor,
+        )
+        self.assertEqual(repeated_anchor.status_code, 201, repeated_anchor.text)
+        self.assertTrue(repeated_anchor.json()["idempotent"])
+        self.assertEqual(repeated_anchor.json()["id"], anchor["id"])
+        anchor_list = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=manager,
+        )
+        self.assertEqual(anchor_list.status_code, 200, anchor_list.text)
+        self.assertEqual(len(anchor_list.json()), 1)
+        self.assertNotIn("package", anchor_list.json()[0])
+        anchored_snapshot = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}",
+            headers=manager,
+        )
+        self.assertEqual(anchored_snapshot.status_code, 200, anchored_snapshot.text)
+        self.assertEqual(anchored_snapshot.json()["package"], anchor["package"])
+        self.assertTrue(anchored_snapshot.json()["registry_valid"])
+        missing_anchor = self.client.get(
+            "/api/v1/authority-policies/evidence/anchors/missing-anchor",
+            headers=manager,
+        )
+        self.assertEqual(missing_anchor.status_code, 404)
+        anchor_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={anchor['id']}",
+            headers=auditor,
+        )
+        self.assertEqual(anchor_audit.status_code, 200, anchor_audit.text)
+        self.assertEqual(
+            [item["event_type"] for item in anchor_audit.json()],
+            ["authority_policy_evidence_anchor_issued"],
+        )
+        comparison = self.client.get(
+            "/api/v1/authority-policies/evidence/compare",
+            params={
+                "base_policy_id": first.json()["id"],
+                "candidate_policy_id": stale_candidate["id"],
+            },
+            headers=manager,
+        )
+        self.assertEqual(comparison.status_code, 200, comparison.text)
+        self.assertEqual(comparison.json()["schema_version"], "authority-policy-evidence-comparison-v1")
+        self.assertEqual(comparison.json()["base"]["policy_version"], "AUTH-2026.08")
+        self.assertEqual(comparison.json()["candidate"]["policy_version"], "AUTH-2026.09")
+        self.assertEqual(comparison.json()["config_diff"]["overall_direction"], "relaxed")
+        comparison_body = {
+            key: value
+            for key, value in comparison.json().items()
+            if key not in {"generated_at", "comparison_hash", "comparison_hash_algorithm"}
+        }
+        self.assertEqual(
+            comparison.json()["comparison_hash"],
+            policy_config_hash(comparison_body),
+        )
+        same_version_comparison = self.client.get(
+            "/api/v1/authority-policies/evidence/compare",
+            params={
+                "base_policy_id": first.json()["id"],
+                "candidate_policy_id": first.json()["id"],
+            },
+            headers=manager,
+        )
+        self.assertEqual(same_version_comparison.status_code, 422)
+        forbidden_comparison = self.client.get(
+            "/api/v1/authority-policies/evidence/compare",
+            params={
+                "base_policy_id": first.json()["id"],
+                "candidate_policy_id": stale_candidate["id"],
+            },
+            headers={"Authorization": "Bearer dev-client"},
+        )
+        self.assertEqual(forbidden_comparison.status_code, 403)
+        with database.SessionLocal() as session:
+            lifecycle_event = session.query(AuditEventRecord).filter(
+                AuditEventRecord.aggregate_type == "authority_policy",
+                AuditEventRecord.aggregate_id == first.json()["id"],
+                AuditEventRecord.event_type == "authority_policy_draft_created",
+            ).one()
+            original_audit_payload = deepcopy(lifecycle_event.payload)
+            lifecycle_event.payload = {**lifecycle_event.payload, "change_reason": "被篡改的审计载荷"}
+            session.commit()
+        tampered_audit_evidence = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence",
+            headers=manager,
+        ).json()
+        lifecycle_check = next(
+            item for item in tampered_audit_evidence["integrity"]["checks"]
+            if item["key"] == "lifecycle_audit_chain"
+        )
+        self.assertFalse(tampered_audit_evidence["integrity"]["passed"])
+        self.assertFalse(lifecycle_check["passed"])
+        frozen_after_live_change = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}",
+            headers=manager,
+        )
+        self.assertEqual(frozen_after_live_change.status_code, 200, frozen_after_live_change.text)
+        self.assertTrue(frozen_after_live_change.json()["registry_valid"])
+        self.assertTrue(frozen_after_live_change.json()["package_verification"]["verified"])
+        self.assertEqual(frozen_after_live_change.json()["package"], anchor["package"])
+        with database.SessionLocal() as session:
+            lifecycle_event = session.query(AuditEventRecord).filter(
+                AuditEventRecord.aggregate_type == "authority_policy",
+                AuditEventRecord.aggregate_id == first.json()["id"],
+                AuditEventRecord.event_type == "authority_policy_draft_created",
+            ).one()
+            lifecycle_event.payload = original_audit_payload
+            session.commit()
+        tampered_anchor_package = deepcopy(anchor["package"])
+        tampered_anchor_package["policy"]["change_reason"] = "锚点冻结快照被篡改"
+        with database.SessionLocal() as session:
+            session.execute(
+                update(AuthorityPolicyEvidenceAnchorRecord)
+                .where(AuthorityPolicyEvidenceAnchorRecord.id == anchor["id"])
+                .values(package_json=tampered_anchor_package)
+            )
+            session.commit()
+        tampered_anchor = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}",
+            headers=manager,
+        )
+        self.assertEqual(tampered_anchor.status_code, 200, tampered_anchor.text)
+        self.assertFalse(tampered_anchor.json()["package_unchanged"])
+        self.assertFalse(tampered_anchor.json()["registry_valid"])
+        self.assertFalse(tampered_anchor.json()["package_verification"]["verified"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(AuthorityPolicyEvidenceAnchorRecord)
+                .where(AuthorityPolicyEvidenceAnchorRecord.id == anchor["id"])
+                .values(package_json=anchor["package"])
+            )
+            session.commit()
+        with database.SessionLocal() as session:
+            anchor_event = session.query(AuditEventRecord).filter(
+                AuditEventRecord.aggregate_type == "authority_policy_evidence_anchor",
+                AuditEventRecord.aggregate_id == anchor["id"],
+                AuditEventRecord.event_type == "authority_policy_evidence_anchor_issued",
+            ).one()
+            original_anchor_audit_payload = deepcopy(anchor_event.payload)
+            anchor_event.payload = {**anchor_event.payload, "package_hash": "0" * 64}
+            session.commit()
+        tampered_anchor_audit = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}",
+            headers=manager,
+        )
+        self.assertEqual(tampered_anchor_audit.status_code, 200, tampered_anchor_audit.text)
+        self.assertTrue(tampered_anchor_audit.json()["anchor_hash_valid"])
+        self.assertTrue(tampered_anchor_audit.json()["package_unchanged"])
+        self.assertFalse(tampered_anchor_audit.json()["audit_valid"])
+        self.assertFalse(tampered_anchor_audit.json()["registry_valid"])
+        with database.SessionLocal() as session:
+            anchor_event = session.query(AuditEventRecord).filter(
+                AuditEventRecord.aggregate_type == "authority_policy_evidence_anchor",
+                AuditEventRecord.aggregate_id == anchor["id"],
+                AuditEventRecord.event_type == "authority_policy_evidence_anchor_issued",
+            ).one()
+            anchor_event.payload = original_anchor_audit_payload
+            session.commit()
+        forbidden_manager_revocation = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
+            json={"expected_row_version": anchor["row_version"], "reason": "客户经理无权撤销可信证据锚点"},
+            headers=manager,
+        )
+        self.assertEqual(forbidden_manager_revocation.status_code, 403)
+        forbidden_model_admin_revocation = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
+            json={"expected_row_version": anchor["row_version"], "reason": "模型管理员无权撤销可信证据锚点"},
+            headers=model_admin,
+        )
+        self.assertEqual(forbidden_model_admin_revocation.status_code, 403)
+        self_revocation = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
+            json={"expected_row_version": anchor["row_version"], "reason": "签发人员尝试撤销本人签发的可信锚点"},
+            headers=auditor,
+        )
+        self.assertEqual(self_revocation.status_code, 403)
+        self.assertIn("签发人与撤销人必须分离", self_revocation.json()["detail"])
+        revoked = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
+            json={"expected_row_version": anchor["row_version"], "reason": "外部证据来源停止提供可信校验，需要撤销当前锚点资格"},
+            headers=risk,
+        )
+        self.assertEqual(revoked.status_code, 200, revoked.text)
+        revoked_anchor = revoked.json()
+        self.assertEqual(revoked_anchor["status"], "revoked")
+        self.assertFalse(revoked_anchor["trust_eligible"])
+        self.assertTrue(revoked_anchor["registry_valid"])
+        self.assertTrue(revoked_anchor["audit_valid"])
+        self.assertEqual(revoked_anchor["row_version"], anchor["row_version"] + 1)
+        self.assertEqual(revoked_anchor["revoked_by"], "risk-demo")
+        self.assertEqual(revoked_anchor["revoked_by_name"], "风控经理")
+        self.assertIsNotNone(revoked_anchor["revoked_at"])
+        self.assertEqual(
+            revoked_anchor["revocation_reason"],
+            "外部证据来源停止提供可信校验，需要撤销当前锚点资格",
+        )
+        stale_revocation = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
+            json={"expected_row_version": anchor["row_version"], "reason": "使用旧版本号重复提交撤销操作验证并发门禁"},
+            headers=risk,
+        )
+        self.assertEqual(stale_revocation.status_code, 409)
+        repeated_revocation = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
+            json={
+                "expected_row_version": revoked_anchor["row_version"],
+                "reason": "使用当前版本号重复提交撤销操作验证不可逆状态门禁",
+            },
+            headers=risk,
+        )
+        self.assertEqual(repeated_revocation.status_code, 422)
+        self.assertIn("已经撤销", repeated_revocation.json()["detail"])
+        revoked_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={anchor['id']}",
+            headers=auditor,
+        )
+        self.assertEqual(
+            [item["event_type"] for item in revoked_audit.json()],
+            [
+                "authority_policy_evidence_anchor_issued",
+                "authority_policy_evidence_anchor_revoked",
+            ],
+        )
+        revoked_reissue = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=auditor,
+        )
+        self.assertEqual(revoked_reissue.status_code, 201, revoked_reissue.text)
+        self.assertTrue(revoked_reissue.json()["idempotent"])
+        self.assertEqual(revoked_reissue.json()["id"], anchor["id"])
+        self.assertEqual(revoked_reissue.json()["status"], "revoked")
+        self.assertFalse(revoked_reissue.json()["trust_eligible"])
+        missing_evidence = self.client.get(
+            "/api/v1/authority-policies/missing-policy/evidence",
+            headers=manager,
+        )
+        self.assertEqual(missing_evidence.status_code, 404)
+
+        stale_publish = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/review",
+            json={"expected_row_version": stale_submitted["row_version"], "decision": "publish", "comment": "尝试发布过期基线草稿"},
+            headers=risk,
+        )
+        self.assertEqual(stale_publish.status_code, 422)
+        self.assertIn("影响评估基线已变化", stale_publish.json()["detail"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(CreditAuthorityPolicyRecord)
+                .where(CreditAuthorityPolicyRecord.id == stale_candidate["id"])
+                .values(impact_hash="0" * 64)
+            )
+            session.commit()
+        rejected_stale = self.client.post(
+            f"/api/v1/authority-policies/{stale_candidate['id']}/review",
+            json={"expected_row_version": stale_submitted["row_version"], "decision": "reject", "comment": "基线和影响快照已过期，驳回后重新创建"},
+            headers=risk,
+        )
+        self.assertEqual(rejected_stale.status_code, 200, rejected_stale.text)
+        self.assertEqual(rejected_stale.json()["status"], "rejected")
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={first.json()['id']}", headers=risk).json()
+        self.assertEqual(
+            [item["event_type"] for item in audit],
+            ["authority_policy_draft_created", "authority_policy_submitted", "authority_policy_published"],
+        )
+        with database.SessionLocal() as session:
+            active_record = session.get(CreditAuthorityPolicyRecord, first.json()["id"])
+            active_record.config_hash = "0" * 64
+            session.commit()
+            with self.assertRaisesRegex(ValueError, "完整性校验失败"):
+                AuthorityPolicyRepository(session).active_snapshot()
+        tampered_evidence = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence",
+            headers=manager,
+        )
+        self.assertEqual(tampered_evidence.status_code, 200, tampered_evidence.text)
+        self.assertFalse(tampered_evidence.json()["integrity"]["passed"])
+        config_check = next(
+            item for item in tampered_evidence.json()["integrity"]["checks"]
+            if item["key"] == "config_hash"
+        )
+        self.assertFalse(config_check["passed"])
+
+    def test_authority_policy_safe_restore_creates_new_reviewed_version(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        model_admin = {"Authorization": "Bearer dev-model-admin"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        risk = {"Authorization": "Bearer dev-risk"}
+
+        forbidden = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": "builtin", "policy_version": "AUTH-R-FORBIDDEN", "change_reason": "客户经理无权创建恢复草稿"},
+            headers=manager,
+        )
+        self.assertEqual(forbidden.status_code, 403)
+        already_active = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": "builtin", "policy_version": "AUTH-R-NOOP", "change_reason": "验证不能恢复当前已生效配置"},
+            headers=model_admin,
+        )
+        self.assertEqual(already_active.status_code, 422)
+        self.assertIn("已经生效", already_active.json()["detail"])
+
+        tightened = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        tightened["standard_limit"] = 3_000_000
+        tightened["enhanced_limit"] = 12_000_000
+        created = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-RESTORE-SOURCE", "change_reason": "先发布收紧策略用于恢复链路测试", "config": tightened},
+            headers=model_admin,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        submitted = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/submit",
+            json={"expected_row_version": created.json()["row_version"]},
+            headers=model_admin,
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        published = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/review",
+            json={"expected_row_version": submitted.json()["row_version"], "decision": "publish", "comment": "独立复核通过，发布用于恢复测试"},
+            headers=risk,
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+
+        active_source = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": created.json()["id"], "policy_version": "AUTH-R-ACTIVE", "change_reason": "验证不能恢复当前生效历史记录"},
+            headers=approver,
+        )
+        self.assertEqual(active_source.status_code, 422)
+        self.assertIn("已经生效", active_source.json()["detail"])
+
+        restored = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": "builtin", "policy_version": "AUTH-R-BUILTIN", "change_reason": "恢复内置授权基线并重新执行影响评估"},
+            headers=approver,
+        )
+        self.assertEqual(restored.status_code, 201, restored.text)
+        restore_record = restored.json()
+        self.assertEqual(restore_record["status"], "draft")
+        self.assertEqual(restore_record["base_policy_version"], "AUTH-RESTORE-SOURCE")
+        self.assertIsNone(restore_record["restore_source_policy_id"])
+        self.assertEqual(restore_record["restore_source_policy_version"], BUILTIN_POLICY_VERSION)
+        self.assertEqual(restore_record["config"], DEFAULT_AUTHORITY_POLICY_CONFIG)
+        self.assertEqual(restore_record["impact"]["config_diff"]["overall_direction"], "relaxed")
+        modified_restore = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        modified_restore["standard_limit"] = 4_000_000
+        immutable_restore = self.client.put(
+            f"/api/v1/authority-policies/{restore_record['id']}",
+            json={"expected_row_version": restore_record["row_version"], "change_reason": "尝试修改已封存来源的恢复草稿", "config": modified_restore},
+            headers=approver,
+        )
+        self.assertEqual(immutable_restore.status_code, 422)
+        self.assertIn("恢复草稿已封存", immutable_restore.json()["detail"])
+
+        restore_submitted = self.client.post(
+            f"/api/v1/authority-policies/{restore_record['id']}/submit",
+            json={"expected_row_version": restore_record["row_version"]},
+            headers=approver,
+        )
+        self.assertEqual(restore_submitted.status_code, 200, restore_submitted.text)
+        self_review = self.client.post(
+            f"/api/v1/authority-policies/{restore_record['id']}/review",
+            json={"expected_row_version": restore_submitted.json()["row_version"], "decision": "publish", "comment": "创建人不能审核自己的恢复草稿"},
+            headers=approver,
+        )
+        self.assertEqual(self_review.status_code, 403)
+        restore_published = self.client.post(
+            f"/api/v1/authority-policies/{restore_record['id']}/review",
+            json={"expected_row_version": restore_submitted.json()["row_version"], "decision": "publish", "comment": "独立复核恢复来源与影响评估，批准发布"},
+            headers=risk,
+        )
+        self.assertEqual(restore_published.status_code, 200, restore_published.text)
+        active = self.client.get("/api/v1/authority-policies/active", headers=manager).json()
+        self.assertEqual(active["policy_version"], "AUTH-R-BUILTIN")
+        self.assertEqual(active["config"], DEFAULT_AUTHORITY_POLICY_CONFIG)
+
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={restore_record['id']}", headers=risk).json()
+        self.assertEqual(
+            [item["event_type"] for item in audit],
+            ["authority_policy_restore_draft_created", "authority_policy_submitted", "authority_policy_published"],
+        )
+        self.assertEqual(audit[0]["payload"]["restore_source_policy_version"], BUILTIN_POLICY_VERSION)
+
+        historical_restore = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": created.json()["id"], "policy_version": "AUTH-R-HISTORY", "change_reason": "从已停用历史版本创建新的恢复草稿"},
+            headers=model_admin,
+        )
+        self.assertEqual(historical_restore.status_code, 201, historical_restore.text)
+        self.assertEqual(historical_restore.json()["restore_source_policy_id"], created.json()["id"])
+        self.assertEqual(historical_restore.json()["restore_source_policy_version"], "AUTH-RESTORE-SOURCE")
+
+        invalid_source = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": historical_restore.json()["id"], "policy_version": "AUTH-R-DRAFT", "change_reason": "验证草稿不能作为历史恢复来源"},
+            headers=approver,
+        )
+        self.assertEqual(invalid_source.status_code, 422)
+        self.assertIn("已发布", invalid_source.json()["detail"])
+        missing_source = self.client.post(
+            "/api/v1/authority-policies/restore-drafts",
+            json={"source_policy_ref": "missing-policy", "policy_version": "AUTH-R-MISSING", "change_reason": "验证不存在的恢复来源会被拒绝"},
+            headers=approver,
+        )
+        self.assertEqual(missing_source.status_code, 404)
+
+    def test_authority_policy_scheduled_activation_and_cancellation(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        model_admin = {"Authorization": "Bearer dev-model-admin"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        risk = {"Authorization": "Bearer dev-risk"}
+
+        config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        config["standard_limit"] = 4_000_000
+        config["enhanced_limit"] = 16_000_000
+        created = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-SCHEDULED-1", "change_reason": "季度授权边界调整并预约生效", "config": config},
+            headers=model_admin,
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        submitted = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/submit",
+            json={"expected_row_version": created.json()["row_version"]},
+            headers=model_admin,
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+
+        too_soon = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/review",
+            json={
+                "expected_row_version": submitted.json()["row_version"],
+                "decision": "publish",
+                "comment": "预约时间过近应被安全门禁拒绝",
+                "effective_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+            },
+            headers=risk,
+        )
+        self.assertEqual(too_soon.status_code, 422, too_soon.text)
+        self.assertIn("至少晚于", too_soon.json()["detail"])
+
+        effective_at = datetime.now(timezone.utc) + timedelta(hours=2)
+        scheduled = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/review",
+            json={
+                "expected_row_version": submitted.json()["row_version"],
+                "decision": "publish",
+                "comment": "独立审核通过并预约季度窗口自动生效",
+                "effective_at": effective_at.isoformat(),
+            },
+            headers=risk,
+        )
+        self.assertEqual(scheduled.status_code, 200, scheduled.text)
+        self.assertEqual(scheduled.json()["status"], "scheduled")
+        self.assertFalse(scheduled.json()["is_active"])
+        self.assertIsNotNone(scheduled.json()["effective_at"])
+        self.assertRegex(scheduled.json()["effective_at"], r"[+-]\d{2}:\d{2}$")
+        self.assertIsNone(scheduled.json()["published_at"])
+        active_before = self.client.get("/api/v1/authority-policies/active", headers=manager).json()
+        self.assertEqual(active_before["policy_version"], BUILTIN_POLICY_VERSION)
+
+        second_config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
+        second_config["standard_limit"] = 3_500_000
+        second_config["enhanced_limit"] = 14_000_000
+        second = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-SCHEDULED-2", "change_reason": "验证单一待生效版本并发门禁", "config": second_config},
+            headers=approver,
+        ).json()
+        second_submitted = self.client.post(
+            f"/api/v1/authority-policies/{second['id']}/submit",
+            json={"expected_row_version": second["row_version"]},
+            headers=approver,
+        ).json()
+        competing_publish = self.client.post(
+            f"/api/v1/authority-policies/{second['id']}/review",
+            json={
+                "expected_row_version": second_submitted["row_version"],
+                "decision": "publish",
+                "comment": "存在既有排期时不得覆盖或立即发布",
+            },
+            headers=risk,
+        )
+        self.assertEqual(competing_publish.status_code, 422, competing_publish.text)
+        self.assertIn("已有待生效", competing_publish.json()["detail"])
+
+        premature_scan = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:no-due:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(premature_scan.status_code, 200, premature_scan.text)
+        self.assertEqual(premature_scan.json()["activated_count"], 0)
+        self.assertEqual(premature_scan.json()["run"]["status"], "no_due")
+        self.assertFalse(premature_scan.json()["idempotent"])
+        repeated_premature_scan = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:no-due:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(repeated_premature_scan.status_code, 200, repeated_premature_scan.text)
+        self.assertTrue(repeated_premature_scan.json()["idempotent"])
+        self.assertEqual(repeated_premature_scan.json()["run"]["id"], premature_scan.json()["run"]["id"])
+        scheduler_health = self.client.get("/api/v1/authority-policies/activation-status", headers=manager).json()["scheduler_health"]
+        self.assertEqual(scheduler_health["state"], "healthy")
+        self.assertEqual(scheduler_health["last_scheduler_run"]["id"], premature_scan.json()["run"]["id"])
+        conflicting_run_key = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:no-due:001", "trigger_type": "manual"},
+            headers=risk,
+        )
+        self.assertEqual(conflicting_run_key.status_code, 422, conflicting_run_key.text)
+        self.assertIn("不能改作", conflicting_run_key.json()["detail"])
+        forbidden_scan = self.client.post("/api/v1/authority-policies/activation-scan", headers=manager)
+        self.assertEqual(forbidden_scan.status_code, 403)
+        forbidden_cancel = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/cancel-schedule",
+            json={"expected_row_version": scheduled.json()["row_version"], "reason": "模型管理员不能取消已审核排期"},
+            headers=model_admin,
+        )
+        self.assertEqual(forbidden_cancel.status_code, 403)
+        cancelled = self.client.post(
+            f"/api/v1/authority-policies/{created.json()['id']}/cancel-schedule",
+            json={"expected_row_version": scheduled.json()["row_version"], "reason": "业务切换窗口调整，取消本次排期"},
+            headers=risk,
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertEqual(cancelled.json()["schedule_cancelled_by"], "risk-demo")
+        self.assertEqual(cancelled.json()["schedule_cancel_reason"], "业务切换窗口调整，取消本次排期")
+
+        rescheduled = self.client.post(
+            f"/api/v1/authority-policies/{second['id']}/review",
+            json={
+                "expected_row_version": second_submitted["row_version"],
+                "decision": "publish",
+                "comment": "原排期取消后独立审核新的预约策略",
+                "effective_at": (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat(),
+            },
+            headers=risk,
+        )
+        self.assertEqual(rescheduled.status_code, 200, rescheduled.text)
+        self.assertEqual(rescheduled.json()["status"], "scheduled")
+        with database.SessionLocal() as session:
+            due = session.get(CreditAuthorityPolicyRecord, second["id"])
+            due.effective_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            session.commit()
+            session.refresh(due)
+            due_row_version = due.row_version
+        late_cancel = self.client.post(
+            f"/api/v1/authority-policies/{second['id']}/cancel-schedule",
+            json={"expected_row_version": due_row_version, "reason": "到达生效时间后不得再取消排期"},
+            headers=risk,
+        )
+        self.assertEqual(late_cancel.status_code, 422, late_cancel.text)
+        self.assertIn("已到预约生效时间", late_cancel.json()["detail"])
+
+        activated = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:activate:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(activated.status_code, 200, activated.text)
+        self.assertEqual(activated.json()["activated_count"], 1)
+        self.assertEqual(activated.json()["run"]["status"], "activated")
+        self.assertEqual(activated.json()["activated_policy"]["policy_version"], "AUTH-SCHEDULED-2")
+        self.assertEqual(activated.json()["activated_policy"]["status"], "published")
+        self.assertTrue(activated.json()["activated_policy"]["is_active"])
+        self.assertIsNotNone(activated.json()["activated_policy"]["activated_at"])
+        active_after = self.client.get("/api/v1/authority-policies/active", headers=manager).json()
+        self.assertEqual(active_after["policy_version"], "AUTH-SCHEDULED-2")
+
+        idempotent_activation = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:activate:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(idempotent_activation.status_code, 200, idempotent_activation.text)
+        self.assertTrue(idempotent_activation.json()["idempotent"])
+        self.assertEqual(idempotent_activation.json()["activated_count"], 1)
+        idempotent_scan = self.client.post("/api/v1/authority-policies/activation-scan", headers=risk)
+        self.assertEqual(idempotent_scan.status_code, 200, idempotent_scan.text)
+        self.assertEqual(idempotent_scan.json()["due_count"], 0)
+        activation_status = self.client.get("/api/v1/authority-policies/activation-status", headers=manager)
+        self.assertEqual(activation_status.status_code, 200, activation_status.text)
+        self.assertIsNone(activation_status.json()["scheduled_policy"])
+        self.assertGreaterEqual(len(activation_status.json()["recent_runs"]), 3)
+        self.assertEqual(
+            {item["status"] for item in activation_status.json()["recent_runs"]},
+            {"no_due", "activated"},
+        )
+        schedule_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={second['id']}",
+            headers=risk,
+        ).json()
+        self.assertEqual(
+            [item["event_type"] for item in schedule_audit],
+            ["authority_policy_draft_created", "authority_policy_submitted", "authority_policy_scheduled", "authority_policy_scheduled_activated"],
+        )
+
+        blocked_config = deepcopy(second_config)
+        blocked_config["standard_limit"] = 3_000_000
+        blocked_config["enhanced_limit"] = 12_000_000
+        blocked = self.client.post(
+            "/api/v1/authority-policies",
+            json={"policy_version": "AUTH-SCHEDULED-BLOCKED", "change_reason": "验证激活阻断台账与责任角色告警", "config": blocked_config},
+            headers=model_admin,
+        ).json()
+        blocked_submitted = self.client.post(
+            f"/api/v1/authority-policies/{blocked['id']}/submit",
+            json={"expected_row_version": blocked["row_version"]},
+            headers=model_admin,
+        ).json()
+        blocked_scheduled = self.client.post(
+            f"/api/v1/authority-policies/{blocked['id']}/review",
+            json={
+                "expected_row_version": blocked_submitted["row_version"],
+                "decision": "publish",
+                "comment": "独立复核通过，用于验证切换异常告警",
+                "effective_at": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+            },
+            headers=risk,
+        )
+        self.assertEqual(blocked_scheduled.status_code, 200, blocked_scheduled.text)
+        with database.SessionLocal() as session:
+            blocked_record = session.get(CreditAuthorityPolicyRecord, blocked["id"])
+            blocked_record.effective_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            blocked_record.base_policy_version = "AUTH-STALE-BASE"
+            session.commit()
+
+        blocked_scan = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:blocked:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(blocked_scan.status_code, 200, blocked_scan.text)
+        self.assertEqual(blocked_scan.json()["run"]["status"], "blocked")
+        self.assertEqual(blocked_scan.json()["activated_count"], 0)
+        self.assertIn("基线已变化", blocked_scan.json()["run"]["error_message"])
+        self.assertEqual(
+            self.client.get("/api/v1/authority-policies/active", headers=manager).json()["policy_version"],
+            "AUTH-SCHEDULED-2",
+        )
+        risk_notifications = self.client.get("/api/v1/notifications?unread_only=true", headers=risk)
+        self.assertEqual(risk_notifications.status_code, 200, risk_notifications.text)
+        policy_alert = next(item for item in risk_notifications.json() if item["category"] == "authority_policy")
+        self.assertEqual(policy_alert["level"], "policy_blocked")
+        self.assertEqual(policy_alert["severity"], "critical")
+        self.assertIsNone(policy_alert["case_id"])
+        self.assertEqual(policy_alert["action"], {"page": "approvals"})
+        blocked_status = self.client.get("/api/v1/authority-policies/activation-status", headers=manager).json()
+        self.assertEqual(blocked_status["scheduled_policy"]["policy_version"], "AUTH-SCHEDULED-BLOCKED")
+        self.assertEqual(blocked_status["recent_runs"][0]["status"], "blocked")
+        self.assertEqual(blocked_status["recent_runs"][0]["incident_status"], "open")
+        self.assertEqual(blocked_status["unresolved_incident_count"], 1)
+        self.assertEqual(blocked_status["scheduler_health"]["state"], "blocked")
+        self.assertEqual(blocked_status["unresolved_incidents"][0]["id"], blocked_scan.json()["run"]["id"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(AuthorityPolicyActivationRunRecord)
+                .where(AuthorityPolicyActivationRunRecord.id == blocked_scan.json()["run"]["id"])
+                .values(incident_status="acknowledged")
+            )
+            session.commit()
+        missing_ack_evidence = self.client.get(
+            f"/api/v1/authority-policies/{blocked['id']}/evidence",
+            headers=manager,
+        ).json()
+        missing_ack_check = next(
+            item for item in missing_ack_evidence["integrity"]["checks"]
+            if item["key"] == "activation_audit_chains"
+        )
+        self.assertFalse(missing_ack_evidence["integrity"]["passed"])
+        self.assertFalse(missing_ack_check["passed"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(AuthorityPolicyActivationRunRecord)
+                .where(AuthorityPolicyActivationRunRecord.id == blocked_scan.json()["run"]["id"])
+                .values(incident_status="open")
+            )
+            alert = session.scalars(
+                select(NotificationRecord).where(
+                    NotificationRecord.dedup_key.like(
+                        f"authority-policy-activation:{blocked_scan.json()['run']['id']}:%:blocked"
+                    )
+                )
+            ).first()
+            alert.status = "resolved"
+            session.commit()
+        premature_alert_evidence = self.client.get(
+            f"/api/v1/authority-policies/{blocked['id']}/evidence",
+            headers=manager,
+        ).json()
+        alert_check = next(
+            item for item in premature_alert_evidence["integrity"]["checks"]
+            if item["key"] == "incident_alerts"
+        )
+        self.assertFalse(premature_alert_evidence["integrity"]["passed"])
+        self.assertFalse(alert_check["passed"])
+        with database.SessionLocal() as session:
+            alert = session.scalars(
+                select(NotificationRecord).where(
+                    NotificationRecord.dedup_key.like(
+                        f"authority-policy-activation:{blocked_scan.json()['run']['id']}:%:blocked"
+                    )
+                )
+            ).first()
+            alert.status = "unread"
+            session.commit()
+        repeated_blocked_scan = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:blocked:repeat:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(repeated_blocked_scan.status_code, 200, repeated_blocked_scan.text)
+        self.assertEqual(repeated_blocked_scan.json()["run"]["status"], "blocked")
+        self.assertEqual(repeated_blocked_scan.json()["run"]["incident_status"], "not_applicable")
+        self.assertEqual(repeated_blocked_scan.json()["run"]["retry_of_run_id"], blocked_scan.json()["run"]["id"])
+        repeated_blocked_status = self.client.get("/api/v1/authority-policies/activation-status", headers=manager).json()
+        self.assertEqual(repeated_blocked_status["unresolved_incident_count"], 1)
+        self.assertEqual(repeated_blocked_status["unresolved_incidents"][0]["id"], blocked_scan.json()["run"]["id"])
+        self.assertEqual(
+            len([
+                item for item in self.client.get("/api/v1/notifications", headers=risk).json()
+                if item["category"] == "authority_policy"
+            ]),
+            1,
+        )
+
+        forbidden_acknowledgement = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{blocked_scan.json()['run']['id']}/acknowledge",
+            json={"expected_row_version": blocked_scan.json()["run"]["row_version"], "note": "客户经理无权确认策略治理异常"},
+            headers=manager,
+        )
+        self.assertEqual(forbidden_acknowledgement.status_code, 403)
+        retry_before_acknowledgement = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{blocked_scan.json()['run']['id']}/retry",
+            json={
+                "expected_row_version": blocked_scan.json()["run"]["row_version"],
+                "note": "尚未确认异常时不得直接重试",
+                "run_key": "authority-schedule:retry-before-ack:001",
+            },
+            headers=risk,
+        )
+        self.assertEqual(retry_before_acknowledgement.status_code, 422)
+        self.assertIn("请先确认", retry_before_acknowledgement.json()["detail"])
+
+        acknowledged = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{blocked_scan.json()['run']['id']}/acknowledge",
+            json={"expected_row_version": blocked_scan.json()["run"]["row_version"], "note": "已核查为基线引用异常，修复后执行人工重试"},
+            headers=risk,
+        )
+        self.assertEqual(acknowledged.status_code, 200, acknowledged.text)
+        self.assertEqual(acknowledged.json()["incident_status"], "acknowledged")
+        self.assertEqual(acknowledged.json()["acknowledged_by"], "risk-demo")
+        self.assertGreater(acknowledged.json()["row_version"], blocked_scan.json()["run"]["row_version"])
+        stale_acknowledgement = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{blocked_scan.json()['run']['id']}/acknowledge",
+            json={"expected_row_version": blocked_scan.json()["run"]["row_version"], "note": "使用旧版本重复确认应被拒绝"},
+            headers=risk,
+        )
+        self.assertEqual(stale_acknowledgement.status_code, 409)
+
+        with database.SessionLocal() as session:
+            blocked_record = session.get(CreditAuthorityPolicyRecord, blocked["id"])
+            blocked_record.base_policy_version = "AUTH-SCHEDULED-2"
+            session.commit()
+        retried = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{blocked_scan.json()['run']['id']}/retry",
+            json={
+                "expected_row_version": acknowledged.json()["row_version"],
+                "note": "基线引用已完成修复，重新执行完整性校验和激活",
+                "run_key": "authority-schedule:retry:001",
+            },
+            headers=risk,
+        )
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertEqual(retried.json()["run"]["status"], "activated")
+        self.assertEqual(retried.json()["run"]["retry_of_run_id"], blocked_scan.json()["run"]["id"])
+        self.assertEqual(retried.json()["activated_policy"]["policy_version"], "AUTH-SCHEDULED-BLOCKED")
+        idempotent_retry = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{blocked_scan.json()['run']['id']}/retry",
+            json={
+                "expected_row_version": acknowledged.json()["row_version"],
+                "note": "网络重试继续使用相同运行键",
+                "run_key": "authority-schedule:retry:001",
+            },
+            headers=risk,
+        )
+        self.assertEqual(idempotent_retry.status_code, 200, idempotent_retry.text)
+        self.assertTrue(idempotent_retry.json()["idempotent"])
+        resolved_status = self.client.get("/api/v1/authority-policies/activation-status", headers=manager).json()
+        resolved_incident = next(item for item in resolved_status["recent_runs"] if item["id"] == blocked_scan.json()["run"]["id"])
+        self.assertEqual(resolved_status["unresolved_incident_count"], 0)
+        self.assertEqual(resolved_status["scheduler_health"]["state"], "idle")
+        self.assertEqual(resolved_incident["incident_status"], "resolved")
+        self.assertEqual(resolved_incident["resolution_type"], "retry_activated")
+        self.assertEqual(resolved_incident["resolved_by_run_id"], retried.json()["run"]["id"])
+        self.assertFalse(any(
+            item["category"] == "authority_policy"
+            for item in self.client.get("/api/v1/notifications?unread_only=true", headers=risk).json()
+        ))
+        resolved_policy_alert = next(
+            item for item in self.client.get("/api/v1/notifications", headers=risk).json()
+            if item["category"] == "authority_policy"
+        )
+        self.assertEqual(resolved_policy_alert["status"], "resolved")
+        resolved_alert_read = self.client.post(
+            f"/api/v1/notifications/{resolved_policy_alert['id']}/read",
+            headers=risk,
+        )
+        self.assertEqual(resolved_alert_read.status_code, 200, resolved_alert_read.text)
+        self.assertEqual(resolved_alert_read.json()["status"], "resolved")
+        scheduled_evidence = self.client.get(
+            f"/api/v1/authority-policies/{blocked['id']}/evidence",
+            headers=manager,
+        )
+        self.assertEqual(scheduled_evidence.status_code, 200, scheduled_evidence.text)
+        self.assertTrue(scheduled_evidence.json()["integrity"]["passed"])
+        self.assertEqual(len(scheduled_evidence.json()["activation_runs"]), 3)
+        self.assertTrue(
+            verify_authority_policy_evidence_package(
+                scheduled_evidence.json(),
+                scheduled_evidence.json()["package_hash"],
+            )["verified"]
+        )
+        missing_run_chain = deepcopy(scheduled_evidence.json())
+        missing_run_chain["audit"]["activation_runs"].pop(retried.json()["run"]["id"])
+        missing_run_chain_body = {
+            key: value
+            for key, value in missing_run_chain.items()
+            if key not in {"generated_at", "package_hash", "package_hash_algorithm"}
+        }
+        missing_run_chain["package_hash"] = policy_config_hash(missing_run_chain_body)
+        self.assertFalse(
+            verify_authority_policy_evidence_package(missing_run_chain)["verified"]
+        )
+        self.assertEqual(
+            {
+                item["status"]
+                for item in scheduled_evidence.json()["notifications_by_run"][blocked_scan.json()["run"]["id"]]
+            },
+            {"resolved"},
+        )
+        incident_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={blocked_scan.json()['run']['id']}",
+            headers=risk,
+        ).json()
+        self.assertEqual(
+            [item["event_type"] for item in incident_audit],
+            [
+                "authority_policy_activation_run_blocked",
+                "authority_policy_activation_incident_acknowledged",
+                "authority_policy_activation_incident_resolved",
+            ],
+        )
+
+        cancel_config = deepcopy(blocked_config)
+        cancel_config["standard_limit"] = 2_500_000
+        cancel_config["enhanced_limit"] = 10_000_000
+        cancel_candidate = self.client.post(
+            "/api/v1/authority-policies",
+            json={
+                "policy_version": "AUTH-SCHEDULED-CANCEL-AFTER-BLOCK",
+                "change_reason": "验证激活异常确认后可以终止失效排期",
+                "config": cancel_config,
+            },
+            headers=approver,
+        )
+        self.assertEqual(cancel_candidate.status_code, 201, cancel_candidate.text)
+        cancel_submitted = self.client.post(
+            f"/api/v1/authority-policies/{cancel_candidate.json()['id']}/submit",
+            json={"expected_row_version": cancel_candidate.json()["row_version"]},
+            headers=approver,
+        )
+        self.assertEqual(cancel_submitted.status_code, 200, cancel_submitted.text)
+        cancel_scheduled = self.client.post(
+            f"/api/v1/authority-policies/{cancel_candidate.json()['id']}/review",
+            json={
+                "expected_row_version": cancel_submitted.json()["row_version"],
+                "decision": "publish",
+                "comment": "独立审核通过，用于验证异常确认后的终止路径",
+                "effective_at": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+            },
+            headers=risk,
+        )
+        self.assertEqual(cancel_scheduled.status_code, 200, cancel_scheduled.text)
+        with database.SessionLocal() as session:
+            cancel_record = session.get(CreditAuthorityPolicyRecord, cancel_candidate.json()["id"])
+            cancel_record.effective_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            cancel_record.base_policy_version = "AUTH-CANCEL-STALE-BASE"
+            session.commit()
+        cancel_blocked = self.client.post(
+            "/api/v1/authority-policies/activation-scan",
+            json={"run_key": "authority-schedule:cancel-blocked:001", "trigger_type": "scheduler"},
+            headers=risk,
+        )
+        self.assertEqual(cancel_blocked.status_code, 200, cancel_blocked.text)
+        self.assertEqual(cancel_blocked.json()["run"]["incident_status"], "open")
+        late_cancel_before_ack = self.client.post(
+            f"/api/v1/authority-policies/{cancel_candidate.json()['id']}/cancel-schedule",
+            json={
+                "expected_row_version": next(
+                    item for item in self.client.get("/api/v1/authority-policies", headers=manager).json()
+                    if item["id"] == cancel_candidate.json()["id"]
+                )["row_version"],
+                "reason": "异常尚未确认时不能直接取消排期",
+            },
+            headers=risk,
+        )
+        self.assertEqual(late_cancel_before_ack.status_code, 422)
+        self.assertIn("尚未确认", late_cancel_before_ack.json()["detail"])
+        cancel_acknowledged = self.client.post(
+            f"/api/v1/authority-policies/activation-runs/{cancel_blocked.json()['run']['id']}/acknowledge",
+            json={
+                "expected_row_version": cancel_blocked.json()["run"]["row_version"],
+                "note": "确认基线无法安全恢复，决定终止本次预约发布",
+            },
+            headers=risk,
+        )
+        self.assertEqual(cancel_acknowledged.status_code, 200, cancel_acknowledged.text)
+        current_cancel_policy = next(
+            item for item in self.client.get("/api/v1/authority-policies", headers=manager).json()
+            if item["id"] == cancel_candidate.json()["id"]
+        )
+        cancelled_after_block = self.client.post(
+            f"/api/v1/authority-policies/{cancel_candidate.json()['id']}/cancel-schedule",
+            json={
+                "expected_row_version": current_cancel_policy["row_version"],
+                "reason": "基线条件已变化，终止预约发布并重新发起策略草稿",
+            },
+            headers=risk,
+        )
+        self.assertEqual(cancelled_after_block.status_code, 200, cancelled_after_block.text)
+        self.assertEqual(cancelled_after_block.json()["status"], "cancelled")
+        cancelled_status = self.client.get("/api/v1/authority-policies/activation-status", headers=manager).json()
+        cancelled_incident = next(item for item in cancelled_status["recent_runs"] if item["id"] == cancel_blocked.json()["run"]["id"])
+        self.assertIsNone(cancelled_status["scheduled_policy"])
+        self.assertEqual(cancelled_status["unresolved_incident_count"], 0)
+        self.assertEqual(cancelled_incident["incident_status"], "resolved")
+        self.assertEqual(cancelled_incident["resolution_type"], "schedule_cancelled")
+        self.assertIsNone(cancelled_incident["resolved_by_run_id"])
+
     def test_risk_event_disposition_and_facility_controls(self) -> None:
         manager = {"Authorization": "Bearer dev-manager"}
         approver = {"Authorization": "Bearer dev-approver"}
@@ -1520,10 +2910,10 @@ class ApiTest(unittest.TestCase):
             record.case_data = {"scoring": {"rating": "A"}, "credit_proposal": {"suggested_limit": 100000, "suggested_payment_term_days": 30, "access_strategy": "准入"}}
             session.commit()
             session.refresh(record)
-            row_version = record.row_version
+        authorized = self._approve_current_authority(created["case_id"])
         completed = self.client.post(
             f"/api/v1/approval-cases/{created['case_id']}/advance",
-            json={"expected_row_version": row_version, "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            json={"expected_row_version": authorized["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
             headers=approver,
         ).json()
         facility = completed["credit_facility"]
@@ -1794,6 +3184,8 @@ class ApiTest(unittest.TestCase):
         case = response.json()
         self.assertEqual(case["current_stage"], "final_strategy")
         self.assertEqual(case["data"]["credit_proposal"]["rating_run_id"], rating_run_id)
+        self.assertEqual(case["data"]["_workflow"]["credit_authority"]["policy"]["version"], BUILTIN_POLICY_VERSION)
+        self.assertTrue(case["data"]["_workflow"]["credit_authority"]["policy"]["config_hash"])
 
         returned = self.client.post(
             f"/api/v1/approval-cases/{case['case_id']}/actions",
@@ -1804,6 +3196,8 @@ class ApiTest(unittest.TestCase):
         case = returned.json()
         self.assertEqual(case["current_stage"], "supplement")
         self.assertEqual(case["status"], "待补件")
+        self.assertEqual(case["sla_status"], "已暂停")
+        self.assertIsNone(case["stage_due_at"])
         self.assertNotIn("scoring", case["data"])
 
         still_missing = self.client.post(
@@ -1828,6 +3222,8 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         case = response.json()
         self.assertEqual(case["status"], "处理中")
+        self.assertEqual(case["sla_status"], "正常")
+        self.assertIsNotNone(case["stage_due_at"])
 
         response = self.client.post(
             f"/api/v1/approval-cases/{case['case_id']}/advance",
@@ -1943,6 +3339,406 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(summary.json()["sla"]["escalated"], 1)
         self.assertEqual(summary.json()["last_scan"]["run_id"], escalated_scan.json()["run_id"])
         self.assertEqual(forbidden_summary.status_code, 403)
+
+    def test_personal_task_queue_role_scope_priority_and_correction_handoff(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        client = {"Authorization": "Bearer dev-client"}
+        urgent_case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        normal_case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        with database.SessionLocal() as session:
+            session.get(ApprovalCaseRecord, urgent_case["case_id"]).stage_due_at = datetime.now(timezone.utc) - timedelta(hours=5)
+            session.get(ApprovalCaseRecord, normal_case["case_id"]).stage_due_at = datetime.now(timezone.utc) + timedelta(hours=5)
+            session.commit()
+
+        manager_queue = self.client.get("/api/v1/operations/my-tasks", headers=manager)
+        self.assertEqual(manager_queue.status_code, 200)
+        self.assertEqual(manager_queue.json()["summary"]["approval"], 2)
+        self.assertEqual(manager_queue.json()["summary"]["escalated"], 1)
+        self.assertEqual(manager_queue.json()["tasks"][0]["case_id"], urgent_case["case_id"])
+        self.assertEqual(manager_queue.json()["tasks"][0]["action"]["page"], "approvals")
+        self.assertEqual(self.client.get("/api/v1/operations/my-tasks", headers=risk).json()["summary"]["total"], 0)
+        self.assertEqual(self.client.get("/api/v1/operations/my-tasks", headers=client).json()["summary"]["total"], 0)
+        urgent_task = manager_queue.json()["tasks"][0]
+        forbidden_claim = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{urgent_case['case_id']}/assignment",
+            json={"action": "claim", "expected_row_version": urgent_task["row_version"]},
+            headers=risk,
+        )
+        self.assertEqual(forbidden_claim.status_code, 403)
+        claimed = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{urgent_case['case_id']}/assignment",
+            json={"action": "claim", "expected_row_version": urgent_task["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(claimed.status_code, 200, claimed.text)
+        self.assertEqual(claimed.json()["assigned_to"], "manager-demo")
+        self.assertIsNotNone(claimed.json()["assignment_expires_at"])
+        self.assertGreater(claimed.json()["lease_remaining_seconds"], 14300)
+        claimed_task = self.client.get("/api/v1/operations/my-tasks", headers=manager).json()["tasks"][0]
+        self.assertEqual(claimed_task["assignment_state"], "mine")
+        self.assertEqual(claimed_task["assigned_to_name"], "客户经理")
+        self.assertGreater(claimed_task["lease_remaining_seconds"], 14300)
+        stale_release = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{urgent_case['case_id']}/assignment",
+            json={"action": "release", "expected_row_version": urgent_task["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(stale_release.status_code, 409)
+        renewed = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{urgent_case['case_id']}/assignment",
+            json={"action": "renew", "expected_row_version": claimed.json()["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(renewed.status_code, 200, renewed.text)
+        self.assertGreater(renewed.json()["row_version"], claimed.json()["row_version"])
+        released = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{urgent_case['case_id']}/assignment",
+            json={"action": "release", "expected_row_version": renewed.json()["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(released.status_code, 200, released.text)
+        self.assertIsNone(released.json()["assigned_to"])
+
+        with database.SessionLocal() as session:
+            locked_case = session.get(ApprovalCaseRecord, normal_case["case_id"])
+            locked_case.assigned_to = "other-manager"
+            locked_case.assigned_to_name = "其他客户经理"
+            locked_case.assigned_at = datetime.now(timezone.utc)
+            session.commit()
+            locked_version = locked_case.row_version
+        locked_advance = self.client.post(
+            f"/api/v1/approval-cases/{normal_case['case_id']}/advance",
+            json={"payload": {}, "expected_row_version": locked_version},
+            headers=manager,
+        )
+        self.assertEqual(locked_advance.status_code, 409)
+        self.assertIn("其他客户经理", locked_advance.json()["detail"])
+        admin = {"Authorization": "Bearer dev-admin"}
+        admin_locked_task = next(
+            task
+            for task in self.client.get("/api/v1/operations/my-tasks", headers=admin).json()["tasks"]
+            if task["case_id"] == normal_case["case_id"]
+        )
+        self.assertEqual(admin_locked_task["assignment_state"], "assigned_other")
+        self.assertTrue(admin_locked_task["can_release"])
+        admin_takeover = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{normal_case['case_id']}/assignment",
+            json={"action": "claim", "expected_row_version": admin_locked_task["row_version"]},
+            headers=admin,
+        )
+        self.assertEqual(admin_takeover.status_code, 409)
+        admin_release = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{normal_case['case_id']}/assignment",
+            json={"action": "release", "expected_row_version": admin_locked_task["row_version"]},
+            headers=admin,
+        )
+        self.assertEqual(admin_release.status_code, 200, admin_release.text)
+        self.assertIsNone(admin_release.json()["assigned_to"])
+
+        with database.SessionLocal() as session:
+            expired_case = session.get(ApprovalCaseRecord, normal_case["case_id"])
+            expired_case.assigned_to = "absent-manager"
+            expired_case.assigned_to_name = "离岗客户经理"
+            expired_case.assigned_at = datetime.now(timezone.utc) - timedelta(hours=5)
+            expired_case.assignment_expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            session.commit()
+        expired_task = next(
+            task
+            for task in self.client.get("/api/v1/operations/my-tasks", headers=manager).json()["tasks"]
+            if task["case_id"] == normal_case["case_id"]
+        )
+        self.assertEqual(expired_task["assignment_state"], "unassigned")
+        self.assertTrue(expired_task["assignment_expired"])
+        reclaimed = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{normal_case['case_id']}/assignment",
+            json={"action": "claim", "expected_row_version": expired_task["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(reclaimed.status_code, 200, reclaimed.text)
+        self.assertEqual(reclaimed.json()["assigned_to"], "manager-demo")
+        self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{normal_case['case_id']}/assignment",
+            json={"action": "release", "expected_row_version": reclaimed.json()["row_version"]},
+            headers=manager,
+        )
+
+        with database.SessionLocal() as session:
+            due_case = session.get(ApprovalCaseRecord, normal_case["case_id"])
+            due_case.assigned_to = "manager-demo"
+            due_case.assigned_to_name = "客户经理"
+            due_case.assigned_at = datetime.now(timezone.utc) - timedelta(hours=3, minutes=40)
+            due_case.assignment_expires_at = datetime.now(timezone.utc) + timedelta(minutes=20)
+            session.commit()
+        due_scan = self.client.post(
+            "/api/v1/operations/sla/scan",
+            headers={"Authorization": "Bearer dev-operations"},
+        )
+        self.assertEqual(due_scan.status_code, 200, due_scan.text)
+        due_notification = next(
+            item
+            for item in self.client.get("/api/v1/notifications", headers=manager).json()
+            if item["case_id"] == normal_case["case_id"] and item["level"] == "lease_due_soon"
+        )
+        self.assertEqual(due_notification["recipient_subject"], "manager-demo")
+        self.assertFalse(any(
+            item["id"] == due_notification["id"]
+            for item in self.client.get(
+                "/api/v1/notifications",
+                headers={"Authorization": "Bearer dev-manager-peer"},
+            ).json()
+        ))
+
+        with database.SessionLocal() as session:
+            expired_case = session.get(ApprovalCaseRecord, normal_case["case_id"])
+            expired_case.assigned_to = "absent-manager"
+            expired_case.assigned_to_name = "离岗客户经理"
+            expired_case.assigned_at = datetime.now(timezone.utc) - timedelta(hours=5)
+            expired_case.assignment_expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+            session.commit()
+        scanned = self.client.post(
+            "/api/v1/operations/sla/scan",
+            headers={"Authorization": "Bearer dev-operations"},
+        )
+        self.assertEqual(scanned.status_code, 200, scanned.text)
+        self.assertGreaterEqual(scanned.json()["expired_assignments_released"], 1)
+        with database.SessionLocal() as session:
+            self.assertIsNone(session.get(ApprovalCaseRecord, normal_case["case_id"]).assigned_to)
+        expired_notification = next(
+            item
+            for item in self.client.get(
+                "/api/v1/notifications",
+                headers={"Authorization": "Bearer dev-admin"},
+            ).json()
+            if item["case_id"] == normal_case["case_id"] and item["level"] == "lease_expired"
+        )
+        self.assertEqual(expired_notification["recipient_subject"], "absent-manager")
+
+        original = self.client.post(
+            "/api/v1/documents",
+            data={
+                "counterparty_id": self.counterparty["id"],
+                "case_id": urgent_case["case_id"],
+                "document_type": "营业执照",
+            },
+            files={"file": ("待补件.txt", "主体信息缺失".encode(), "text/plain")},
+            headers=manager,
+        ).json()
+        review_checks = [
+            {"key": "integrity", "label": "文件格式与指纹完整", "status": "pass", "note": ""},
+            {"key": "entity_match", "label": "企业名称及统一信用代码一致", "status": "fail", "note": ""},
+            {"key": "validity", "label": "证照、报告或证明仍在有效期", "status": "pass", "note": ""},
+            {"key": "completeness", "label": "关键页、签章和附件完整", "status": "fail", "note": ""},
+            {"key": "legibility", "label": "内容清晰可读且不存在明显涂改", "status": "pass", "note": ""},
+        ]
+        supplemented = self.client.post(
+            f"/api/v1/documents/{original['id']}/review",
+            json={
+                "decision": "needs_supplement",
+                "comment": "主体信息和关键页缺失，请补交完整证照",
+                "checks": review_checks,
+                "expected_row_version": original["row_version"],
+            },
+            headers=risk,
+        )
+        self.assertEqual(supplemented.status_code, 200, supplemented.text)
+        correction = self.client.get(
+            f"/api/v1/documents/corrections?counterparty_id={self.counterparty['id']}&case_id={urgent_case['case_id']}",
+            headers=manager,
+        ).json()[0]
+
+        manager_tasks = self.client.get("/api/v1/operations/my-tasks", headers=manager).json()["tasks"]
+        manager_correction = next(task for task in manager_tasks if task["correction_id"] == correction["id"])
+        self.assertEqual(manager_correction["viewer_mode"], "owner")
+        self.assertFalse(any(task["task_type"] == "approval" and task["case_id"] == urgent_case["case_id"] for task in manager_tasks))
+        client_correction = self.client.get("/api/v1/operations/my-tasks", headers=client).json()["tasks"][0]
+        self.assertEqual(client_correction["correction_id"], correction["id"])
+        self.assertEqual(client_correction["viewer_mode"], "collaborator")
+        self.assertEqual(client_correction["action"]["page"], "documents")
+        self.assertEqual(self.client.get("/api/v1/operations/my-tasks", headers=risk).json()["summary"]["correction"], 0)
+
+        client_claim = self.client.post(
+            f"/api/v1/operations/my-tasks/correction/{correction['id']}/assignment",
+            json={"action": "claim", "expected_row_version": client_correction["row_version"]},
+            headers=client,
+        )
+        self.assertEqual(client_claim.status_code, 200, client_claim.text)
+        blocked_replacement = self.client.post(
+            "/api/v1/documents",
+            data={
+                "counterparty_id": self.counterparty["id"],
+                "case_id": urgent_case["case_id"],
+                "document_type": "营业执照",
+                "correction_id": correction["id"],
+            },
+            files={"file": ("被锁定.txt", "不能重复上传".encode(), "text/plain")},
+            headers=manager,
+        )
+        self.assertEqual(blocked_replacement.status_code, 409)
+        client_release = self.client.post(
+            f"/api/v1/operations/my-tasks/correction/{correction['id']}/assignment",
+            json={"action": "release", "expected_row_version": client_claim.json()["row_version"]},
+            headers=client,
+        )
+        self.assertEqual(client_release.status_code, 200, client_release.text)
+
+        replacement = self.client.post(
+            "/api/v1/documents",
+            data={
+                "counterparty_id": self.counterparty["id"],
+                "case_id": urgent_case["case_id"],
+                "document_type": "营业执照",
+                "correction_id": correction["id"],
+            },
+            files={"file": ("完整证照.txt", f"{self.counterparty['name']} {self.counterparty['credit_code']}".encode(), "text/plain")},
+            headers=manager,
+        )
+        self.assertEqual(replacement.status_code, 201, replacement.text)
+        risk_tasks = self.client.get("/api/v1/operations/my-tasks", headers=risk).json()["tasks"]
+        risk_correction = next(task for task in risk_tasks if task["correction_id"] == correction["id"])
+        self.assertEqual(risk_correction["viewer_mode"], "owner")
+        self.assertEqual(risk_correction["title"], "复核替换资料：营业执照")
+        self.assertFalse(any(
+            task["correction_id"] == correction["id"]
+            for task in self.client.get("/api/v1/operations/my-tasks", headers=manager).json()["tasks"]
+        ))
+        self.assertEqual(self.client.get("/api/v1/operations/my-tasks", headers={"Authorization": "Bearer dev-operations"}).json()["summary"]["total"], 0)
+        self.assertEqual(self.client.get("/api/v1/operations/my-tasks?limit=0", headers=manager).status_code, 422)
+        approval_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={urgent_case['case_id']}",
+            headers={"Authorization": "Bearer dev-auditor"},
+        ).json()
+        normal_approval_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={normal_case['case_id']}",
+            headers={"Authorization": "Bearer dev-auditor"},
+        ).json()
+        correction_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={correction['id']}",
+            headers={"Authorization": "Bearer dev-auditor"},
+        ).json()
+        approval_event_types = {item["event_type"] for item in approval_audit + normal_approval_audit}
+        self.assertTrue({"personal_task_claimed", "personal_task_lease_renewed", "personal_task_released", "personal_task_lease_expired"}.issubset(approval_event_types))
+        self.assertTrue({"personal_task_claimed", "personal_task_released"}.issubset({item["event_type"] for item in correction_audit}))
+
+    def test_team_task_board_and_supervisor_release(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        auditor = {"Authorization": "Bearer dev-auditor"}
+        case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        manager_task = next(
+            task
+            for task in self.client.get("/api/v1/operations/my-tasks", headers=manager).json()["tasks"]
+            if task["case_id"] == case["case_id"]
+        )
+        claimed = self.client.post(
+            f"/api/v1/operations/my-tasks/approval/{case['case_id']}/assignment",
+            json={"action": "claim", "expected_row_version": manager_task["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(claimed.status_code, 200, claimed.text)
+
+        read_only_board = self.client.get("/api/v1/operations/team-tasks", headers=auditor)
+        self.assertEqual(read_only_board.status_code, 200, read_only_board.text)
+        read_only_task = next(task for task in read_only_board.json()["tasks"] if task["case_id"] == case["case_id"])
+        self.assertFalse(read_only_task["can_force_release"])
+        self.assertFalse(read_only_task["can_release"])
+        self.assertEqual(read_only_task["assigned_to_name"], "客户经理")
+        self.assertEqual(
+            self.client.get("/api/v1/operations/team-tasks", headers={"Authorization": "Bearer dev-client"}).status_code,
+            403,
+        )
+        denied_release = self.client.post(
+            f"/api/v1/operations/team-tasks/approval/{case['case_id']}/release",
+            json={"expected_row_version": read_only_task["row_version"], "reason": "审计人员不能释放任务"},
+            headers=auditor,
+        )
+        self.assertEqual(denied_release.status_code, 403)
+
+        operations_board = self.client.get("/api/v1/operations/team-tasks", headers=operations)
+        self.assertEqual(operations_board.status_code, 200, operations_board.text)
+        self.assertGreaterEqual(operations_board.json()["summary"]["claimed"], 1)
+        operations_task = next(task for task in operations_board.json()["tasks"] if task["case_id"] == case["case_id"])
+        self.assertTrue(operations_task["can_force_release"])
+        manager_load = next(item for item in operations_board.json()["assignee_load"] if item["subject"] == "manager-demo")
+        self.assertGreaterEqual(manager_load["total"], 1)
+        role_load = next(item for item in operations_board.json()["role_load"] if item["role"] == "relationship_manager")
+        self.assertGreaterEqual(role_load["claimed"], 1)
+        self.assertEqual(
+            self.client.get("/api/v1/operations/team-tasks?limit=0", headers=operations).status_code,
+            422,
+        )
+        invalid_reason = self.client.post(
+            f"/api/v1/operations/team-tasks/approval/{case['case_id']}/release",
+            json={"expected_row_version": operations_task["row_version"], "reason": "短"},
+            headers=operations,
+        )
+        self.assertEqual(invalid_reason.status_code, 422)
+        reminded = self.client.post(
+            f"/api/v1/operations/team-tasks/approval/{case['case_id']}/remind",
+            json={"expected_row_version": operations_task["row_version"], "reason": "请在今日下班前完成当前审批任务"},
+            headers=operations,
+        )
+        self.assertEqual(reminded.status_code, 200, reminded.text)
+        self.assertEqual(reminded.json()["recipient_subject"], "manager-demo")
+        self.assertEqual(reminded.json()["level"], "supervisor_reminder")
+        duplicate_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/approval/{case['case_id']}/remind",
+            json={"expected_row_version": operations_task["row_version"], "reason": "再次催办当前任务处理进度"},
+            headers=operations,
+        )
+        self.assertEqual(duplicate_reminder.status_code, 409)
+        manager_notifications = self.client.get(
+            "/api/v1/notifications",
+            headers=manager,
+        ).json()
+        self.assertTrue(any(item["id"] == reminded.json()["id"] for item in manager_notifications))
+        peer_notifications = self.client.get(
+            "/api/v1/notifications",
+            headers={"Authorization": "Bearer dev-manager-peer"},
+        ).json()
+        self.assertFalse(any(item["id"] == reminded.json()["id"] for item in peer_notifications))
+        self.assertEqual(
+            self.client.post(
+                f"/api/v1/notifications/{reminded.json()['id']}/read",
+                headers={"Authorization": "Bearer dev-manager-peer"},
+            ).status_code,
+            404,
+        )
+        released = self.client.post(
+            f"/api/v1/operations/team-tasks/approval/{case['case_id']}/release",
+            json={"expected_row_version": operations_task["row_version"], "reason": "原处理人临时离岗，由公共队列重新分配"},
+            headers=operations,
+        )
+        self.assertEqual(released.status_code, 200, released.text)
+        self.assertIsNone(released.json()["assigned_to"])
+        refreshed_task = next(
+            task
+            for task in self.client.get("/api/v1/operations/team-tasks", headers=operations).json()["tasks"]
+            if task["case_id"] == case["case_id"]
+        )
+        self.assertEqual(refreshed_task["assignment_state"], "unassigned")
+        audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={case['case_id']}",
+            headers=auditor,
+        ).json()
+        release_event = next(item for item in audit if item["event_type"] == "personal_task_supervisor_released")
+        reminder_event = next(item for item in audit if item["event_type"] == "personal_task_supervisor_reminded")
+        self.assertEqual(release_event["actor"], "运营值班")
+        self.assertEqual(release_event["payload"]["previous_assignee"], "manager-demo")
+        self.assertIn("临时离岗", release_event["payload"]["reason"])
+        self.assertEqual(reminder_event["payload"]["recipient_subject"], "manager-demo")
 
     def test_authentication_rbac_and_current_user(self) -> None:
         unauthorized = self.client.get("/api/v1/counterparties")
@@ -2148,8 +3944,29 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         correction = listed.json()[0]
         self.assertEqual(correction["status"], "open")
+        self.assertEqual(correction["assigned_role"], "relationship_manager")
+        self.assertEqual(correction["sla_status"], "normal")
+        self.assertGreater(correction["remaining_seconds"], 47 * 3600)
+        self.assertIsNotNone(correction["sla_started_at"])
+        self.assertIsNotNone(correction["sla_due_at"])
         self.assertEqual(correction["version_document_ids"], [original.json()["id"]])
         self.assertEqual(set(correction["failed_check_keys"]), {"entity_match", "completeness"})
+        paused_case = self.client.get(f"/api/v1/approval-cases/{case_id}", headers=manager).json()
+        self.assertEqual(paused_case["status"], "待补件")
+        self.assertEqual(paused_case["sla_status"], "已暂停")
+        self.assertIsNone(paused_case["stage_due_at"])
+        self.assertEqual(paused_case["data"]["_workflow"]["active_document_correction_ids"], [correction["id"]])
+        manager_notifications = self.client.get("/api/v1/notifications?unread_only=true", headers=manager).json()
+        created_notice = next(item for item in manager_notifications if item["level"] == "task_created")
+        self.assertEqual(
+            created_notice["action"],
+            {
+                "page": "documents",
+                "counterparty_id": self.counterparty["id"],
+                "case_id": case_id,
+                "correction_id": correction["id"],
+            },
+        )
 
         replacement_content = (
             f"营业执照\n企业名称：{self.counterparty['name']}\n统一社会信用代码：{self.counterparty['credit_code']}"
@@ -2183,14 +4000,33 @@ class ApiTest(unittest.TestCase):
             headers=risk,
         ).json()[0]
         self.assertEqual(resubmitted["status"], "resubmitted")
+        self.assertEqual(resubmitted["assigned_role"], "risk_manager")
+        self.assertEqual(resubmitted["sla_status"], "normal")
+        self.assertGreater(resubmitted["remaining_seconds"], 23 * 3600)
         self.assertEqual(resubmitted["current_document_id"], replacement.json()["id"])
         self.assertEqual(resubmitted["version_document_ids"], [original.json()["id"], replacement.json()["id"]])
         self.assertEqual(resubmitted["attempt_count"], 1)
+        risk_notifications = self.client.get("/api/v1/notifications?unread_only=true", headers=risk).json()
+        self.assertTrue(any(item["level"] == "resubmitted" and item["action"]["correction_id"] == correction["id"] for item in risk_notifications))
+
+        comparison_response = self.client.get(
+            f"/api/v1/documents/corrections/{correction['id']}/comparison",
+            headers=risk,
+        )
+        self.assertEqual(comparison_response.status_code, 200, comparison_response.text)
+        comparison = comparison_response.json()
+        self.assertEqual(comparison["from_document"]["id"], original.json()["id"])
+        self.assertEqual(comparison["to_document"]["id"], replacement.json()["id"])
+        self.assertEqual(comparison["overall_trend"], "improved")
+        self.assertEqual(comparison["readiness"], "ready_for_manual_review")
+        self.assertGreaterEqual(comparison["summary"]["resolved_count"], 2)
+        self.assertEqual(comparison["summary"]["remaining_count"], 0)
+        self.assertIn("自动预检未发现遗留异常", comparison["recommendation"])
 
         second_supplement = self.client.post(
             f"/api/v1/documents/{replacement.json()['id']}/review",
             json={
-                "decision": "needs_supplement",
+                "decision": "reject",
                 "comment": "证照有效期页仍不完整，请再次补交完整扫描件",
                 "checks": [
                     {"key": item["key"], "label": item["label"], "status": "fail" if item["key"] == "validity" else "pass", "note": ""}
@@ -2206,8 +4042,13 @@ class ApiTest(unittest.TestCase):
             headers=manager,
         ).json()[0]
         self.assertEqual(reopened["status"], "open")
+        self.assertEqual(reopened["assigned_role"], "relationship_manager")
         self.assertEqual(reopened["reason"], "证照有效期页仍不完整，请再次补交完整扫描件")
         self.assertEqual(reopened["failed_check_keys"], ["validity"])
+        self.assertTrue(any(
+            item["level"] == "reopened" and item["action"]["page"] == "documents"
+            for item in self.client.get("/api/v1/notifications?unread_only=true", headers=manager).json()
+        ))
 
         final_replacement = self.client.post(
             "/api/v1/documents",
@@ -2226,6 +4067,7 @@ class ApiTest(unittest.TestCase):
             headers=risk,
         ).json()[0]
         self.assertEqual(second_resubmission["attempt_count"], 2)
+        self.assertEqual(second_resubmission["assigned_role"], "risk_manager")
         self.assertEqual(
             second_resubmission["version_document_ids"],
             [original.json()["id"], replacement.json()["id"], final_replacement.json()["id"]],
@@ -2238,7 +4080,18 @@ class ApiTest(unittest.TestCase):
             headers=manager,
         ).json()[0]
         self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["sla_status"], "stopped")
+        self.assertEqual(closed["remaining_seconds"], 0)
         self.assertEqual(closed["resolved_by_name"], "风控经理")
+        resumed_case = self.client.get(f"/api/v1/approval-cases/{case_id}", headers=manager).json()
+        self.assertEqual(resumed_case["status"], "处理中")
+        self.assertEqual(resumed_case["sla_status"], "正常")
+        self.assertIsNotNone(resumed_case["stage_due_at"])
+        self.assertEqual(resumed_case["data"]["_workflow"]["active_document_correction_ids"], [])
+        self.assertEqual(resumed_case["timeline"][-1]["类型"], "补件恢复")
+        final_notifications = self.client.get("/api/v1/notifications?unread_only=true", headers=manager).json()
+        self.assertTrue(any(item["level"] == "completed" and item["action"]["page"] == "approvals" for item in final_notifications))
+        self.assertTrue(any(item["level"] == "resumed" and item["action"]["case_id"] == case_id for item in final_notifications))
 
         repeated_replacement = self.client.post(
             "/api/v1/documents",
@@ -2252,6 +4105,277 @@ class ApiTest(unittest.TestCase):
             headers=manager,
         )
         self.assertEqual(repeated_replacement.status_code, 422)
+
+    def test_document_correction_sla_scan_and_escalation_notifications(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        client = {"Authorization": "Bearer dev-client"}
+        created_case = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=manager).json()
+        case_id = created_case["case_id"]
+        uploaded = self.client.post(
+            "/api/v1/documents",
+            data={"counterparty_id": self.counterparty["id"], "case_id": case_id, "document_type": "营业执照"},
+            files={"file": ("待补件.txt", "缺少主体信息".encode(), "text/plain")},
+            headers=manager,
+        ).json()
+        checklist = self.client.get(
+            f"/api/v1/documents/checklist?counterparty_id={self.counterparty['id']}&case_id={case_id}",
+            headers=risk,
+        ).json()
+        supplement = self.client.post(
+            f"/api/v1/documents/{uploaded['id']}/review",
+            json={
+                "decision": "needs_supplement",
+                "comment": "主体信息缺失，请补交",
+                "checks": [
+                    {"key": item["key"], "label": item["label"], "status": "fail" if item["key"] == "entity_match" else "pass", "note": ""}
+                    for item in checklist["review_checks"]
+                ],
+                "expected_row_version": uploaded["row_version"],
+            },
+            headers=risk,
+        )
+        self.assertEqual(supplement.status_code, 200, supplement.text)
+        correction = self.client.get(
+            f"/api/v1/documents/corrections?counterparty_id={self.counterparty['id']}&case_id={case_id}",
+            headers=manager,
+        ).json()[0]
+        with database.SessionLocal() as session:
+            case_record = session.get(ApprovalCaseRecord, case_id)
+            case_record.stage_due_at = datetime.now(timezone.utc) + timedelta(days=7)
+            correction_record = session.get(DocumentCorrectionRecord, correction["id"])
+            correction_record.sla_due_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            session.commit()
+
+        first_scan = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        second_scan = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(first_scan.status_code, 200)
+        self.assertEqual(first_scan.json()["active_corrections_scanned"], 1)
+        self.assertEqual(first_scan.json()["due_soon_corrections"], 1)
+        self.assertEqual(first_scan.json()["notifications_created"], 2)
+        self.assertEqual(second_scan.json()["notifications_created"], 0)
+        self.assertEqual(self.client.get("/api/v1/notifications?unread_only=true", headers=manager).json()[0]["category"], "document_correction")
+        client_levels = [item["level"] for item in self.client.get("/api/v1/notifications?unread_only=true", headers=client).json()]
+        self.assertEqual(client_levels.count("due_soon"), 1)
+        self.assertEqual(client_levels.count("task_created"), 1)
+
+        with database.SessionLocal() as session:
+            correction_record = session.get(DocumentCorrectionRecord, correction["id"])
+            correction_record.sla_due_at = datetime.now(timezone.utc) - timedelta(hours=5)
+            session.commit()
+        escalated = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(escalated.status_code, 200)
+        self.assertEqual(escalated.json()["escalated_corrections"], 1)
+        self.assertEqual(escalated.json()["notifications_created"], 4)
+        self.assertEqual(len(self.client.get("/api/v1/notifications?unread_only=true", headers=risk).json()), 1)
+        self.assertEqual(len(self.client.get("/api/v1/notifications?unread_only=true", headers=operations).json()), 1)
+        summary = self.client.get("/api/v1/operations/sla/summary", headers=operations)
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.json()["correction_sla"]["active"], 1)
+        self.assertEqual(summary.json()["correction_sla"]["escalated"], 1)
+        self.assertEqual(summary.json()["last_scan"]["active_corrections_scanned"], 1)
+
+    def test_multiple_document_corrections_resume_case_only_after_last_closes(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        created_case = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=manager).json()
+        case_id = created_case["case_id"]
+        documents = []
+        for document_type in ["营业执照", "公司章程"]:
+            uploaded = self.client.post(
+                "/api/v1/documents",
+                data={"counterparty_id": self.counterparty["id"], "case_id": case_id, "document_type": document_type},
+                files={"file": (f"{document_type}.txt", f"{document_type}资料缺页".encode(), "text/plain")},
+                headers=manager,
+            ).json()
+            documents.append(uploaded)
+        checklist = self.client.get(
+            f"/api/v1/documents/checklist?counterparty_id={self.counterparty['id']}&case_id={case_id}",
+            headers=risk,
+        ).json()
+        for document in documents:
+            response = self.client.post(
+                f"/api/v1/documents/{document['id']}/review",
+                json={
+                    "decision": "needs_supplement",
+                    "comment": f"{document['document_type']}存在缺页，请补交完整版本",
+                    "checks": [
+                        {"key": item["key"], "label": item["label"], "status": "fail" if item["key"] == "completeness" else "pass", "note": ""}
+                        for item in checklist["review_checks"]
+                    ],
+                    "expected_row_version": document["row_version"],
+                },
+                headers=risk,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+        corrections = self.client.get(
+            f"/api/v1/documents/corrections?counterparty_id={self.counterparty['id']}&case_id={case_id}",
+            headers=manager,
+        ).json()
+        self.assertEqual(len(corrections), 2)
+        paused = self.client.get(f"/api/v1/approval-cases/{case_id}", headers=manager).json()
+        self.assertEqual(paused["sla_status"], "已暂停")
+        self.assertEqual(set(paused["data"]["_workflow"]["active_document_correction_ids"]), {item["id"] for item in corrections})
+        operations_summary = self.client.get(
+            "/api/v1/operations/sla/summary",
+            headers={"Authorization": "Bearer dev-operations"},
+        ).json()
+        self.assertEqual(operations_summary["sla"]["paused"], 1)
+        paused_scan = self.client.post(
+            "/api/v1/operations/sla/scan",
+            headers={"Authorization": "Bearer dev-operations"},
+        ).json()
+        self.assertEqual(paused_scan["active_cases_scanned"], 0)
+        self.assertEqual(paused_scan["active_corrections_scanned"], 2)
+
+        replacements = []
+        for correction in corrections:
+            replacement = self.client.post(
+                "/api/v1/documents",
+                data={
+                    "counterparty_id": self.counterparty["id"],
+                    "case_id": case_id,
+                    "document_type": correction["document_type"],
+                    "correction_id": correction["id"],
+                },
+                files={"file": (f"{correction['document_type']}完整.txt", f"{correction['document_type']}完整版本".encode(), "text/plain")},
+                headers=manager,
+            ).json()
+            replacements.append(replacement)
+        self._review_document(replacements[0])
+        still_paused = self.client.get(f"/api/v1/approval-cases/{case_id}", headers=manager).json()
+        self.assertEqual(still_paused["status"], "待补件")
+        self.assertEqual(still_paused["sla_status"], "已暂停")
+        self.assertEqual(len(still_paused["data"]["_workflow"]["active_document_correction_ids"]), 1)
+        self._review_document(replacements[1])
+        resumed = self.client.get(f"/api/v1/approval-cases/{case_id}", headers=manager).json()
+        self.assertEqual(resumed["status"], "处理中")
+        self.assertEqual(resumed["sla_status"], "正常")
+        self.assertEqual(resumed["data"]["_workflow"]["active_document_correction_ids"], [])
+
+    def test_document_correction_operations_actions_permissions_and_audit_history(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        client = {"Authorization": "Bearer dev-client"}
+        created_case = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=manager).json()
+        case_id = created_case["case_id"]
+        uploaded = self.client.post(
+            "/api/v1/documents",
+            data={"counterparty_id": self.counterparty["id"], "case_id": case_id, "document_type": "营业执照"},
+            files={"file": ("处置闭环.txt", "主体资料不完整".encode(), "text/plain")},
+            headers=manager,
+        ).json()
+        checklist = self.client.get(
+            f"/api/v1/documents/checklist?counterparty_id={self.counterparty['id']}&case_id={case_id}",
+            headers=risk,
+        ).json()
+        reviewed = self.client.post(
+            f"/api/v1/documents/{uploaded['id']}/review",
+            json={
+                "decision": "needs_supplement",
+                "comment": "主体信息不完整，请补交有效证照",
+                "checks": [
+                    {"key": item["key"], "label": item["label"], "status": "fail" if item["key"] == "entity_match" else "pass", "note": ""}
+                    for item in checklist["review_checks"]
+                ],
+                "expected_row_version": uploaded["row_version"],
+            },
+            headers=risk,
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+
+        workbench = self.client.get("/api/v1/operations/document-corrections", headers=operations)
+        self.assertEqual(workbench.status_code, 200)
+        task = workbench.json()[0]
+        self.assertEqual(task["counterparty_name"], self.counterparty["name"])
+        self.assertEqual(task["recent_actions"], [])
+        risk_can_view = self.client.get("/api/v1/operations/document-corrections", headers=risk)
+        self.assertEqual(risk_can_view.status_code, 200)
+        risk_cannot_act = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "remind", "reason": "请尽快补交有效证照", "expected_row_version": task["row_version"]},
+            headers=risk,
+        )
+        self.assertEqual(risk_cannot_act.status_code, 403)
+
+        invalid_assignment = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "reassign", "assigned_role": "approver", "reason": "错误角色转派验证", "expected_row_version": task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(invalid_assignment.status_code, 422)
+
+        reminded = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "remind", "reason": "客户反馈尚未提交，请今日补齐", "expected_row_version": task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(reminded.status_code, 200, reminded.text)
+        reminded_task = reminded.json()
+        self.assertEqual(reminded_task["reminder_count"], 1)
+        self.assertIsNotNone(reminded_task["last_reminded_at"])
+        self.assertEqual(reminded_task["recent_actions"][0]["event_type"], "correction_manually_reminded")
+        self.assertTrue(any(
+            item["level"] == "reminder" and item["action"]["correction_id"] == task["id"]
+            for item in self.client.get("/api/v1/notifications?unread_only=true", headers=client).json()
+        ))
+        repeated_reminder = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "remind", "reason": "重复催办频率限制验证", "expected_row_version": reminded_task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(repeated_reminder.status_code, 422)
+        self.assertIn("至少间隔 30 分钟", repeated_reminder.json()["detail"])
+
+        stale = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "extend", "extension_hours": 8, "reason": "使用旧版本号验证并发控制", "expected_row_version": task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(stale.status_code, 409)
+
+        reassigned = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "reassign", "assigned_role": "client", "reason": "客户确认自行提交补件材料", "expected_row_version": reminded_task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(reassigned.status_code, 200, reassigned.text)
+        reassigned_task = reassigned.json()
+        self.assertEqual(reassigned_task["assigned_role"], "client")
+        self.assertEqual(reassigned_task["recent_actions"][0]["event_type"], "correction_reassigned")
+
+        extended = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "extend", "extension_hours": 8, "reason": "客户申请补充盖章流程时间", "expected_row_version": reassigned_task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(extended.status_code, 200, extended.text)
+        extended_task = extended.json()
+        self.assertEqual(extended_task["extension_count"], 1)
+        self.assertEqual(extended_task["total_extension_hours"], 8)
+        self.assertEqual(extended_task["recent_actions"][0]["event_type"], "correction_sla_extended")
+        self.assertEqual(len(extended_task["recent_actions"]), 3)
+        audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={task['id']}",
+            headers={"Authorization": "Bearer dev-auditor"},
+        )
+        self.assertEqual(audit.status_code, 200)
+        self.assertTrue({"correction_manually_reminded", "correction_reassigned", "correction_sla_extended"}.issubset({item["event_type"] for item in audit.json()}))
+        with database.SessionLocal() as session:
+            correction_record = session.get(DocumentCorrectionRecord, task["id"])
+            correction_record.extension_count = 3
+            correction_record.total_extension_hours = 168
+            session.commit()
+        capped_task = self.client.get("/api/v1/operations/document-corrections", headers=operations).json()[0]
+        capped_extension = self.client.post(
+            f"/api/v1/operations/document-corrections/{task['id']}/actions",
+            json={"action": "extend", "extension_hours": 1, "reason": "延期累计上限验证", "expected_row_version": capped_task["row_version"]},
+            headers=operations,
+        )
+        self.assertEqual(capped_extension.status_code, 422)
+        self.assertIn("最多允许延期 3 次", capped_extension.json()["detail"])
 
     def test_document_case_binding_and_office_package_validation(self) -> None:
         created = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=self.headers)

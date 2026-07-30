@@ -19,7 +19,13 @@ def list_notifications(
 ) -> list[dict]:
     recipient_roles = None if "admin" in principal.roles else principal.roles
     counterparty_id = principal.counterparty_id if "client" in principal.roles else None
-    return repository.list(recipient_roles, "unread" if unread_only else None, counterparty_id, limit)
+    return repository.list(
+        recipient_roles,
+        None if "admin" in principal.roles else principal.subject,
+        "unread" if unread_only else None,
+        counterparty_id,
+        limit,
+    )
 
 
 @router.post("/{notification_id}/read")
@@ -40,6 +46,9 @@ def mark_notification_read(
 def _can_access_notification(principal: Principal, notification: dict) -> bool:
     if "admin" in principal.roles:
         return True
-    if notification["recipient_role"] not in principal.roles:
+    if notification.get("recipient_subject"):
+        if notification["recipient_subject"] != principal.subject:
+            return False
+    elif notification["recipient_role"] not in principal.roles:
         return False
     return "client" not in principal.roles or principal.counterparty_id == notification["counterparty_id"]
