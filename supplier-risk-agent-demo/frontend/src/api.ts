@@ -1,4 +1,4 @@
-import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule, TeamTaskBoard } from "./types";
+import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule, TeamTaskBoard } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 const TOKEN_KEY = "risk-platform.dev-token";
@@ -107,8 +107,15 @@ export const api = {
     request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/${id}/evidence/anchors`, { method: "POST" }),
   authorityPolicyEvidenceAnchor: (anchorId: string) =>
     request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/evidence/anchors/${anchorId}`),
+  authorityPolicyEvidenceAnchorReceipt: (anchorId: string) =>
+    request<AuthorityPolicyEvidenceAnchorReceipt>(`/authority-policies/evidence/anchors/${anchorId}/receipt`),
   revokeAuthorityPolicyEvidenceAnchor: (anchorId: string, rowVersion: number, reason: string) =>
     request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/evidence/anchors/${anchorId}/revoke`, {
+      method: "POST",
+      body: JSON.stringify({ expected_row_version: rowVersion, reason }),
+    }),
+  replaceAuthorityPolicyEvidenceAnchor: (anchorId: string, rowVersion: number, reason: string) =>
+    request<AuthorityPolicyEvidenceAnchor>(`/authority-policies/evidence/anchors/${anchorId}/replace`, {
       method: "POST",
       body: JSON.stringify({ expected_row_version: rowVersion, reason }),
     }),

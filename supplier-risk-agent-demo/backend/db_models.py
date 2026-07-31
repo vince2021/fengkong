@@ -214,8 +214,16 @@ class AuthorityPolicyEvidenceAnchorRecord(Base):
     __tablename__ = "authority_policy_evidence_anchors"
     __table_args__ = (
         Index("ix_authority_evidence_anchors_policy_issued", "policy_id", "issued_at"),
+        Index(
+            "uq_authority_evidence_anchor_active_policy_package",
+            "policy_id",
+            "package_hash",
+            unique=True,
+            sqlite_where=text("revoked_at IS NULL"),
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
         UniqueConstraint("anchor_hash", name="uq_authority_policy_evidence_anchors_anchor_hash"),
-        UniqueConstraint("policy_id", "package_hash", name="uq_authority_evidence_anchor_policy_package"),
+        UniqueConstraint("supersedes_anchor_id", name="uq_authority_evidence_anchor_supersedes"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -233,6 +241,15 @@ class AuthorityPolicyEvidenceAnchorRecord(Base):
     revoked_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supersedes_anchor_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "authority_policy_evidence_anchors.id",
+            name="fk_authority_evidence_anchor_supersedes",
+        ),
+        nullable=True,
+        index=True,
+    )
+    replacement_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -14,7 +14,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 import backend.database as database
-from backend.authority_policy_repository import AuthorityPolicyRepository, BUILTIN_POLICY_VERSION, DEFAULT_AUTHORITY_POLICY_CONFIG, policy_config_hash, verify_authority_policy_evidence_package
+from backend.authority_policy_repository import AuthorityPolicyRepository, BUILTIN_POLICY_VERSION, DEFAULT_AUTHORITY_POLICY_CONFIG, policy_config_hash, verify_authority_policy_anchor_receipt, verify_authority_policy_evidence_package
 from backend.credit_authority import build_credit_authority
 from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord
 from backend.dependencies import demo_repository, get_object_storage
@@ -1604,6 +1604,7 @@ class ApiTest(unittest.TestCase):
         model_admin = {"Authorization": "Bearer dev-model-admin"}
         approver = {"Authorization": "Bearer dev-approver"}
         risk = {"Authorization": "Bearer dev-risk"}
+        admin = {"Authorization": "Bearer dev-admin"}
 
         active = self.client.get("/api/v1/authority-policies/active", headers=manager)
         self.assertEqual(active.status_code, 200)
@@ -1944,6 +1945,10 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(anchor["trust_eligible"])
         self.assertEqual(anchor["row_version"], 1)
         self.assertIsNone(anchor["revoked_at"])
+        self.assertIsNone(anchor["supersedes_anchor_id"])
+        self.assertIsNone(anchor["replacement_reason"])
+        self.assertIsNone(anchor["replacement_anchor_id"])
+        self.assertIsNone(anchor["superseded_anchor"])
         self.assertTrue(anchor["integrity_passed"])
         self.assertEqual(anchor["package"]["package_hash"], evidence.json()["package_hash"])
         self.assertEqual(anchor["package"]["policy"], evidence.json()["policy"])
@@ -1970,11 +1975,69 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(anchored_snapshot.status_code, 200, anchored_snapshot.text)
         self.assertEqual(anchored_snapshot.json()["package"], anchor["package"])
         self.assertTrue(anchored_snapshot.json()["registry_valid"])
+        active_receipt_response = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/receipt",
+            headers=manager,
+        )
+        self.assertEqual(active_receipt_response.status_code, 200, active_receipt_response.text)
+        active_receipt = active_receipt_response.json()
+        self.assertEqual(active_receipt["schema_version"], "authority-policy-anchor-receipt-v1")
+        self.assertEqual(active_receipt["trust_scope"], "status_at_verified_at")
+        self.assertEqual(active_receipt["anchor"]["id"], anchor["id"])
+        self.assertTrue(active_receipt["anchor"]["trust_eligible"])
+        self.assertEqual(active_receipt["anchor"]["package_hash"], anchor["package_hash"])
+        self.assertEqual(active_receipt["audit_checkpoint"]["event_count"], 1)
+        self.assertEqual(len(active_receipt["audit_checkpoint"]["terminal_hash"]), 64)
+        self.assertEqual(active_receipt["receipt_hash"], policy_config_hash({
+            key: value
+            for key, value in active_receipt.items()
+            if key not in {"receipt_hash", "receipt_hash_algorithm"}
+        }))
+        self_sealed_receipt = verify_authority_policy_anchor_receipt(
+            active_receipt,
+            anchor["package"],
+        )
+        self.assertTrue(self_sealed_receipt["verified"])
+        self.assertEqual(self_sealed_receipt["trust_level"], "self_sealed_receipt")
+        externally_anchored_receipt = verify_authority_policy_anchor_receipt(
+            active_receipt,
+            anchor["package"],
+            active_receipt["receipt_hash"],
+        )
+        self.assertTrue(externally_anchored_receipt["verified"])
+        self.assertEqual(
+            externally_anchored_receipt["trust_level"],
+            "externally_anchored_receipt",
+        )
+        tampered_receipt = deepcopy(active_receipt)
+        tampered_receipt["anchor"]["policy_version"] = "AUTH-TAMPERED"
+        self.assertFalse(
+            verify_authority_policy_anchor_receipt(
+                tampered_receipt,
+                anchor["package"],
+                active_receipt["receipt_hash"],
+            )["verified"]
+        )
         missing_anchor = self.client.get(
             "/api/v1/authority-policies/evidence/anchors/missing-anchor",
             headers=manager,
         )
         self.assertEqual(missing_anchor.status_code, 404)
+        missing_receipt = self.client.get(
+            "/api/v1/authority-policies/evidence/anchors/missing-anchor/receipt",
+            headers=manager,
+        )
+        self.assertEqual(missing_receipt.status_code, 404)
+        active_anchor_replacement = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/replace",
+            json={
+                "expected_row_version": anchor["row_version"],
+                "reason": "活动锚点不得跳过撤销流程直接执行换发操作",
+            },
+            headers=admin,
+        )
+        self.assertEqual(active_anchor_replacement.status_code, 422)
+        self.assertIn("只有已撤销", active_anchor_replacement.json()["detail"])
         anchor_audit = self.client.get(
             f"/api/v1/audit-events?aggregate_id={anchor['id']}",
             headers=auditor,
@@ -2147,6 +2210,29 @@ class ApiTest(unittest.TestCase):
             revoked_anchor["revocation_reason"],
             "外部证据来源停止提供可信校验，需要撤销当前锚点资格",
         )
+        revoked_receipt_response = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/receipt",
+            headers=auditor,
+        )
+        self.assertEqual(revoked_receipt_response.status_code, 200)
+        revoked_receipt = revoked_receipt_response.json()
+        self.assertEqual(revoked_receipt["anchor"]["status"], "revoked")
+        self.assertFalse(revoked_receipt["anchor"]["trust_eligible"])
+        self.assertEqual(revoked_receipt["audit_checkpoint"]["event_count"], 2)
+        revoked_receipt_verification = verify_authority_policy_anchor_receipt(
+            revoked_receipt,
+            revoked_anchor["package"],
+            revoked_receipt["receipt_hash"],
+        )
+        self.assertFalse(revoked_receipt_verification["verified"])
+        self.assertEqual(revoked_receipt_verification["trust_level"], "invalid")
+        self.assertFalse(
+            next(
+                check
+                for check in revoked_receipt_verification["checks"]
+                if check["key"] == "anchor_trust_status"
+            )["passed"]
+        )
         stale_revocation = self.client.post(
             f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/revoke",
             json={"expected_row_version": anchor["row_version"], "reason": "使用旧版本号重复提交撤销操作验证并发门禁"},
@@ -2183,6 +2269,132 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(revoked_reissue.json()["id"], anchor["id"])
         self.assertEqual(revoked_reissue.json()["status"], "revoked")
         self.assertFalse(revoked_reissue.json()["trust_eligible"])
+        original_issuer_replacement = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/replace",
+            json={
+                "expected_row_version": revoked_anchor["row_version"],
+                "reason": "原签发人员尝试换发已撤销锚点验证职责分离门禁",
+            },
+            headers=auditor,
+        )
+        self.assertEqual(original_issuer_replacement.status_code, 403)
+        original_revoker_replacement = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/replace",
+            json={
+                "expected_row_version": revoked_anchor["row_version"],
+                "reason": "原撤销人员尝试换发已撤销锚点验证职责分离门禁",
+            },
+            headers=risk,
+        )
+        self.assertEqual(original_revoker_replacement.status_code, 403)
+        forbidden_model_admin_replacement = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/replace",
+            json={
+                "expected_row_version": revoked_anchor["row_version"],
+                "reason": "无签发权限人员尝试换发已撤销锚点验证权限门禁",
+            },
+            headers=model_admin,
+        )
+        self.assertEqual(forbidden_model_admin_replacement.status_code, 403)
+        replacement_response = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/replace",
+            json={
+                "expected_row_version": revoked_anchor["row_version"],
+                "reason": "第三名授权人员复核原始冻结包与撤销原因后执行受控换发",
+            },
+            headers=admin,
+        )
+        self.assertEqual(replacement_response.status_code, 201, replacement_response.text)
+        replacement = replacement_response.json()
+        self.assertEqual(replacement["status"], "active")
+        self.assertTrue(replacement["registry_valid"])
+        self.assertTrue(replacement["trust_eligible"])
+        self.assertEqual(replacement["package_hash"], anchor["package_hash"])
+        self.assertNotEqual(replacement["anchor_hash"], anchor["anchor_hash"])
+        self.assertEqual(replacement["supersedes_anchor_id"], anchor["id"])
+        self.assertEqual(
+            replacement["replacement_reason"],
+            "第三名授权人员复核原始冻结包与撤销原因后执行受控换发",
+        )
+        self.assertEqual(replacement["issued_by"], "admin-demo")
+        self.assertEqual(replacement["superseded_anchor"]["id"], anchor["id"])
+        self.assertEqual(
+            replacement["superseded_anchor"]["anchor_hash"],
+            anchor["anchor_hash"],
+        )
+        replacement_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={replacement['id']}",
+            headers=auditor,
+        )
+        self.assertEqual(
+            [item["event_type"] for item in replacement_audit.json()],
+            ["authority_policy_evidence_anchor_replacement_issued"],
+        )
+        refreshed_original = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}",
+            headers=auditor,
+        ).json()
+        self.assertEqual(refreshed_original["replacement_anchor_id"], replacement["id"])
+        replacement_receipt = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{replacement['id']}/receipt",
+            headers=auditor,
+        ).json()
+        self.assertEqual(
+            replacement_receipt["anchor"]["supersedes_anchor_id"],
+            anchor["id"],
+        )
+        self.assertTrue(
+            verify_authority_policy_anchor_receipt(
+                replacement_receipt,
+                replacement["package"],
+                replacement_receipt["receipt_hash"],
+            )["verified"]
+        )
+        with database.SessionLocal() as session:
+            session.execute(
+                update(AuthorityPolicyEvidenceAnchorRecord)
+                .where(AuthorityPolicyEvidenceAnchorRecord.id == anchor["id"])
+                .values(revoked_by="tampered-revoker")
+            )
+            session.commit()
+        tampered_source_replacement = self.client.get(
+            f"/api/v1/authority-policies/evidence/anchors/{replacement['id']}",
+            headers=auditor,
+        ).json()
+        self.assertFalse(tampered_source_replacement["registry_valid"])
+        self.assertFalse(tampered_source_replacement["trust_eligible"])
+        with database.SessionLocal() as session:
+            session.execute(
+                update(AuthorityPolicyEvidenceAnchorRecord)
+                .where(AuthorityPolicyEvidenceAnchorRecord.id == anchor["id"])
+                .values(revoked_by="risk-demo")
+            )
+            session.commit()
+        repeated_replacement = self.client.post(
+            f"/api/v1/authority-policies/evidence/anchors/{anchor['id']}/replace",
+            json={
+                "expected_row_version": revoked_anchor["row_version"],
+                "reason": "重复换发同一已撤销锚点验证唯一替代关系约束",
+            },
+            headers=admin,
+        )
+        self.assertEqual(repeated_replacement.status_code, 422)
+        replacement_reissue = self.client.post(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=auditor,
+        )
+        self.assertEqual(replacement_reissue.status_code, 201)
+        self.assertTrue(replacement_reissue.json()["idempotent"])
+        self.assertEqual(replacement_reissue.json()["id"], replacement["id"])
+        replacement_list = self.client.get(
+            f"/api/v1/authority-policies/{first.json()['id']}/evidence/anchors",
+            headers=manager,
+        ).json()
+        self.assertEqual(len(replacement_list), 2)
+        self.assertEqual(
+            [item["trust_eligible"] for item in replacement_list],
+            [True, False],
+        )
         missing_evidence = self.client.get(
             "/api/v1/authority-policies/missing-policy/evidence",
             headers=manager,
@@ -3076,7 +3288,7 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(missing_documents.status_code, 422)
 
-        for index, document_type in enumerate(["营业执照", "财务报表"]):
+        for index, document_type in enumerate(["营业执照", "近三年审计报告"]):
             uploaded = self.client.post(
                 "/api/v1/documents",
                 data={"counterparty_id": self.counterparty["id"], "case_id": case["case_id"], "document_type": document_type},
@@ -3810,6 +4022,10 @@ class ApiTest(unittest.TestCase):
         self.assertGreaterEqual(checklist.json()["summary"]["total_count"], 20)
         self.assertTrue(any(item["document_type"] == "知识产权清单" for item in checklist.json()["items"]))
         self.assertEqual(len(checklist.json()["review_checks"]), 5)
+        self.assertEqual(
+            checklist.json()["type_equivalents"]["财务报表"],
+            ["最近一期财务报表", "财务报表", "近三年审计报告"],
+        )
 
         storage = LocalObjectStorage(self.temp_storage.name)
         storage.put(uploaded.json()["object_key"], b"%PDF-1.7\ntampered-license", "application/pdf")

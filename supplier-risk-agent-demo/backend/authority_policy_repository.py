@@ -402,6 +402,20 @@ class AuthorityPolicyRepository:
             raise LookupError("授权策略证据锚点不存在")
         return _evidence_anchor_to_dict(self.session, record, include_package=True)
 
+    def evidence_anchor_receipt(
+        self,
+        anchor_id: str,
+        verified_at: datetime | None = None,
+    ) -> dict:
+        record = self.session.get(AuthorityPolicyEvidenceAnchorRecord, anchor_id)
+        if not record:
+            raise LookupError("授权策略证据锚点不存在")
+        anchor = _evidence_anchor_to_dict(self.session, record, include_package=True)
+        return build_authority_policy_anchor_receipt(
+            anchor,
+            verified_at=verified_at,
+        )
+
     def issue_evidence_anchor(
         self,
         policy_id: str,
@@ -415,6 +429,9 @@ class AuthorityPolicyRepository:
             select(AuthorityPolicyEvidenceAnchorRecord).where(
                 AuthorityPolicyEvidenceAnchorRecord.policy_id == policy_id,
                 AuthorityPolicyEvidenceAnchorRecord.package_hash == package["package_hash"],
+            ).order_by(
+                AuthorityPolicyEvidenceAnchorRecord.revoked_at.is_not(None),
+                AuthorityPolicyEvidenceAnchorRecord.issued_at.desc(),
             )
         ).first()
         if existing:
@@ -438,7 +455,7 @@ class AuthorityPolicyRepository:
             schema_version=package["schema_version"],
             package_json=deepcopy(package),
             package_hash=package["package_hash"],
-            anchor_hash=policy_config_hash(anchor_body),
+            anchor_hash=policy_config_hash(_evidence_anchor_hash_body(anchor_body)),
             integrity_passed=package["integrity"]["passed"],
             issued_by=actor_subject,
             issued_by_name=actor_name,
@@ -467,6 +484,9 @@ class AuthorityPolicyRepository:
                 select(AuthorityPolicyEvidenceAnchorRecord).where(
                     AuthorityPolicyEvidenceAnchorRecord.policy_id == policy_id,
                     AuthorityPolicyEvidenceAnchorRecord.package_hash == package["package_hash"],
+                ).order_by(
+                    AuthorityPolicyEvidenceAnchorRecord.revoked_at.is_not(None),
+                    AuthorityPolicyEvidenceAnchorRecord.issued_at.desc(),
                 )
             ).first()
             if existing:
@@ -519,6 +539,101 @@ class AuthorityPolicyRepository:
             raise ConcurrentUpdateError("证据锚点状态已被其他人员更新，请刷新后重试") from exc
         self.session.refresh(record)
         return _evidence_anchor_to_dict(self.session, record, include_package=True)
+
+    def replace_evidence_anchor(
+        self,
+        anchor_id: str,
+        expected_row_version: int,
+        reason: str,
+        actor_subject: str,
+        actor_name: str,
+        issued_at: datetime | None = None,
+    ) -> dict:
+        source = self.session.get(AuthorityPolicyEvidenceAnchorRecord, anchor_id)
+        if not source:
+            raise LookupError("授权策略证据锚点不存在")
+        if source.row_version != expected_row_version:
+            raise ConcurrentUpdateError("证据锚点状态已被其他人员更新，请刷新后重试")
+        if source.revoked_at is None:
+            raise ValueError("只有已撤销的证据锚点可以换发")
+        if actor_subject in {source.issued_by, source.revoked_by}:
+            raise PermissionError("换发人必须同时区别于原签发人与撤销人")
+        if not source.integrity_passed:
+            raise ValueError("原始证据包业务完整性未通过，不能换发可信锚点")
+        source_snapshot = _evidence_anchor_to_dict(
+            self.session,
+            source,
+            include_package=True,
+        )
+        if not source_snapshot["registry_valid"]:
+            raise ValueError("原证据锚点登记存在技术完整性异常，不能执行换发")
+        existing = self.session.scalars(
+            select(AuthorityPolicyEvidenceAnchorRecord).where(
+                AuthorityPolicyEvidenceAnchorRecord.supersedes_anchor_id == source.id
+            )
+        ).first()
+        if existing:
+            raise ValueError(f"证据锚点已经由 {existing.id} 完成换发")
+
+        issue_time = _as_utc(issued_at or datetime.now(timezone.utc))
+        replacement_id = str(uuid4())
+        anchor_body = {
+            "id": replacement_id,
+            "policy_id": source.policy_id,
+            "policy_version": source.policy_version,
+            "schema_version": source.schema_version,
+            "package_hash": source.package_hash,
+            "integrity_passed": source.integrity_passed,
+            "issued_by": actor_subject,
+            "issued_by_name": actor_name,
+            "issued_at": issue_time.isoformat(),
+            "supersedes_anchor_id": source.id,
+            "replacement_reason": reason,
+        }
+        replacement = AuthorityPolicyEvidenceAnchorRecord(
+            id=replacement_id,
+            policy_id=source.policy_id,
+            policy_version=source.policy_version,
+            schema_version=source.schema_version,
+            package_json=deepcopy(source.package_json),
+            package_hash=source.package_hash,
+            anchor_hash=policy_config_hash(_evidence_anchor_hash_body(anchor_body)),
+            integrity_passed=source.integrity_passed,
+            issued_by=actor_subject,
+            issued_by_name=actor_name,
+            issued_at=issue_time,
+            supersedes_anchor_id=source.id,
+            replacement_reason=reason,
+        )
+        self.session.add(replacement)
+        try:
+            self.session.flush()
+            self.audit.append(
+                "authority_policy_evidence_anchor",
+                replacement.id,
+                "authority_policy_evidence_anchor_replacement_issued",
+                actor_name,
+                {
+                    "policy_id": replacement.policy_id,
+                    "policy_version": replacement.policy_version,
+                    "package_hash": replacement.package_hash,
+                    "anchor_hash": replacement.anchor_hash,
+                    "integrity_passed": replacement.integrity_passed,
+                    "supersedes_anchor_id": source.id,
+                    "superseded_anchor_hash": source.anchor_hash,
+                    "replacement_reason": reason,
+                },
+            )
+            self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("证据锚点换发发生并发冲突，请刷新后重试") from exc
+        self.session.refresh(replacement)
+        return _evidence_anchor_to_dict(
+            self.session,
+            replacement,
+            include_package=True,
+        )
 
     def restore_source_snapshot(self, source_policy_ref: str) -> dict:
         if source_policy_ref == "builtin":
@@ -1520,23 +1635,38 @@ def _evidence_comparison_summary(package: dict) -> dict:
     }
 
 
+def _evidence_anchor_hash_body(source: object) -> dict:
+    getter = source.get if isinstance(source, dict) else lambda key: getattr(source, key, None)
+    issued_at = getter("issued_at")
+    if isinstance(issued_at, datetime):
+        issued_at = _as_utc(issued_at).isoformat()
+    body = {
+        "id": getter("id"),
+        "policy_id": getter("policy_id"),
+        "policy_version": getter("policy_version"),
+        "schema_version": getter("schema_version"),
+        "package_hash": getter("package_hash"),
+        "integrity_passed": getter("integrity_passed"),
+        "issued_by": getter("issued_by"),
+        "issued_by_name": getter("issued_by_name"),
+        "issued_at": issued_at,
+    }
+    supersedes_anchor_id = getter("supersedes_anchor_id")
+    if supersedes_anchor_id is not None:
+        body["supersedes_anchor_id"] = supersedes_anchor_id
+        body["replacement_reason"] = getter("replacement_reason")
+    return body
+
+
 def _evidence_anchor_to_dict(
     session: Session,
     record: AuthorityPolicyEvidenceAnchorRecord,
     include_package: bool = False,
+    _visited: set[str] | None = None,
 ) -> dict:
+    visited = {*(_visited or set()), record.id}
     issued_at = _as_utc(record.issued_at)
-    expected_anchor_hash = policy_config_hash({
-        "id": record.id,
-        "policy_id": record.policy_id,
-        "policy_version": record.policy_version,
-        "schema_version": record.schema_version,
-        "package_hash": record.package_hash,
-        "integrity_passed": record.integrity_passed,
-        "issued_by": record.issued_by,
-        "issued_by_name": record.issued_by_name,
-        "issued_at": issued_at.isoformat(),
-    })
+    expected_anchor_hash = policy_config_hash(_evidence_anchor_hash_body(record))
     package_verification = verify_authority_policy_evidence_package(
         record.package_json,
         record.package_hash,
@@ -1564,10 +1694,53 @@ def _evidence_anchor_to_dict(
         "anchor_hash": record.anchor_hash,
         "integrity_passed": record.integrity_passed,
     }
+    expected_issue_event_type = "authority_policy_evidence_anchor_issued"
+    replacement_source = None
+    if record.supersedes_anchor_id is not None:
+        replacement_source = session.get(
+            AuthorityPolicyEvidenceAnchorRecord,
+            record.supersedes_anchor_id,
+        )
+        expected_issue_event_type = "authority_policy_evidence_anchor_replacement_issued"
+        expected_audit_payload.update({
+            "supersedes_anchor_id": record.supersedes_anchor_id,
+            "superseded_anchor_hash": (
+                replacement_source.anchor_hash
+                if replacement_source
+                else None
+            ),
+            "replacement_reason": record.replacement_reason,
+        })
+    replacement_source_registry_valid = (
+        _evidence_anchor_to_dict(
+            session,
+            replacement_source,
+            _visited=visited,
+        )["registry_valid"]
+        if replacement_source and replacement_source.id not in visited
+        else False
+    )
+    replacement_provenance_valid = (
+        record.replacement_reason is None
+        if record.supersedes_anchor_id is None
+        else bool(
+            replacement_source
+            and replacement_source_registry_valid
+            and replacement_source.revoked_at is not None
+            and replacement_source.policy_id == record.policy_id
+            and replacement_source.policy_version == record.policy_version
+            and replacement_source.schema_version == record.schema_version
+            and replacement_source.package_hash == record.package_hash
+            and replacement_source.issued_by != record.issued_by
+            and replacement_source.revoked_by != record.issued_by
+            and isinstance(record.replacement_reason, str)
+            and len(record.replacement_reason.strip()) >= 10
+        )
+    )
     issue_audit_valid = bool(
         anchor_audit["valid"]
         and issue_event
-        and issue_event["event_type"] == "authority_policy_evidence_anchor_issued"
+        and issue_event["event_type"] == expected_issue_event_type
         and issue_event["actor"] == record.issued_by_name
         and issue_event["payload"] == expected_audit_payload
     )
@@ -1603,11 +1776,17 @@ def _evidence_anchor_to_dict(
         revocation_audit_valid = len(audit_events) == 1
     audit_valid = bool(
         issue_audit_valid
+        and replacement_provenance_valid
         and revocation_metadata_valid
         and revocation_audit_valid
     )
     package_unchanged = bool(package_hash_check["passed"])
     registry_valid = anchor_hash_valid and package_unchanged and audit_valid
+    replacement = session.scalars(
+        select(AuthorityPolicyEvidenceAnchorRecord).where(
+            AuthorityPolicyEvidenceAnchorRecord.supersedes_anchor_id == record.id
+        )
+    ).first()
     result = {
         "id": record.id,
         "policy_id": record.policy_id,
@@ -1620,7 +1799,7 @@ def _evidence_anchor_to_dict(
         "audit_valid": audit_valid,
         "registry_valid": registry_valid,
         "status": "revoked" if is_revoked else "active",
-        "trust_eligible": registry_valid and not is_revoked,
+        "trust_eligible": registry_valid and record.integrity_passed and not is_revoked,
         "integrity_passed": record.integrity_passed,
         "issued_by": record.issued_by,
         "issued_by_name": record.issued_by_name,
@@ -1629,6 +1808,24 @@ def _evidence_anchor_to_dict(
         "revoked_by_name": record.revoked_by_name,
         "revoked_at": _as_utc(record.revoked_at).isoformat() if record.revoked_at else None,
         "revocation_reason": record.revocation_reason,
+        "supersedes_anchor_id": record.supersedes_anchor_id,
+        "replacement_reason": record.replacement_reason,
+        "replacement_anchor_id": replacement.id if replacement else None,
+        "superseded_anchor": (
+            {
+                "id": replacement_source.id,
+                "anchor_hash": replacement_source.anchor_hash,
+                "issued_by": replacement_source.issued_by,
+                "revoked_by": replacement_source.revoked_by,
+                "revoked_at": (
+                    _as_utc(replacement_source.revoked_at).isoformat()
+                    if replacement_source.revoked_at
+                    else None
+                ),
+            }
+            if replacement_source
+            else None
+        ),
         "row_version": record.row_version,
         "created_at": _as_utc(record.created_at).isoformat() if record.created_at else None,
     }
@@ -1637,6 +1834,320 @@ def _evidence_anchor_to_dict(
         result["package_verification"] = package_verification
         result["audit"] = anchor_audit
     return result
+
+
+def build_authority_policy_anchor_receipt(
+    anchor: dict,
+    verified_at: datetime | None = None,
+) -> dict:
+    audit = anchor.get("audit") if isinstance(anchor.get("audit"), dict) else {}
+    body = {
+        "schema_version": "authority-policy-anchor-receipt-v1",
+        "verified_at": _as_utc(verified_at or datetime.now(timezone.utc)).isoformat(),
+        "trust_scope": "status_at_verified_at",
+        "anchor": {
+            key: deepcopy(anchor.get(key))
+            for key in (
+                "id",
+                "policy_id",
+                "policy_version",
+                "schema_version",
+                "package_hash",
+                "anchor_hash",
+                "anchor_hash_valid",
+                "package_unchanged",
+                "audit_valid",
+                "registry_valid",
+                "status",
+                "trust_eligible",
+                "integrity_passed",
+                "issued_by",
+                "issued_by_name",
+                "issued_at",
+                "revoked_by",
+                "revoked_by_name",
+                "revoked_at",
+                "revocation_reason",
+                "supersedes_anchor_id",
+                "replacement_reason",
+                "replacement_anchor_id",
+                "superseded_anchor",
+                "row_version",
+            )
+        },
+        "audit_checkpoint": {
+            "event_count": audit.get("event_count"),
+            "terminal_hash": audit.get("terminal_hash"),
+        },
+    }
+    return {
+        **body,
+        "receipt_hash_algorithm": "SHA-256",
+        "receipt_hash": policy_config_hash(body),
+    }
+
+
+def verify_authority_policy_anchor_receipt(
+    receipt: object,
+    package: object | None = None,
+    expected_receipt_hash: str | None = None,
+) -> dict:
+    if not isinstance(receipt, dict):
+        return {
+            "verified": False,
+            "trust_level": "invalid",
+            "computed_receipt_hash": "",
+            "expected_receipt_hash": expected_receipt_hash,
+            "checks": [
+                _evidence_check("receipt_shape", "核验回执结构", False, "核验回执必须是 JSON 对象"),
+            ],
+            "note": "核验回执结构无效，无法确认锚点信任状态。",
+        }
+    body = {
+        key: deepcopy(value)
+        for key, value in receipt.items()
+        if key not in {"receipt_hash", "receipt_hash_algorithm"}
+    }
+    computed_hash = policy_config_hash(body)
+    declared_hash = receipt.get("receipt_hash")
+    normalized_expected_hash = (
+        expected_receipt_hash.strip().lower()
+        if isinstance(expected_receipt_hash, str)
+        else None
+    )
+    expected_hash_valid = (
+        normalized_expected_hash is None
+        or bool(re.fullmatch(r"[0-9a-f]{64}", normalized_expected_hash))
+    )
+    anchor = receipt.get("anchor") if isinstance(receipt.get("anchor"), dict) else {}
+    checkpoint = (
+        receipt.get("audit_checkpoint")
+        if isinstance(receipt.get("audit_checkpoint"), dict)
+        else {}
+    )
+    status = anchor.get("status")
+    registry_valid = anchor.get("registry_valid") is True
+    trust_eligible = anchor.get("trust_eligible") is True
+    business_integrity_valid = anchor.get("integrity_passed") is True
+    superseded_anchor = (
+        anchor.get("superseded_anchor")
+        if isinstance(anchor.get("superseded_anchor"), dict)
+        else None
+    )
+    active_metadata_valid = (
+        status == "active"
+        and all(
+            anchor.get(key) is None
+            for key in ("revoked_by", "revoked_by_name", "revoked_at", "revocation_reason")
+        )
+    )
+    revoked_metadata_valid = (
+        status == "revoked"
+        and all(
+            anchor.get(key) is not None
+            for key in ("revoked_by", "revoked_by_name", "revoked_at", "revocation_reason")
+        )
+    )
+    status_metadata_valid = active_metadata_valid or revoked_metadata_valid
+    replacement_provenance_valid = (
+        anchor.get("replacement_reason") is None
+        and anchor.get("superseded_anchor") is None
+        if anchor.get("supersedes_anchor_id") is None
+        else bool(
+            superseded_anchor
+            and superseded_anchor.get("id") == anchor.get("supersedes_anchor_id")
+            and isinstance(anchor.get("replacement_reason"), str)
+            and len(anchor["replacement_reason"].strip()) >= 10
+            and isinstance(superseded_anchor.get("anchor_hash"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", superseded_anchor["anchor_hash"]))
+            and isinstance(superseded_anchor.get("issued_by"), str)
+            and isinstance(superseded_anchor.get("revoked_by"), str)
+            and _is_iso_datetime(superseded_anchor.get("revoked_at"))
+            and anchor.get("issued_by")
+            not in {
+                superseded_anchor.get("issued_by"),
+                superseded_anchor.get("revoked_by"),
+            }
+        )
+    )
+    trust_state_consistent = (
+        trust_eligible
+        == (registry_valid and business_integrity_valid and status == "active")
+    )
+    identifiers_valid = all(
+        isinstance(anchor.get(key), str) and bool(anchor.get(key))
+        for key in (
+            "id",
+            "policy_id",
+            "policy_version",
+            "schema_version",
+            "issued_by",
+            "issued_by_name",
+        )
+    )
+    hashes_valid = all(
+        isinstance(anchor.get(key), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", anchor[key]))
+        for key in ("package_hash", "anchor_hash")
+    )
+    expected_anchor_hash = policy_config_hash(_evidence_anchor_hash_body(anchor))
+    anchor_hash_consistent = anchor.get("anchor_hash") == expected_anchor_hash
+    checkpoint_valid = (
+        isinstance(checkpoint.get("event_count"), int)
+        and checkpoint["event_count"] >= 1
+        and isinstance(checkpoint.get("terminal_hash"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", checkpoint["terminal_hash"]))
+    )
+    timestamps_valid = (
+        _is_iso_datetime(receipt.get("verified_at"))
+        and _is_iso_datetime(anchor.get("issued_at"))
+        and (
+            status != "revoked"
+            or _is_iso_datetime(anchor.get("revoked_at"))
+        )
+    )
+    row_version_valid = (
+        type(anchor.get("row_version")) is int
+        and anchor["row_version"] >= 1
+    )
+    package_verification = (
+        verify_authority_policy_evidence_package(package, anchor.get("package_hash"))
+        if package is not None
+        else None
+    )
+    package_policy = (
+        package.get("policy")
+        if isinstance(package, dict) and isinstance(package.get("policy"), dict)
+        else {}
+    )
+    package_link_valid = bool(
+        package_verification
+        and package_verification["verified"]
+        and isinstance(package, dict)
+        and package.get("schema_version") == anchor.get("schema_version")
+        and package_policy.get("id") == anchor.get("policy_id")
+        and package_policy.get("policy_version") == anchor.get("policy_version")
+        and (
+            package.get("integrity")
+            if isinstance(package.get("integrity"), dict)
+            else {}
+        ).get("passed")
+        is anchor.get("integrity_passed")
+    )
+    checks = [
+        _evidence_check(
+            "receipt_schema",
+            "回执版本",
+            receipt.get("schema_version") == "authority-policy-anchor-receipt-v1"
+            and receipt.get("trust_scope") == "status_at_verified_at",
+            str(receipt.get("schema_version") or "缺失"),
+        ),
+        _evidence_check(
+            "receipt_hash",
+            "回执自封印",
+            receipt.get("receipt_hash_algorithm") == "SHA-256"
+            and isinstance(declared_hash, str)
+            and declared_hash == computed_hash,
+            f"计算值 {computed_hash}",
+        ),
+        _evidence_check(
+            "external_receipt_hash",
+            "外部回执哈希",
+            expected_hash_valid
+            and (
+                normalized_expected_hash is None
+                or normalized_expected_hash == computed_hash
+            ),
+            "未提供独立回执哈希"
+            if normalized_expected_hash is None
+            else f"期望值 {normalized_expected_hash}",
+            applicable=normalized_expected_hash is not None,
+        ),
+        _evidence_check(
+            "anchor_identity",
+            "锚点标识与哈希",
+            identifiers_valid
+            and hashes_valid
+            and anchor_hash_consistent
+            and timestamps_valid
+            and row_version_valid,
+            str(anchor.get("id") or "缺失"),
+        ),
+        _evidence_check(
+            "anchor_status_metadata",
+            "锚点状态元数据",
+            status_metadata_valid,
+            "有效且未撤销" if status == "active" else "已记录撤销信息" if status == "revoked" else "状态无效",
+        ),
+        _evidence_check(
+            "anchor_replacement_provenance",
+            "锚点换发来源",
+            replacement_provenance_valid,
+            (
+                f"替代锚点 {anchor.get('supersedes_anchor_id')}"
+                if anchor.get("supersedes_anchor_id")
+                else "原始签发锚点"
+            ),
+        ),
+        _evidence_check(
+            "anchor_registry_integrity",
+            "锚点登记技术完整性",
+            registry_valid
+            and anchor.get("anchor_hash_valid") is True
+            and anchor.get("package_unchanged") is True
+            and anchor.get("audit_valid") is True,
+            "登记、冻结包与审计链均完整" if registry_valid else "登记存在完整性异常",
+        ),
+        _evidence_check(
+            "anchor_trust_status",
+            "锚点可信资格",
+            trust_state_consistent and trust_eligible,
+            "核验时点仍可作为可信来源"
+            if trust_eligible
+            else "锚点已撤销、登记异常或原始业务完整性未通过，不得作为可信来源",
+        ),
+        _evidence_check(
+            "audit_checkpoint",
+            "审计链终端检查点",
+            checkpoint_valid,
+            f"{checkpoint.get('event_count', 0)} 个事件",
+        ),
+        _evidence_check(
+            "package_link",
+            "冻结证据包交叉校验",
+            package_link_valid if package is not None else True,
+            (
+                package_verification["note"]
+                if package_verification
+                else "未提供证据包，仅校验回执本身"
+            ),
+            applicable=package is not None,
+        ),
+    ]
+    verified = all(item["passed"] for item in checks if item["applicable"])
+    trust_level = (
+        "invalid"
+        if not verified
+        else "externally_anchored_receipt"
+        if normalized_expected_hash
+        else "self_sealed_receipt"
+    )
+    return {
+        "verified": verified,
+        "trust_level": trust_level,
+        "computed_receipt_hash": computed_hash,
+        "expected_receipt_hash": normalized_expected_hash,
+        "checks": checks,
+        "package_verification": package_verification,
+        "verified_at": receipt.get("verified_at"),
+        "note": (
+            "独立回执哈希、锚点状态和冻结证据包均已复验通过；结论仅代表回执核验时点。"
+            if verified and normalized_expected_hash
+            else "回执自封印、锚点状态和冻结证据包均已复验通过；请从独立渠道保存回执哈希，并在使用前复查最新撤销状态。"
+            if verified
+            else "核验回执未通过，锚点不得作为证据包的可信来源。"
+        ),
+    }
 
 
 def verify_authority_policy_evidence_package(
@@ -1864,6 +2375,16 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _is_iso_datetime(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None
 
 
 def authority_policy_scheduler_run_key(

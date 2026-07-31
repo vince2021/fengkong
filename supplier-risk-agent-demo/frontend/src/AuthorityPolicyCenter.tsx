@@ -50,6 +50,8 @@ export default function AuthorityPolicyCenter({ principal, canManage, canReview,
   const [anchorBusy, setAnchorBusy] = useState("");
   const [revocationTarget, setRevocationTarget] = useState<AuthorityPolicyEvidenceAnchor | null>(null);
   const [revocationReason, setRevocationReason] = useState("");
+  const [replacementTarget, setReplacementTarget] = useState<AuthorityPolicyEvidenceAnchor | null>(null);
+  const [replacementReason, setReplacementReason] = useState("");
   const [compareBaseId, setCompareBaseId] = useState("");
   const [compareCandidateId, setCompareCandidateId] = useState("");
   const [comparison, setComparison] = useState<AuthorityPolicyEvidenceComparison | null>(null);
@@ -250,6 +252,8 @@ export default function AuthorityPolicyCenter({ principal, canManage, canReview,
       setEvidenceAnchors(anchors);
       setRevocationTarget(null);
       setRevocationReason("");
+      setReplacementTarget(null);
+      setReplacementReason("");
       onNotice({
         kind: packageData.integrity.passed ? "success" : "error",
         text: packageData.integrity.passed
@@ -304,6 +308,27 @@ export default function AuthorityPolicyCenter({ principal, canManage, canReview,
     }
   }
 
+  async function downloadAnchorReceipt(anchorRecord: AuthorityPolicyEvidenceAnchor) {
+    setAnchorBusy(`receipt:${anchorRecord.id}`);
+    try {
+      const result = await api.authorityPolicyEvidenceAnchorReceipt(anchorRecord.id);
+      downloadJson(
+        result,
+        `${result.anchor.policy_version}-锚点核验回执-${result.anchor.id.slice(0, 8)}.json`,
+      );
+      onNotice({
+        kind: result.anchor.trust_eligible ? "success" : "error",
+        text: result.anchor.trust_eligible
+          ? `${result.anchor.policy_version} 核验回执已生成；结论代表 ${formatDateTime(result.verified_at)} 的锚点状态`
+          : `${result.anchor.policy_version} 核验回执已生成，但该锚点已撤销或登记异常，不得作为可信来源`,
+      });
+    } catch (error) {
+      onNotice({ kind: "error", text: error instanceof Error ? error.message : "锚点核验回执下载失败" });
+    } finally {
+      setAnchorBusy("");
+    }
+  }
+
   async function revokeEvidenceAnchor() {
     if (!evidence || !revocationTarget) return;
     setAnchorBusy(`revoke:${revocationTarget.id}`);
@@ -328,16 +353,47 @@ export default function AuthorityPolicyCenter({ principal, canManage, canReview,
     }
   }
 
-  function downloadEvidence(packageData: AuthorityPolicyEvidence, fileName?: string) {
+  async function replaceEvidenceAnchor() {
+    if (!evidence || !replacementTarget) return;
+    setAnchorBusy(`replace:${replacementTarget.id}`);
+    try {
+      const result = await api.replaceAuthorityPolicyEvidenceAnchor(
+        replacementTarget.id,
+        replacementTarget.row_version,
+        replacementReason.trim(),
+      );
+      const anchors = await api.authorityPolicyEvidenceAnchors(evidence.policy.id);
+      setEvidenceAnchors(anchors);
+      setReplacementTarget(null);
+      setReplacementReason("");
+      onNotice({
+        kind: "success",
+        text: `${result.policy_version} 可信锚点已由独立第三人换发；原撤销记录和替代关系均已保留`,
+      });
+    } catch (error) {
+      onNotice({ kind: "error", text: error instanceof Error ? error.message : "可信锚点换发失败" });
+    } finally {
+      setAnchorBusy("");
+    }
+  }
+
+  function downloadJson(packageData: object, fileName: string) {
     const blob = new Blob([JSON.stringify(packageData, null, 2)], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = fileName ?? `${packageData.policy.policy_version}-授权策略审计证据包.json`;
+    anchor.download = fileName;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function downloadEvidence(packageData: AuthorityPolicyEvidence, fileName?: string) {
+    downloadJson(
+      packageData,
+      fileName ?? `${packageData.policy.policy_version}-授权策略审计证据包.json`,
+    );
   }
 
   async function compareEvidence() {
@@ -449,7 +505,7 @@ export default function AuthorityPolicyCenter({ principal, canManage, canReview,
     {evidence && <section className={`authority-evidence-panel ${evidence.integrity.passed ? "passed" : "failed"}`}>
       <header>
         <div><span>POLICY EVIDENCE PACKAGE</span><strong>授权策略审计证据包</strong><p>服务端实时聚合策略快照、影响评估、激活运行、角色告警与哈希审计链，并对证据完整性逐项复验。</p></div>
-        <div><i>{evidence.integrity.passed ? "完整性通过" : "发现完整性异常"}</i><button type="button" onClick={() => { setEvidence(null); setEvidenceAnchors([]); setRevocationTarget(null); setRevocationReason(""); }}>关闭</button></div>
+        <div><i>{evidence.integrity.passed ? "完整性通过" : "发现完整性异常"}</i><button type="button" onClick={() => { setEvidence(null); setEvidenceAnchors([]); setRevocationTarget(null); setRevocationReason(""); setReplacementTarget(null); setReplacementReason(""); }}>关闭</button></div>
       </header>
       <div className="authority-evidence-summary">
         <div><span>策略版本</span><strong>{evidence.policy.policy_version}</strong><small>{statusLabels[evidence.policy.status]} · v{evidence.policy.row_version}</small></div>
@@ -471,16 +527,22 @@ export default function AuthorityPolicyCenter({ principal, canManage, canReview,
         </header>
         {evidenceAnchors.length ? <div className="authority-evidence-anchor-rows">{evidenceAnchors.map((anchorRecord) => <article className={`${anchorRecord.registry_valid ? "valid" : "invalid"} ${anchorRecord.status}`} key={anchorRecord.id}>
           <div className="anchor-status"><i>{anchorRecord.status === "revoked" ? "×" : anchorRecord.registry_valid ? "✓" : "!"}</i><span>{anchorRecord.status === "revoked" ? "已撤销可信资格" : anchorRecord.registry_valid ? "登记有效" : "登记异常"}</span><small>{anchorRegistryDetail(anchorRecord)}</small></div>
-          <div><strong>{anchorRecord.issued_by_name}</strong><small>签发 {formatDateTime(anchorRecord.issued_at)} · {anchorRecord.id.slice(0, 8)}</small>{anchorRecord.revoked_by_name && <small>撤销 {anchorRecord.revoked_by_name} · {formatDateTime(anchorRecord.revoked_at!)}</small>}</div>
+          <div><strong>{anchorRecord.issued_by_name}</strong><small>{anchorRecord.supersedes_anchor_id ? "换发" : "签发"} {formatDateTime(anchorRecord.issued_at)} · {anchorRecord.id.slice(0, 8)}</small>{anchorRecord.supersedes_anchor_id && <small>替代 {anchorRecord.supersedes_anchor_id.slice(0, 8)} · {anchorRecord.replacement_reason}</small>}{anchorRecord.revoked_by_name && <small>撤销 {anchorRecord.revoked_by_name} · {formatDateTime(anchorRecord.revoked_at!)}</small>}</div>
           <div><span>证据包哈希</span><code title={anchorRecord.package_hash}>{anchorRecord.package_hash.slice(0, 18)}…</code></div>
           <div><span>锚点哈希</span><code title={anchorRecord.anchor_hash}>{anchorRecord.anchor_hash.slice(0, 18)}…</code></div>
-          <div className="anchor-actions"><button type="button" disabled={anchorBusy === `download:${anchorRecord.id}`} onClick={() => void downloadAnchoredEvidence(anchorRecord)}>{anchorBusy === `download:${anchorRecord.id}` ? "读取中…" : "下载冻结包"}</button>{canRevokeAnchor && anchorRecord.status === "active" && principal?.subject !== anchorRecord.issued_by && <button className="revoke" type="button" onClick={() => { setRevocationTarget(anchorRecord); setRevocationReason(""); }}>撤销可信资格</button>}{canRevokeAnchor && anchorRecord.status === "active" && principal?.subject === anchorRecord.issued_by && <small>须由另一名授权人员撤销</small>}</div>
+          <div className="anchor-actions"><button type="button" disabled={anchorBusy === `download:${anchorRecord.id}`} onClick={() => void downloadAnchoredEvidence(anchorRecord)}>{anchorBusy === `download:${anchorRecord.id}` ? "读取中…" : "下载冻结包"}</button><button type="button" disabled={anchorBusy === `receipt:${anchorRecord.id}`} onClick={() => void downloadAnchorReceipt(anchorRecord)}>{anchorBusy === `receipt:${anchorRecord.id}` ? "生成中…" : "下载核验回执"}</button>{canRevokeAnchor && anchorRecord.status === "active" && principal?.subject !== anchorRecord.issued_by && <button className="revoke" type="button" onClick={() => { setRevocationTarget(anchorRecord); setRevocationReason(""); setReplacementTarget(null); setReplacementReason(""); }}>撤销可信资格</button>}{canRevokeAnchor && anchorRecord.status === "active" && principal?.subject === anchorRecord.issued_by && <small>须由另一名授权人员撤销</small>}{canAnchor && anchorRecord.status === "revoked" && !anchorRecord.replacement_anchor_id && principal && ![anchorRecord.issued_by, anchorRecord.revoked_by].includes(principal.subject) && <button className="replace" type="button" onClick={() => { setReplacementTarget(anchorRecord); setReplacementReason(""); setRevocationTarget(null); setRevocationReason(""); }}>换发可信锚点</button>}{canAnchor && anchorRecord.status === "revoked" && !anchorRecord.replacement_anchor_id && principal && [anchorRecord.issued_by, anchorRecord.revoked_by].includes(principal.subject) && <small>须由第三名授权人员换发</small>}{anchorRecord.replacement_anchor_id && <small>已由 {anchorRecord.replacement_anchor_id.slice(0, 8)} 换发</small>}</div>
         </article>)}</div> : <p>尚未签发可信锚点。实时证据包仍可自校验，但只有登记后的包才能使用平台台账进行外部锚定复验。</p>}
         {revocationTarget && <div className="authority-anchor-revocation">
           <header><div><strong>撤销可信锚点资格</strong><small>{revocationTarget.policy_version} · {revocationTarget.id.slice(0, 8)}</small></div><button type="button" onClick={() => { setRevocationTarget(null); setRevocationReason(""); }}>取消</button></header>
           <p>撤销不可逆，不会删除原始冻结包；该锚点仍保留用于历史追溯，但不能再作为离线复验的可信哈希来源。</p>
           <textarea value={revocationReason} onChange={(event) => setRevocationReason(event.target.value)} placeholder="填写证据来源失信、误签发或停止信任的具体原因（至少 10 个字符）" />
           <button type="button" disabled={anchorBusy === `revoke:${revocationTarget.id}` || revocationReason.trim().length < 10} onClick={() => void revokeEvidenceAnchor()}>{anchorBusy === `revoke:${revocationTarget.id}` ? "正在撤销…" : "确认撤销可信资格"}</button>
+        </div>}
+        {replacementTarget && <div className="authority-anchor-replacement">
+          <header><div><strong>换发可信证据锚点</strong><small>{replacementTarget.policy_version} · 替代 {replacementTarget.id.slice(0, 8)}</small></div><button type="button" onClick={() => { setReplacementTarget(null); setReplacementReason(""); }}>取消</button></header>
+          <p>换发不会恢复或覆盖旧锚点。平台将创建新的活动锚点并保留原签发、撤销与替代关系；换发人必须区别于原签发人和撤销人。</p>
+          <textarea value={replacementReason} onChange={(event) => setReplacementReason(event.target.value)} placeholder="填写复核范围、换发依据与重新建立信任的原因（至少 10 个字符）" />
+          <button type="button" disabled={anchorBusy === `replace:${replacementTarget.id}` || replacementReason.trim().length < 10} onClick={() => void replaceEvidenceAnchor()}>{anchorBusy === `replace:${replacementTarget.id}` ? "正在换发…" : "确认换发可信锚点"}</button>
         </div>}
       </section>
       <details className="authority-evidence-events">
@@ -657,7 +719,9 @@ function anchorRegistryDetail(anchor: AuthorityPolicyEvidenceAnchor): string {
   if (!anchor.anchor_hash_valid) return "锚点元数据异常";
   if (!anchor.package_unchanged) return "冻结证据包异常";
   if (!anchor.audit_valid) return "签发审计链异常";
+  if (anchor.status === "revoked" && anchor.replacement_anchor_id) return `已由 ${anchor.replacement_anchor_id.slice(0, 8)} 换发 · 原撤销原因：${anchor.revocation_reason}`;
   if (anchor.status === "revoked") return `撤销原因：${anchor.revocation_reason}`;
+  if (anchor.supersedes_anchor_id) return `换发自 ${anchor.supersedes_anchor_id.slice(0, 8)} · 原始业务完整性通过`;
   return anchor.integrity_passed ? "原始业务完整性通过" : "原始业务完整性异常";
 }
 

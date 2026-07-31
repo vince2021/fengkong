@@ -221,7 +221,7 @@ export type WorkflowProgress = {
   序号: number;
   审批环节: string;
   负责角色: string;
-  状态: "已完成" | "处理中" | "待处理" | "已终止";
+  状态: "已完成" | "处理中" | "待补件" | "待处理" | "已终止";
 };
 
 export type CreditAuthoritySlot = {
@@ -534,6 +534,16 @@ export type AuthorityPolicyEvidenceAnchor = {
   revoked_by_name: string | null;
   revoked_at: string | null;
   revocation_reason: string | null;
+  supersedes_anchor_id: string | null;
+  replacement_reason: string | null;
+  replacement_anchor_id: string | null;
+  superseded_anchor: {
+    id: string;
+    anchor_hash: string;
+    issued_by: string;
+    revoked_by: string;
+    revoked_at: string;
+  } | null;
   row_version: number;
   created_at: string | null;
   idempotent?: boolean;
@@ -553,6 +563,22 @@ export type AuthorityPolicyEvidenceAnchor = {
     }>;
     note: string;
   };
+};
+
+export type AuthorityPolicyEvidenceAnchorReceipt = {
+  schema_version: "authority-policy-anchor-receipt-v1";
+  verified_at: string;
+  trust_scope: "status_at_verified_at";
+  anchor: Omit<
+    AuthorityPolicyEvidenceAnchor,
+    "created_at" | "idempotent" | "package" | "audit" | "package_verification"
+  >;
+  audit_checkpoint: {
+    event_count: number;
+    terminal_hash: string;
+  };
+  receipt_hash_algorithm: "SHA-256";
+  receipt_hash: string;
 };
 
 export type AuthorityPolicyEvidenceAuditChain = {
@@ -875,6 +901,7 @@ export type DocumentChecklist = {
   template_key: string;
   items: DocumentChecklistItem[];
   review_checks: Array<{ key: string; label: string }>;
+  type_equivalents: Record<string, string[]>;
   summary: {
     total_count: number;
     required_count: number;

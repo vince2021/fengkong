@@ -10,7 +10,7 @@ from backend.authority_policy_repository import AuthorityPolicyRepository
 from backend.credit_authority import build_credit_authority, current_authority_slot, ensure_credit_authority, record_authority_signoff
 from backend.decision_governance import build_decision_variance, validate_decision_variance
 from backend.dependencies import get_approval_repository, get_authority_policy_repository, get_credit_facility_repository, get_decision_governance_repository, get_demo_repository, get_document_repository, get_enterprise_data_repository, get_enterprise_indicator_observation_repository, get_model_governance_repository, get_object_storage, get_rating_run_repository
-from backend.document_policy import ALLOWED_DOCUMENT_TYPES, INITIAL_DOCUMENT_TYPES, INITIAL_SUPPORTING_TYPES, SUPPLEMENT_REQUIRED_TYPES
+from backend.document_policy import ALLOWED_DOCUMENT_TYPES, INITIAL_DOCUMENT_TYPES, INITIAL_SUPPORTING_TYPES, SUPPLEMENT_REQUIRED_TYPES, document_type_satisfied, missing_document_types
 from backend.indicator_observations import apply_effective_observations
 from backend.rating_input_mapping import prepare_rating_input, readiness_summary
 from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditFacilityRepository, DecisionGovernanceRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, RatingRunRepository, content_hash
@@ -363,9 +363,13 @@ def automate_case_stage(
             }
         else:
             requested_types = set(case["data"].get("_workflow", {}).get("required_supplement_types", []))
-            missing = sorted((SUPPLEMENT_REQUIRED_TYPES | requested_types) - document_types)
+            missing = missing_document_types(SUPPLEMENT_REQUIRED_TYPES | requested_types, document_types)
             if missing:
-                pending = sorted(set(missing) & pending_document_types)
+                pending = sorted(
+                    document_type
+                    for document_type in missing
+                    if document_type_satisfied(document_type, pending_document_types)
+                )
                 pending_hint = f"；已上传但待风控独立核验：{', '.join(pending)}" if pending else ""
                 raise HTTPException(status_code=422, detail=f"补件尚未通过门禁，缺少已核验资料：{', '.join(missing)}{pending_hint}")
             payload = {

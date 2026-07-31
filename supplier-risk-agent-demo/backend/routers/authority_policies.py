@@ -6,7 +6,7 @@ from backend.authority_policy_impact import build_authority_policy_impact, compa
 from backend.authority_policy_repository import AuthorityPolicyRepository, normalize_authority_policy_config
 from backend.dependencies import get_authority_policy_repository, get_demo_repository, get_model_governance_repository
 from backend.repository import ConcurrentUpdateError, DemoRepository, ModelGovernanceRepository
-from backend.schemas import AuthorityPolicyActivationIncidentAction, AuthorityPolicyActivationRetry, AuthorityPolicyActivationScanRequest, AuthorityPolicyCreate, AuthorityPolicyEvidenceAnchorRevoke, AuthorityPolicyImpactRequest, AuthorityPolicyRestoreDraftRequest, AuthorityPolicyReview, AuthorityPolicyScenarioCompareRequest, AuthorityPolicyScheduleCancel, AuthorityPolicyUpdate, VersionedActionRequest
+from backend.schemas import AuthorityPolicyActivationIncidentAction, AuthorityPolicyActivationRetry, AuthorityPolicyActivationScanRequest, AuthorityPolicyCreate, AuthorityPolicyEvidenceAnchorReplace, AuthorityPolicyEvidenceAnchorRevoke, AuthorityPolicyImpactRequest, AuthorityPolicyRestoreDraftRequest, AuthorityPolicyReview, AuthorityPolicyScenarioCompareRequest, AuthorityPolicyScheduleCancel, AuthorityPolicyUpdate, VersionedActionRequest
 from backend.security import Principal, require_permissions
 
 
@@ -309,6 +309,18 @@ def get_authority_policy_evidence_anchor(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/evidence/anchors/{anchor_id}/receipt")
+def get_authority_policy_evidence_anchor_receipt(
+    anchor_id: str,
+    repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
+    _: Principal = Depends(require_permissions("authority_policy:view")),
+) -> dict:
+    try:
+        return repository.evidence_anchor_receipt(anchor_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/evidence/anchors/{anchor_id}/revoke")
 def revoke_authority_policy_evidence_anchor(
     anchor_id: str,
@@ -318,6 +330,31 @@ def revoke_authority_policy_evidence_anchor(
 ) -> dict:
     try:
         return repository.revoke_evidence_anchor(
+            anchor_id,
+            request.expected_row_version,
+            request.reason,
+            principal.subject,
+            principal.name,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/evidence/anchors/{anchor_id}/replace", status_code=201)
+def replace_authority_policy_evidence_anchor(
+    anchor_id: str,
+    request: AuthorityPolicyEvidenceAnchorReplace,
+    repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
+    principal: Principal = Depends(require_permissions("authority_policy:anchor")),
+) -> dict:
+    try:
+        return repository.replace_evidence_anchor(
             anchor_id,
             request.expected_row_version,
             request.reason,

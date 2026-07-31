@@ -389,6 +389,10 @@ class AuthorityPolicyEvidenceAnchorRevoke(VersionedActionRequest):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
 
 
+class AuthorityPolicyEvidenceAnchorReplace(VersionedActionRequest):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
+
+
 class AuthorityPolicyActivationScanRequest(BaseModel):
     run_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")] | None = None
     trigger_type: Literal["manual", "scheduler"] = "manual"

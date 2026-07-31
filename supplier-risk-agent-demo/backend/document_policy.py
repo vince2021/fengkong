@@ -46,6 +46,23 @@ INITIAL_DOCUMENT_TYPES = {"营业执照"}
 INITIAL_SUPPORTING_TYPES = {"财务报表", "业务合同", "征信授权书", "近三年审计报告", "最近一期财务报表", "主要业务合同"}
 SUPPLEMENT_REQUIRED_TYPES = {"营业执照", "财务报表", "征信授权书"}
 
+DOCUMENT_TYPE_EQUIVALENTS = {
+    "财务报表": {"财务报表", "近三年审计报告", "最近一期财务报表"},
+    "业务合同": {"业务合同", "主要业务合同"},
+}
+
+
+def document_type_satisfied(document_type: str, verified_types: set[str]) -> bool:
+    return bool(DOCUMENT_TYPE_EQUIVALENTS.get(document_type, {document_type}) & verified_types)
+
+
+def missing_document_types(required_types: set[str], verified_types: set[str]) -> list[str]:
+    return sorted(
+        document_type
+        for document_type in required_types
+        if not document_type_satisfied(document_type, verified_types)
+    )
+
 
 def document_requirement_catalog(template_key: str | None = None) -> list[dict]:
     key = template_key or "general"
@@ -74,6 +91,10 @@ def build_document_checklist(documents: list[dict], template_key: str | None = N
         "template_key": template_key or "general",
         "items": items,
         "review_checks": DOCUMENT_REVIEW_CHECKS,
+        "type_equivalents": {
+            key: sorted(values)
+            for key, values in DOCUMENT_TYPE_EQUIVALENTS.items()
+        },
         "summary": {
             "total_count": len(items),
             "required_count": len(required_items),
