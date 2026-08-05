@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 import backend.database as database
 from backend.authority_policy_repository import AuthorityPolicyRepository, BUILTIN_POLICY_VERSION, DEFAULT_AUTHORITY_POLICY_CONFIG, policy_config_hash, verify_authority_policy_anchor_receipt, verify_authority_policy_evidence_package
 from backend.credit_authority import build_credit_authority
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, DocumentRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord
 from backend.dependencies import demo_repository, get_object_storage
 from backend.main import app
 from backend.repository import ModelMonitoringRepository, RatingRunRepository, clear_persistent_data, content_hash
@@ -1526,6 +1526,547 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(rejected_case.json()["decision_variance_record"]["direction"], "rejected")
         self.assertEqual(rejected_case.json()["decision_variance_record"]["materiality"], "material")
         self.assertEqual(self.client.get("/api/v1/credit-facilities", headers=risk).json(), [])
+
+    def test_facility_renewal_is_idempotent_and_atomically_carries_open_balance(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        client = {"Authorization": "Bearer dev-client"}
+        created = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=manager).json()
+        with database.SessionLocal() as session:
+            record = session.get(ApprovalCaseRecord, created["case_id"])
+            record.current_stage = "final_strategy"
+            record.status = "处理中"
+            record.completed_stages = ["registration", "document_upload", "supplement", "approval_submit", "model_selection", "scoring", "credit_proposal"]
+            record.case_data = {
+                "scoring": {"rating": "A"},
+                "credit_proposal": {"suggested_limit": 100000, "suggested_payment_term_days": 30, "access_strategy": "准入", "monitoring_frequency": "月度"},
+            }
+            session.commit()
+        authorized = self._approve_current_authority(created["case_id"])
+        completed = self.client.post(
+            f"/api/v1/approval-cases/{created['case_id']}/advance",
+            json={"expected_row_version": authorized["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 30, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            headers=approver,
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        source = completed.json()["credit_facility"]
+        draw = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/transactions",
+            json={"transaction_ref": "RENEWAL-OPEN-BALANCE", "transaction_type": "drawdown", "amount": 40000, "expected_row_version": source["row_version"], "reason": "续授信前在途业务余额"},
+            headers=manager,
+        )
+        self.assertEqual(draw.status_code, 200, draw.text)
+        source = draw.json()["facility"]
+        baseline_event = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/risk-events",
+            json={
+                "external_event_id": "RENEWAL-BASELINE-LAWSUIT",
+                "event_type": "litigation",
+                "source": "企查查风险监控",
+                "severity": "critical",
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "title": "续授信前新增重大诉讼",
+                "description": "该风险必须在续授信复核中保留并重新评估。",
+                "payload": {"case_no": "（2026）粤01民初100号"},
+            },
+            headers=manager,
+        )
+        self.assertEqual(baseline_event.status_code, 201, baseline_event.text)
+        payload = {
+            "expected_row_version": source["row_version"],
+            "requested_limit": 120000,
+            "requested_term_days": 45,
+            "renewal_reason": "原授信即将到期，预计业务规模扩大",
+        }
+
+        forbidden = self.client.post(f"/api/v1/credit-facilities/{source['id']}/renewals", json=payload, headers=client)
+        self.assertEqual(forbidden.status_code, 403)
+        below_open_balance = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/renewals",
+            json={**payload, "requested_limit": 30000},
+            headers=manager,
+        )
+        self.assertEqual(below_open_balance.status_code, 422, below_open_balance.text)
+        self.assertIn("不能低于当前已用余额", below_open_balance.json()["detail"])
+        renewal_response = self.client.post(f"/api/v1/credit-facilities/{source['id']}/renewals", json=payload, headers=manager)
+        self.assertEqual(renewal_response.status_code, 201, renewal_response.text)
+        renewal = renewal_response.json()
+        self.assertFalse(renewal["idempotent"])
+        self.assertEqual(renewal["application_type"], "renewal")
+        self.assertEqual(renewal["source_facility_id"], source["id"])
+        self.assertEqual(renewal["current_stage"], "document_upload")
+        self.assertEqual(renewal["completed_stages"], ["registration"])
+        renewal_snapshot = renewal["data"]["_workflow"]["renewal_request"]
+        self.assertEqual(renewal_snapshot["current_used_limit"], 40000)
+        self.assertEqual(renewal_snapshot["current_payment_term_days"], 30)
+        self.assertEqual(renewal_snapshot["current_rating"], "A")
+        self.assertEqual(renewal_snapshot["current_access_strategy"], "准入")
+        self.assertEqual(renewal_snapshot["requested_term_days"], 45)
+        self.assertEqual(renewal_snapshot["risk_baseline"]["unresolved_alert_count"], 1)
+        self.assertEqual(renewal_snapshot["risk_baseline"]["critical_alert_count"], 1)
+        self.assertEqual(renewal_snapshot["risk_baseline"]["active_risk_event_count"], 1)
+        self.assertEqual(renewal_snapshot["risk_baseline"]["signals"][0]["title"], "续授信前新增重大诉讼")
+
+        duplicate = self.client.post(f"/api/v1/credit-facilities/{source['id']}/renewals", json=payload, headers=manager)
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertTrue(duplicate.json()["idempotent"])
+        self.assertEqual(duplicate.json()["case_id"], renewal["case_id"])
+        conflicting = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/renewals",
+            json={**payload, "requested_limit": 130000},
+            headers=manager,
+        )
+        self.assertEqual(conflicting.status_code, 409)
+        detail = self.client.get(f"/api/v1/credit-facilities/{source['id']}", headers=risk).json()
+        self.assertEqual(detail["renewal_case"]["case_id"], renewal["case_id"])
+        self.assertEqual(detail["renewal_case"]["request_snapshot"]["baseline_status"], "frozen")
+        self.assertEqual(detail["renewal_case"]["request_snapshot"]["risk_baseline"]["capture_status"], "captured")
+        self.assertEqual(detail["renewal_case"]["request_snapshot"]["risk_baseline"]["critical_alert_count"], 1)
+        self.assertEqual(detail["renewal_case"]["request_snapshot"]["limit_delta"], 20000)
+        self.assertEqual(detail["renewal_case"]["request_snapshot"]["term_delta_days"], 15)
+        self.assertEqual(detail["renewal_case"]["request_snapshot"]["current_used_limit"], 40000)
+
+        with database.SessionLocal() as session:
+            record = session.get(ApprovalCaseRecord, renewal["case_id"])
+            record.current_stage = "scoring"
+            record.status = "处理中"
+            record.completed_stages = ["registration", "document_upload", "supplement", "approval_submit", "model_selection"]
+            session.commit()
+        scoring_case = self.client.get(f"/api/v1/approval-cases/{renewal['case_id']}", headers=risk).json()
+        blocked_scoring = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/automate",
+            json={"expected_row_version": scoring_case["row_version"]},
+            headers=risk,
+        )
+        self.assertEqual(blocked_scoring.status_code, 422, blocked_scoring.text)
+        self.assertIn("风险复核尚未完成", blocked_scoring.json()["detail"])
+        unauthorized_review = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/renewal-risk-review",
+            json={"expected_row_version": scoring_case["row_version"], "conclusion": "cleared", "review_note": "客户经理无权形成风险复核结论", "control_measures": []},
+            headers=manager,
+        )
+        self.assertEqual(unauthorized_review.status_code, 403, unauthorized_review.text)
+        missing_controls = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/renewal-risk-review",
+            json={"expected_row_version": scoring_case["row_version"], "conclusion": "controls_required", "review_note": "重大诉讼尚未结案，需要增加控制措施", "control_measures": []},
+            headers=risk,
+        )
+        self.assertEqual(missing_controls.status_code, 422, missing_controls.text)
+        reviewed_response = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/renewal-risk-review",
+            json={"expected_row_version": scoring_case["row_version"], "conclusion": "controls_required", "review_note": "重大诉讼尚未结案，结合最新风险证据审慎推进", "control_measures": ["额度控制在模型建议范围内", "增加月度诉讼风险监控"]},
+            headers=risk,
+        )
+        self.assertEqual(reviewed_response.status_code, 200, reviewed_response.text)
+        reviewed_case = reviewed_response.json()
+        risk_review = reviewed_case["data"]["_workflow"]["renewal_risk_review"]
+        self.assertEqual(risk_review["status"], "completed")
+        self.assertEqual(risk_review["conclusion"], "controls_required")
+        self.assertEqual(risk_review["latest_risk_snapshot"]["critical_alert_count"], 1)
+        gate_passed = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/automate",
+            json={"expected_row_version": reviewed_case["row_version"]},
+            headers=risk,
+        )
+        self.assertEqual(gate_passed.status_code, 409, gate_passed.text)
+        self.assertIn("缺少有效的模型选择结果", gate_passed.json()["detail"])
+        changed_risk = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/risk-events",
+            json={
+                "external_event_id": "RENEWAL-REVIEW-STATE-CHANGED",
+                "event_type": "business_abnormal",
+                "source": "企查查风险监控",
+                "severity": "warning",
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "title": "复核后新增经营异常",
+                "description": "用于验证评分前风险状态变化自动触发重新复核。",
+                "payload": {"register": "市场监督管理局"},
+            },
+            headers=manager,
+        )
+        self.assertEqual(changed_risk.status_code, 201, changed_risk.text)
+        stale_review = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/automate",
+            json={"expected_row_version": reviewed_case["row_version"]},
+            headers=risk,
+        )
+        self.assertEqual(stale_review.status_code, 409, stale_review.text)
+        self.assertIn("风险状态在复核后已发生变化", stale_review.json()["detail"])
+        refreshed_review = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/renewal-risk-review",
+            json={"expected_row_version": reviewed_case["row_version"], "conclusion": "controls_required", "review_note": "已核验新增经营异常，维持审慎推进并强化监控", "control_measures": ["额度控制在模型建议范围内", "增加月度经营异常与诉讼监控"]},
+            headers=risk,
+        )
+        self.assertEqual(refreshed_review.status_code, 200, refreshed_review.text)
+        self.assertEqual(refreshed_review.json()["data"]["_workflow"]["renewal_risk_review"]["latest_risk_snapshot"]["unresolved_alert_count"], 2)
+
+        with database.SessionLocal() as session:
+            record = session.get(ApprovalCaseRecord, renewal["case_id"])
+            renewal_workflow = deepcopy(record.case_data["_workflow"])
+            record.current_stage = "final_strategy"
+            record.status = "处理中"
+            record.completed_stages = ["registration", "document_upload", "supplement", "approval_submit", "model_selection", "scoring", "credit_proposal"]
+            record.case_data = {
+                "_workflow": renewal_workflow,
+                "scoring": {"rating": "A"},
+                "credit_proposal": {"suggested_limit": 100000, "suggested_payment_term_days": 45, "access_strategy": "准入", "monitoring_frequency": "月度"},
+            }
+            session.commit()
+        self._approve_current_authority(renewal["case_id"], "dev-risk")
+        authorized_renewal = self._approve_current_authority(renewal["case_id"])
+        post_signoff_risk = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/risk-events",
+            json={
+                "external_event_id": "RENEWAL-AFTER-SIGNOFF-RISK",
+                "event_type": "negative_public_opinion",
+                "source": "舆情监控",
+                "severity": "warning",
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "title": "授权会签后新增负面舆情",
+                "description": "用于验证最终决策门禁及重新复核后会签重置。",
+                "payload": {"channel": "news"},
+            },
+            headers=manager,
+        )
+        self.assertEqual(post_signoff_risk.status_code, 201, post_signoff_risk.text)
+        stale_final = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/advance",
+            json={"expected_row_version": authorized_renewal["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 45, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            headers=approver,
+        )
+        self.assertEqual(stale_final.status_code, 409, stale_final.text)
+        self.assertIn("风险状态在复核后已发生变化", stale_final.json()["detail"])
+        final_stage_review = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/renewal-risk-review",
+            json={"expected_row_version": authorized_renewal["row_version"], "conclusion": "controls_required", "review_note": "已复核授权会签后的新增舆情，维持控制措施并重新提交授权", "control_measures": ["维持月度风险监控", "最终审批重新独立会签"]},
+            headers=risk,
+        )
+        self.assertEqual(final_stage_review.status_code, 200, final_stage_review.text)
+        reset_case = final_stage_review.json()
+        self.assertEqual(reset_case["data"]["_workflow"]["credit_authority"]["status"], "pending")
+        self.assertTrue(all(slot["status"] == "pending" for slot in reset_case["data"]["_workflow"]["credit_authority"]["slots"]))
+        self._approve_current_authority(renewal["case_id"], "dev-risk")
+        authorized_renewal = self._approve_current_authority(renewal["case_id"])
+        insufficient = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/advance",
+            json={"expected_row_version": authorized_renewal["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 30000, "approved_payment_term_days": 45, "monitoring_frequency": "月度", "facility_validity_days": 365, "adjustment_reason_category": "审慎下调", "adjustment_reason": "基于最新经营压力审慎下调额度并保持风险敞口可控"}},
+            headers=approver,
+        )
+        self.assertEqual(insufficient.status_code, 422, insufficient.text)
+        self.assertIn("不能低于需承接的已用余额", insufficient.json()["detail"])
+        unchanged_source = self.client.get(f"/api/v1/credit-facilities/{source['id']}", headers=risk).json()
+        self.assertEqual(unchanged_source["status"], "active")
+        self.assertEqual(unchanged_source["used_limit"], 40000)
+        unchanged_renewal = self.client.get(f"/api/v1/approval-cases/{renewal['case_id']}", headers=approver).json()
+        self.assertEqual(unchanged_renewal["status"], "处理中")
+        self.assertNotIn("final_strategy", unchanged_renewal["data"])
+
+        renewed = self.client.post(
+            f"/api/v1/approval-cases/{renewal['case_id']}/advance",
+            json={"expected_row_version": unchanged_renewal["row_version"], "payload": {"decision": "通过", "access_strategy": "准入", "approved_limit": 100000, "approved_payment_term_days": 45, "monitoring_frequency": "月度", "facility_validity_days": 365}},
+            headers=approver,
+        )
+        self.assertEqual(renewed.status_code, 200, renewed.text)
+        successor = renewed.json()["credit_facility"]
+        self.assertEqual(successor["supersedes_facility_id"], source["id"])
+        self.assertEqual(successor["opening_balance"], 40000)
+        self.assertEqual(successor["used_limit"], 40000)
+        self.assertEqual(successor["available_limit"], 60000)
+        self.assertEqual(successor["pending_control_count"], 2)
+        final_strategy = renewed.json()["data"]["final_strategy"]
+        self.assertEqual(final_strategy["renewal_risk_disposition"]["alignment"], "controls_adopted")
+        self.assertEqual(final_strategy["renewal_risk_disposition"]["adopted_controls"], ["维持月度风险监控", "最终审批重新独立会签"])
+        successor_detail = self.client.get(f"/api/v1/credit-facilities/{successor['id']}", headers=risk).json()
+        self.assertEqual(len(successor_detail["control_conditions"]), 2)
+        first_condition = successor_detail["control_conditions"][0]
+        unauthorized_completion = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{first_condition['id']}/complete",
+            json={"expected_row_version": first_condition["row_version"], "conclusion": "客户经理尝试闭环控制条件"},
+            headers=manager,
+        )
+        self.assertEqual(unauthorized_completion.status_code, 403, unauthorized_completion.text)
+        cancelled_extension_request = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{first_condition['id']}/extensions",
+            json={"expected_condition_version": first_condition["row_version"], "extension_days": 7, "reason": "等待外部月度监控数据回传，先申请受控延期七天"},
+            headers=risk,
+        )
+        self.assertEqual(cancelled_extension_request.status_code, 201, cancelled_extension_request.text)
+        completed_condition = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{first_condition['id']}/complete",
+            json={"expected_row_version": first_condition["row_version"], "conclusion": "已核验最新风险台账并落实月度监控安排"},
+            headers=risk,
+        )
+        self.assertEqual(completed_condition.status_code, 200, completed_condition.text)
+        self.assertEqual(completed_condition.json()["status"], "completed")
+        refreshed_successor = self.client.get(f"/api/v1/credit-facilities/{successor['id']}", headers=risk).json()
+        self.assertEqual(refreshed_successor["pending_control_count"], 1)
+        self.assertEqual(refreshed_successor["control_conditions"][0]["completed_by"], "风控经理")
+        self.assertEqual(refreshed_successor["control_conditions"][0]["extension_requests"][0]["status"], "cancelled")
+        cancelled_extension_notifications = self.client.get("/api/v1/notifications", headers=approver).json()
+        self.assertTrue(any(item["title"] == "控制条件延期申请已自动取消" for item in cancelled_extension_notifications))
+        original_extension_notice = next(item for item in cancelled_extension_notifications if item["title"] == "控制条件延期申请待审批")
+        self.assertEqual(original_extension_notice["status"], "read")
+        pending_condition = next(item for item in refreshed_successor["control_conditions"] if item["status"] == "pending")
+        with database.SessionLocal() as session:
+            condition_record = session.get(FacilityControlConditionRecord, pending_condition["id"])
+            condition_record.due_at = datetime.now(timezone.utc) - timedelta(days=8)
+            session.commit()
+        first_control_scan = self.client.post("/api/v1/credit-facilities/scan", headers=risk)
+        self.assertEqual(first_control_scan.status_code, 200, first_control_scan.text)
+        self.assertEqual(first_control_scan.json()["control_alerts_opened"], 1)
+        self.assertEqual(first_control_scan.json()["control_conditions_escalated"], 1)
+        self.assertEqual(first_control_scan.json()["control_notifications_created"], 1)
+        approver_notifications = self.client.get("/api/v1/notifications", headers=approver).json()
+        self.assertTrue(any(item["category"] == "facility_control" and item["action"]["page"] == "facilities" for item in approver_notifications))
+        repeated_control_scan = self.client.post("/api/v1/credit-facilities/scan", headers=risk)
+        self.assertEqual(repeated_control_scan.json()["control_alerts_opened"], 0)
+        self.assertEqual(repeated_control_scan.json()["control_conditions_escalated"], 0)
+        self.assertEqual(repeated_control_scan.json()["control_notifications_created"], 0)
+        overdue_detail = self.client.get(f"/api/v1/credit-facilities/{successor['id']}", headers=risk).json()
+        overdue_condition = next(item for item in overdue_detail["control_conditions"] if item["id"] == pending_condition["id"])
+        self.assertEqual(overdue_condition["sla_status"], "overdue")
+        self.assertEqual(overdue_condition["escalation_level"], 2)
+        self.assertEqual(overdue_condition["escalation_role"], "approver")
+        self.assertEqual(overdue_detail["overdue_control_count"], 1)
+        control_alert = next(
+            item
+            for item in self.client.get("/api/v1/credit-facilities/alerts", headers=risk).json()
+            if item["alert_type"] == "control_condition_overdue" and item["facility_id"] == successor["id"]
+        )
+        blocked_disposition = self.client.post(
+            f"/api/v1/credit-facilities/alerts/{control_alert['id']}/dispose",
+            json={"expected_alert_version": control_alert["row_version"], "expected_facility_version": overdue_detail["row_version"], "action": "monitor", "conclusion": "尝试绕过控制条件直接关闭预警"},
+            headers=risk,
+        )
+        self.assertEqual(blocked_disposition.status_code, 422, blocked_disposition.text)
+        extension_request = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/extensions",
+            json={"expected_condition_version": overdue_condition["row_version"], "extension_days": 30, "reason": "外部核验机构反馈延期，需要补充取得正式核验报告"},
+            headers=risk,
+        )
+        self.assertEqual(extension_request.status_code, 201, extension_request.text)
+        extension = extension_request.json()
+        duplicate_extension = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/extensions",
+            json={"expected_condition_version": overdue_condition["row_version"], "extension_days": 30, "reason": "重复提交同一控制条件延期申请用于测试幂等门禁"},
+            headers=risk,
+        )
+        self.assertEqual(duplicate_extension.status_code, 422, duplicate_extension.text)
+        self_review = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/extensions/{extension['id']}/review",
+            json={"expected_extension_version": extension["row_version"], "expected_condition_version": overdue_condition["row_version"], "decision": "approve", "comment": "申请人尝试自行审批延期"},
+            headers=risk,
+        )
+        self.assertEqual(self_review.status_code, 403, self_review.text)
+        rejected_extension = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/extensions/{extension['id']}/review",
+            json={"expected_extension_version": extension["row_version"], "expected_condition_version": overdue_condition["row_version"], "decision": "reject", "comment": "现有材料不足以支持延期，请补充第三方正式排期"},
+            headers=approver,
+        )
+        self.assertEqual(rejected_extension.status_code, 200, rejected_extension.text)
+        self.assertEqual(rejected_extension.json()["extension"]["status"], "rejected")
+        replacement_request = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/extensions",
+            json={"expected_condition_version": overdue_condition["row_version"], "extension_days": 30, "reason": "已补充第三方正式排期及当前阶段核验记录，再次申请延期"},
+            headers=risk,
+        )
+        self.assertEqual(replacement_request.status_code, 201, replacement_request.text)
+        extension = replacement_request.json()
+        extension_review = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/extensions/{extension['id']}/review",
+            json={"expected_extension_version": extension["row_version"], "expected_condition_version": overdue_condition["row_version"], "decision": "approve", "comment": "已核验第三方排期和阶段证据，同意一次性延期"},
+            headers=approver,
+        )
+        self.assertEqual(extension_review.status_code, 200, extension_review.text)
+        self.assertEqual(extension_review.json()["extension"]["status"], "approved")
+        self.assertEqual(extension_review.json()["condition"]["escalation_level"], 0)
+        self.assertEqual(extension_review.json()["condition"]["sla_status"], "on_track")
+        self.assertEqual(extension_review.json()["condition"]["extension_requests"][0]["status"], "approved")
+        requester_notifications = self.client.get("/api/v1/notifications", headers=risk).json()
+        self.assertTrue(any(item["title"] == "控制条件延期已批准" for item in requester_notifications))
+        with database.SessionLocal() as session:
+            condition_record = session.get(FacilityControlConditionRecord, pending_condition["id"])
+            condition_record.due_at = datetime.now(timezone.utc) - timedelta(days=31)
+            session.commit()
+        escalated_scan = self.client.post("/api/v1/credit-facilities/scan", headers=risk)
+        self.assertEqual(escalated_scan.json()["control_alerts_opened"], 1)
+        self.assertEqual(escalated_scan.json()["control_conditions_escalated"], 1)
+        self.assertEqual(escalated_scan.json()["control_notifications_created"], 1)
+        admin_notifications = self.client.get("/api/v1/notifications", headers=self.headers).json()
+        self.assertTrue(any(item["category"] == "facility_control" and item["level"] == "escalated" for item in admin_notifications))
+        escalated_detail = self.client.get(f"/api/v1/credit-facilities/{successor['id']}", headers=risk).json()
+        escalated_condition = next(item for item in escalated_detail["control_conditions"] if item["id"] == pending_condition["id"])
+        self.assertEqual(escalated_condition["escalation_level"], 3)
+        self.assertEqual(escalated_condition["escalation_role"], "admin")
+        completed_escalated = self.client.post(
+            f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/complete",
+            json={"expected_row_version": escalated_condition["row_version"], "conclusion": "已补齐最终审批会签核验记录并落实督办要求"},
+            headers=risk,
+        )
+        self.assertEqual(completed_escalated.status_code, 200, completed_escalated.text)
+        resolved_control_alert = next(
+            item
+            for item in self.client.get("/api/v1/credit-facilities/alerts", headers=risk).json()
+            if item["id"] == control_alert["id"]
+        )
+        self.assertEqual(resolved_control_alert["status"], "resolved")
+        control_summary = self.client.get("/api/v1/credit-facilities/summary", headers=risk).json()
+        self.assertEqual(control_summary["pending_control_conditions"], 0)
+        self.assertEqual(control_summary["overdue_control_conditions"], 0)
+        closed_source = self.client.get(f"/api/v1/credit-facilities/{source['id']}", headers=risk).json()
+        self.assertEqual(closed_source["status"], "closed")
+        self.assertEqual(closed_source["used_limit"], 0)
+        self.assertEqual(closed_source["renewal_case"]["status"], "已完成")
+        blocked_repeat = self.client.post(
+            f"/api/v1/credit-facilities/{source['id']}/renewals",
+            json={**payload, "expected_row_version": closed_source["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(blocked_repeat.status_code, 409)
+        source_audit = self.client.get(f"/api/v1/audit-events?aggregate_id={source['id']}", headers=risk).json()
+        self.assertIn("facility_renewal_initiated", [item["event_type"] for item in source_audit])
+        self.assertIn("credit_facility_superseded", [item["event_type"] for item in source_audit])
+
+    def test_renewal_document_carryover_separates_reusable_and_refresh_required_materials(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        source_case_id = "CASE-RENEWAL-DOCUMENT-SOURCE"
+        renewal_case_id = "CASE-RENEWAL-DOCUMENT-TARGET"
+        with database.SessionLocal() as session:
+            session.add_all(
+                [
+                    ApprovalCaseRecord(
+                        case_id=source_case_id,
+                        counterparty_id=self.counterparty["id"],
+                        counterparty_name=self.counterparty["name"],
+                        application_type="new_credit",
+                        current_stage="final_strategy",
+                        status="已完成",
+                        completed_stages=["registration", "document_upload", "supplement", "approval_submit", "model_selection", "scoring", "credit_proposal", "final_strategy"],
+                        case_data={},
+                        timeline=[],
+                    ),
+                    ApprovalCaseRecord(
+                        case_id=renewal_case_id,
+                        counterparty_id=self.counterparty["id"],
+                        counterparty_name=self.counterparty["name"],
+                        application_type="renewal",
+                        source_facility_id="FACILITY-RENEWAL-DOCUMENT-SOURCE",
+                        current_stage="document_upload",
+                        status="处理中",
+                        completed_stages=["registration"],
+                        case_data={"_workflow": {"renewal_request": {"source_case_id": source_case_id}}},
+                        timeline=[],
+                    ),
+                ]
+            )
+            session.commit()
+
+        source_documents = {}
+        for document_type in ["营业执照", "公司章程", "最近一期财务报表"]:
+            uploaded = self.client.post(
+                "/api/v1/documents",
+                data={"counterparty_id": self.counterparty["id"], "case_id": source_case_id, "document_type": document_type},
+                files={"file": (f"{document_type}.txt", f"{self.counterparty['name']} {document_type} 已核验资料".encode(), "text/plain")},
+                headers=manager,
+            )
+            self.assertEqual(uploaded.status_code, 201, uploaded.text)
+            source_documents[document_type] = self._review_document(uploaded.json())
+        with database.SessionLocal() as session:
+            stale_articles = session.get(DocumentRecord, source_documents["公司章程"]["id"])
+            stale_articles.reviewed_at = datetime.now(timezone.utc) - timedelta(days=400)
+            session.commit()
+
+        assessment = self.client.get(
+            f"/api/v1/documents/renewal-carryover?case_id={renewal_case_id}&template_key=general",
+            headers=manager,
+        )
+        self.assertEqual(assessment.status_code, 200, assessment.text)
+        assessment_body = assessment.json()
+        actions = {item["document_type"]: item["action"] for item in assessment_body["items"]}
+        self.assertEqual(actions["营业执照"], "reusable")
+        self.assertEqual(actions["公司章程"], "expired_source")
+        self.assertEqual(actions["最近一期财务报表"], "refresh_required")
+        self.assertEqual(assessment_body["summary"]["reusable_count"], 1)
+
+        renewal_case = self.client.get(f"/api/v1/approval-cases/{renewal_case_id}", headers=manager).json()
+        carried = self.client.post(
+            "/api/v1/documents/renewal-carryover",
+            json={"case_id": renewal_case_id, "template_key": "general", "expected_case_row_version": renewal_case["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(carried.status_code, 200, carried.text)
+        self.assertFalse(carried.json()["idempotent"])
+        self.assertEqual(carried.json()["created_count"], 1)
+        self.assertEqual(carried.json()["summary"]["carried_count"], 1)
+        carried_document = carried.json()["carried_documents"][0]
+        self.assertEqual(carried_document["source_document_id"], source_documents["营业执照"]["id"])
+        self.assertEqual(carried_document["sha256"], source_documents["营业执照"]["sha256"])
+        self.assertNotEqual(carried_document["object_key"], source_documents["营业执照"]["object_key"])
+        self.assertEqual(carried_document["review_status"], "verified")
+
+        duplicate = self.client.post(
+            "/api/v1/documents/renewal-carryover",
+            json={"case_id": renewal_case_id, "template_key": "general", "expected_case_row_version": renewal_case["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(duplicate.status_code, 200, duplicate.text)
+        self.assertTrue(duplicate.json()["idempotent"])
+        self.assertEqual(duplicate.json()["created_count"], 0)
+        target_documents = self.client.get(f"/api/v1/documents?case_id={renewal_case_id}", headers=manager).json()
+        self.assertEqual(len(target_documents), 1)
+        self.assertEqual(len(self.client.get(f"/api/v1/documents?case_id={source_case_id}", headers=manager).json()), 3)
+
+        immutable_review = self.client.post(
+            f"/api/v1/documents/{carried_document['id']}/review",
+            json={
+                "expected_row_version": carried_document["row_version"],
+                "decision": "reject",
+                "comment": "不应允许改写承接资料",
+                "checks": [
+                    {"key": key, "label": label, "status": "fail" if key == "integrity" else "pass"}
+                    for key, label in {
+                        "integrity": "文件格式与指纹完整",
+                        "entity_match": "企业名称及统一信用代码一致",
+                        "validity": "证照、报告或证明仍在有效期",
+                        "completeness": "关键页、签章和附件完整",
+                        "legibility": "内容清晰可读且不存在明显涂改",
+                    }.items()
+                ],
+            },
+            headers={"Authorization": "Bearer dev-risk"},
+        )
+        self.assertEqual(immutable_review.status_code, 422)
+        self.assertIn("不能直接改写", immutable_review.json()["detail"])
+
+        blocked = self.client.post(
+            f"/api/v1/approval-cases/{renewal_case_id}/automate",
+            json={"expected_row_version": renewal_case["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(blocked.status_code, 422)
+        self.assertIn("至少一项", blocked.json()["detail"])
+
+        current_financial = self.client.post(
+            "/api/v1/documents",
+            data={"counterparty_id": self.counterparty["id"], "case_id": renewal_case_id, "document_type": "最近一期财务报表"},
+            files={"file": ("续授信最新财务报表.txt", f"{self.counterparty['name']} 最新财务数据".encode(), "text/plain")},
+            headers=manager,
+        )
+        self.assertEqual(current_financial.status_code, 201, current_financial.text)
+        self._review_document(current_financial.json())
+        advanced = self.client.post(
+            f"/api/v1/approval-cases/{renewal_case_id}/automate",
+            json={"expected_row_version": renewal_case["row_version"]},
+            headers=manager,
+        )
+        self.assertEqual(advanced.status_code, 200, advanced.text)
+        self.assertEqual(advanced.json()["current_stage"], "supplement")
+        carried_audit = self.client.get(f"/api/v1/audit-events?aggregate_id={carried_document['id']}", headers=risk).json()
+        source_audit = self.client.get(f"/api/v1/audit-events?aggregate_id={source_documents['营业执照']['id']}", headers=risk).json()
+        self.assertEqual([item["event_type"] for item in carried_audit], ["renewal_document_carried_over"])
+        self.assertIn("document_reused_for_renewal", [item["event_type"] for item in source_audit])
 
     def test_committee_authority_signoff_routes_roles_and_blocks_duplicate_signer(self) -> None:
         manager = {"Authorization": "Bearer dev-manager"}
@@ -3839,6 +4380,191 @@ class ApiTest(unittest.TestCase):
         approval_event_types = {item["event_type"] for item in approval_audit + normal_approval_audit}
         self.assertTrue({"personal_task_claimed", "personal_task_lease_renewed", "personal_task_released", "personal_task_lease_expired"}.issubset(approval_event_types))
         self.assertTrue({"personal_task_claimed", "personal_task_released"}.issubset({item["event_type"] for item in correction_audit}))
+
+    def test_post_credit_tasks_are_role_routed_into_personal_and_team_queues(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        client = {"Authorization": "Bearer dev-client"}
+        case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        now = datetime.now(timezone.utc)
+        facility_id = "facility-unified-task-test"
+        condition_id = "condition-unified-task-test"
+        extension_id = "extension-unified-task-test"
+        with database.SessionLocal() as session:
+            session.add(
+                CreditFacilityRecord(
+                    id=facility_id,
+                    case_id=case["case_id"],
+                    counterparty_id=self.counterparty["id"],
+                    counterparty_name=self.counterparty["name"],
+                    approved_limit=100000,
+                    used_limit=0,
+                    opening_balance=0,
+                    payment_term_days=30,
+                    rating="A",
+                    access_strategy="准入",
+                    monitoring_frequency="月度",
+                    status="active",
+                    effective_at=now - timedelta(days=30),
+                    expires_at=now + timedelta(days=335),
+                    next_review_at=now + timedelta(days=30),
+                )
+            )
+            session.flush()
+            session.add(
+                FacilityControlConditionRecord(
+                    id=condition_id,
+                    facility_id=facility_id,
+                    source_case_id=case["case_id"],
+                    source_review_hash="unified-task-review-hash",
+                    sequence=1,
+                    measure="取得最新外部核验报告并完成贷后风险复核",
+                    owner_role="risk_manager",
+                    status="pending",
+                    due_at=now - timedelta(days=8),
+                    escalation_level=2,
+                    escalation_role="approver",
+                    escalated_at=now,
+                )
+            )
+            session.flush()
+            session.add(
+                FacilityControlExtensionRecord(
+                    id=extension_id,
+                    condition_id=condition_id,
+                    facility_id=facility_id,
+                    extension_days=30,
+                    previous_due_at=now - timedelta(days=8),
+                    proposed_due_at=now + timedelta(days=22),
+                    reason="外部核验机构已提供正式排期，需要受控延期完成取证",
+                    status="pending",
+                    requested_by="risk-demo",
+                    requested_by_name="风控经理",
+                    requested_at=now,
+                )
+            )
+            session.commit()
+
+        risk_queue = self.client.get("/api/v1/operations/my-tasks", headers=risk).json()
+        risk_post_credit = [task for task in risk_queue["tasks"] if task["facility_id"] == facility_id]
+        self.assertEqual([task["task_type"] for task in risk_post_credit], ["facility_control"])
+        self.assertFalse(risk_post_credit[0]["claimable"])
+        self.assertEqual(risk_post_credit[0]["assignment_state"], "direct")
+        self.assertEqual(risk_post_credit[0]["sla_status"], "escalated")
+        self.assertEqual(risk_post_credit[0]["action"], {"page": "facilities", "case_id": case["case_id"], "facility_id": facility_id, "condition_id": condition_id})
+
+        approver_queue = self.client.get("/api/v1/operations/my-tasks", headers=approver).json()
+        approver_post_credit = [task for task in approver_queue["tasks"] if task.get("facility_id") == facility_id]
+        self.assertEqual({task["task_type"] for task in approver_post_credit}, {"facility_control", "control_extension"})
+        self.assertEqual(approver_queue["summary"]["control_extension"], 1)
+        self.assertTrue(all(not task["claimable"] for task in approver_post_credit))
+        self.assertFalse(any(task.get("facility_id") == facility_id for task in self.client.get("/api/v1/operations/my-tasks", headers=operations).json()["tasks"]))
+        self.assertFalse(any(task.get("facility_id") == facility_id for task in self.client.get("/api/v1/operations/my-tasks", headers=client).json()["tasks"]))
+
+        team_board = self.client.get("/api/v1/operations/team-tasks", headers=operations).json()
+        team_post_credit = [task for task in team_board["tasks"] if task.get("facility_id") == facility_id]
+        self.assertEqual(len(team_post_credit), 2)
+        self.assertEqual(team_board["summary"]["direct"], 2)
+        self.assertEqual(team_board["summary"]["unassigned"], 1)
+        self.assertTrue(all(not task["can_force_release"] for task in team_post_credit))
+        self.assertTrue(all(task["can_remind"] for task in team_post_credit))
+        approver_load = next(item for item in team_board["role_load"] if item["role"] == "approver")
+        self.assertEqual(approver_load["direct"], 2)
+        direct_load = next(item for item in team_board["assignee_load"] if item["subject"] == "__direct__")
+        self.assertEqual(direct_load["total"], 2)
+
+        auditor_board = self.client.get(
+            "/api/v1/operations/team-tasks",
+            headers={"Authorization": "Bearer dev-auditor"},
+        ).json()
+        auditor_condition_task = next(task for task in auditor_board["tasks"] if task["id"] == f"facility_control:{condition_id}")
+        self.assertFalse(auditor_condition_task["can_remind"])
+        denied_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/facility_control/{condition_id}/remind",
+            json={"expected_row_version": 1, "reason": "审计人员不应具备角色催办权限"},
+            headers={"Authorization": "Bearer dev-auditor"},
+        )
+        self.assertEqual(denied_reminder.status_code, 403)
+
+        stale_role_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/facility_control/{condition_id}/remind",
+            json={"expected_row_version": 99, "reason": "使用失效版本发起催办应被并发门禁阻断"},
+            headers=operations,
+        )
+        self.assertEqual(stale_role_reminder.status_code, 409)
+
+        role_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/facility_control/{condition_id}/remind",
+            json={"expected_row_version": 1, "reason": "控制条件已经升级，请授信审批人今日完成督办核查"},
+            headers=operations,
+        )
+        self.assertEqual(role_reminder.status_code, 200, role_reminder.text)
+        self.assertEqual(role_reminder.json()["recipient_role"], "approver")
+        self.assertIsNone(role_reminder.json()["recipient_subject"])
+        self.assertEqual(role_reminder.json()["severity"], "critical")
+        self.assertEqual(role_reminder.json()["action"]["condition_id"], condition_id)
+        duplicate_role_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/facility_control/{condition_id}/remind",
+            json={"expected_row_version": 1, "reason": "重复催办用于验证三十分钟的频率门禁"},
+            headers=operations,
+        )
+        self.assertEqual(duplicate_role_reminder.status_code, 409)
+        self.assertIn("至少间隔 30 分钟", duplicate_role_reminder.json()["detail"])
+        approver_notifications = self.client.get("/api/v1/notifications", headers=approver).json()
+        self.assertTrue(any(item["id"] == role_reminder.json()["id"] for item in approver_notifications))
+        approver_peer_notifications = self.client.get(
+            "/api/v1/notifications",
+            headers={"Authorization": "Bearer dev-approver-peer"},
+        ).json()
+        self.assertTrue(any(item["id"] == role_reminder.json()["id"] for item in approver_peer_notifications))
+        risk_notifications = self.client.get("/api/v1/notifications", headers=risk).json()
+        self.assertFalse(any(item["id"] == role_reminder.json()["id"] for item in risk_notifications))
+
+        extension_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/control_extension/{extension_id}/remind",
+            json={"expected_row_version": 1, "reason": "延期申请仍待独立审批，请尽快核验申请依据"},
+            headers=operations,
+        )
+        self.assertEqual(extension_reminder.status_code, 200, extension_reminder.text)
+        self.assertEqual(extension_reminder.json()["title"], "控制条件延期审批催办")
+        control_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={condition_id}",
+            headers={"Authorization": "Bearer dev-auditor"},
+        ).json()
+        reminder_events = [item for item in control_audit if item["event_type"] == "direct_task_supervisor_reminded"]
+        self.assertEqual({item["payload"]["task_type"] for item in reminder_events}, {"facility_control", "control_extension"})
+
+        reviewed = self.client.post(
+            f"/api/v1/credit-facilities/{facility_id}/control-conditions/{condition_id}/extensions/{extension_id}/review",
+            json={
+                "expected_extension_version": 1,
+                "expected_condition_version": 1,
+                "decision": "approve",
+                "comment": "已核验正式排期与阶段证据，同意受控延期三十天",
+            },
+            headers=approver,
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        inactive_extension_reminder = self.client.post(
+            f"/api/v1/operations/team-tasks/control_extension/{extension_id}/remind",
+            json={"expected_row_version": reviewed.json()["extension"]["row_version"], "reason": "已完成任务不应继续产生运营催办"},
+            headers=operations,
+        )
+        self.assertEqual(inactive_extension_reminder.status_code, 409)
+        refreshed_approver_tasks = self.client.get("/api/v1/operations/my-tasks", headers=approver).json()["tasks"]
+        self.assertFalse(any(task.get("facility_id") == facility_id for task in refreshed_approver_tasks))
+        refreshed_risk_task = next(
+            task
+            for task in self.client.get("/api/v1/operations/my-tasks", headers=risk).json()["tasks"]
+            if task.get("facility_id") == facility_id
+        )
+        self.assertEqual(refreshed_risk_task["sla_status"], "normal")
 
     def test_team_task_board_and_supervisor_release(self) -> None:
         manager = {"Authorization": "Bearer dev-manager"}

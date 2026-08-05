@@ -33,12 +33,85 @@ def create_approval_case(counterparty: dict) -> dict:
         "case_id": f"CR-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:10].upper()}",
         "counterparty_id": counterparty["id"],
         "counterparty_name": counterparty["name"],
+        "application_type": "new_credit",
+        "source_facility_id": None,
         "current_stage": "registration",
         "status": "处理中",
         "completed_stages": [],
         "data": {},
         "timeline": [],
     }
+
+
+def create_facility_renewal_case(
+    counterparty: dict,
+    facility: dict,
+    requested_limit: float,
+    requested_term_days: int,
+    renewal_reason: str,
+    actor: str,
+    risk_baseline: dict | None = None,
+) -> dict:
+    case = create_approval_case(counterparty)
+    occurred_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    case.update(
+        {
+            "application_type": "renewal",
+            "source_facility_id": facility["id"],
+            "current_stage": "document_upload",
+            "completed_stages": ["registration"],
+            "data": {
+                "registration": {
+                    "registered_name": counterparty["name"],
+                    "unified_social_credit_code": counterparty.get("credit_code", ""),
+                    "contact_name": actor,
+                },
+                "_workflow": {
+                    "renewal_request": {
+                        "source_facility_id": facility["id"],
+                        "source_case_id": facility["case_id"],
+                        "source_row_version": facility["row_version"],
+                        "current_approved_limit": facility["approved_limit"],
+                        "current_used_limit": facility["used_limit"],
+                        "current_available_limit": facility["available_limit"],
+                        "current_utilization_rate": facility["utilization_rate"],
+                        "current_payment_term_days": facility["payment_term_days"],
+                        "current_rating": facility["rating"],
+                        "current_access_strategy": facility["access_strategy"],
+                        "current_monitoring_frequency": facility["monitoring_frequency"],
+                        "source_effective_at": facility["effective_at"],
+                        "source_expires_at": facility["expires_at"],
+                        "risk_baseline": deepcopy(risk_baseline or {
+                            "capture_status": "captured",
+                            "unresolved_alert_count": 0,
+                            "critical_alert_count": 0,
+                            "active_risk_event_count": 0,
+                            "critical_risk_event_count": 0,
+                            "signals": [],
+                        }),
+                        "requested_limit": requested_limit,
+                        "requested_term_days": requested_term_days,
+                        "renewal_reason": renewal_reason,
+                    }
+                },
+            },
+            "timeline": [
+                {
+                    "环节": "客户注册",
+                    "处理人": "系统复用已核验主体",
+                    "处理时间": occurred_at,
+                    "处理结果": f"沿用已核验主体：{counterparty['name']}",
+                },
+                {
+                    "环节": "续授信发起",
+                    "处理人": actor,
+                    "处理时间": occurred_at,
+                    "处理结果": f"承接授信 {facility['id']}，申请额度 {requested_limit:.2f}，账期 {requested_term_days} 天",
+                },
+            ],
+        }
+    )
+    return case
 
 
 def advance_approval_case(case: dict, payload: dict, actor: str, occurred_at: str | None = None) -> dict:

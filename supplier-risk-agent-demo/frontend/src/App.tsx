@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api, devIdentities, getToken, setToken } from "./api";
 import AuthorityPolicyCenter from "./AuthorityPolicyCenter";
 import ModelLab from "./ModelLab";
 import OperationsCenter from "./OperationsCenter";
-import PostCreditCenter from "./PostCreditCenter";
-import type { ApprovalAction, ApprovalCase, Counterparty, CreditAuthority, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile, TaskAction } from "./types";
+import type { ApprovalAction, ApprovalCase, Counterparty, CreditAuthority, CreditFacility, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskBaseline, RenewalRiskReview, TaskAction } from "./types";
+
+const PostCreditCenter = lazy(() => import("./PostCreditCenter"));
 
 type PageKey = "overview" | "counterparties" | "approvals" | "models" | "documents" | "operations" | "facilities";
+type ApprovalQueueFilter = "all" | "active" | "mine" | "urgent" | "supplement" | "completed";
 
 const navItems: Array<{ key: PageKey; label: string; caption: string; icon: string }> = [
   { key: "overview", label: "风险总览", caption: "经营与审批态势", icon: "◫" },
@@ -17,6 +19,16 @@ const navItems: Array<{ key: PageKey; label: string; caption: string; icon: stri
   { key: "operations", label: "运营监控", caption: "SLA 与催办通知", icon: "◉" },
   { key: "facilities", label: "贷后管理", caption: "额度台账与风险预警", icon: "▥" },
 ];
+
+const pageMeta: Record<PageKey, { eyebrow: string; description: string; zones: string[]; actionHint: string }> = {
+  overview: { eyebrow: "MANAGEMENT OVERVIEW", description: "集中查看组合风险、审批态势与授信敞口，再进入对应业务工作台处理。", zones: ["经营指标", "近期审批", "组合风险"], actionHint: "先识别风险，再进入业务模块" },
+  counterparties: { eyebrow: "COUNTERPARTY WORKSPACE", description: "从组合筛查进入单户画像，核对原始资料、治理数据和模型结果。", zones: ["组合评级", "企业画像", "原始数据", "数据治理"], actionHint: "筛选企业后查看完整风险证据" },
+  approvals: { eyebrow: "CREDIT WORKFLOW", description: "按申请队列、当前责任人和资料门禁推动八阶段审批，所有决策均保留审计轨迹。", zones: ["申请队列", "流程指引", "当前办理", "决策与授权"], actionHint: "主按钮推动当前环节，异常操作独立标识" },
+  models: { eyebrow: "MODEL WORKSPACE", description: "从结果概览向下追溯运算链、风险指标、决策规则与模型发布治理。", zones: ["结果概览", "评分与模拟", "风险指标", "决策规则", "治理发布"], actionHint: "先看结果，再逐层解释与配置" },
+  documents: { eyebrow: "DOCUMENT WORKSPACE", description: "区分资料承接、当期更新、独立核验、退补任务与可信归档，逐项消除流程阻断。", zones: ["资料承接", "逐项核验", "退补追踪", "可信归档"], actionHint: "绿色已满足，黄色待处理，红色为缺口" },
+  operations: { eyebrow: "OPERATIONS WORKSPACE", description: "统一处理个人任务、SLA 风险、补件队列和通知催办，避免责任与时限失焦。", zones: ["任务队列", "SLA 风险", "补件运营", "通知催办"], actionHint: "优先处理超时与升级任务" },
+  facilities: { eyebrow: "POST-CREDIT WORKSPACE", description: "从任务雷达定位高风险授信，再完成额度、复评、风险事件、续授信和控制处置。", zones: ["任务雷达", "授信台账", "业务操作", "风险处置"], actionHint: "风险操作使用红色边界并要求明确依据" },
+};
 
 const stageMeta: Record<string, { label: string; owner: string }> = {
   registration: { label: "客户注册", owner: "客户经理" },
@@ -61,6 +73,7 @@ function App() {
   const [cases, setCases] = useState<ApprovalCase[]>([]);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [documentFocus, setDocumentFocus] = useState<{ counterpartyId: string; caseId?: string; correctionId?: string } | null>(null);
+  const [facilityFocus, setFacilityFocus] = useState<{ caseId: string; facilityId?: string; conditionId?: string } | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<ApprovalCase | null>(null);
   const [busy, setBusy] = useState(true);
@@ -128,6 +141,11 @@ function App() {
       setSelectedCaseId(action.case_id);
       void refreshCases(action.case_id).catch((error: Error) => setNotice({ kind: "error", text: error.message }));
       setPage("approvals");
+      return;
+    }
+    if (action.page === "facilities" && action.case_id) {
+      setFacilityFocus({ caseId: action.case_id, facilityId: action.facility_id, conditionId: action.condition_id });
+      setPage("facilities");
     }
   }
 
@@ -142,6 +160,7 @@ function App() {
   }
 
   const selectedIdentity = devIdentities.find((identity) => identity.token === getToken()) ?? devIdentities[0];
+  const currentPageMeta = pageMeta[page];
 
   return (
     <div className="app-shell">
@@ -185,18 +204,29 @@ function App() {
         {notice && <div className={`notice ${notice.kind}`}><span>{notice.kind === "error" ? "!" : "✓"}</span>{notice.text}<button onClick={() => setNotice(null)}>×</button></div>}
         {busy ? <LoadingState /> : (
           <div className="page-content">
+            <PageContextBar page={page} meta={currentPageMeta} role={selectedIdentity.label} />
             {page === "overview" && <Overview counterparties={counterparties} cases={cases} documents={documents} identity={selectedIdentity} onNavigate={setPage} />}
             {page === "counterparties" && <CounterpartyCenter rows={counterparties} canRate={Boolean(can("ratings:run"))} canViewDataGovernance={Boolean(can("data_governance:view"))} canImportData={Boolean(can("data_governance:import"))} canResolveData={Boolean(can("data_governance:resolve"))} canReviewData={Boolean(can("data_governance:review"))} onResult={(text) => setNotice({ kind: "success", text })} onError={(text) => setNotice({ kind: "error", text })} />}
-            {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewDocuments={Boolean(can("documents:view"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} canViewAuthorityPolicy={Boolean(can("authority_policy:view"))} canManageAuthorityPolicy={Boolean(can("authority_policy:manage"))} canReviewAuthorityPolicy={Boolean(can("authority_policy:review"))} canAnchorAuthorityPolicy={Boolean(can("authority_policy:anchor"))} canRevokeAuthorityPolicyAnchor={Boolean(can("authority_policy:anchor_revoke"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onSwitchIdentity={switchIdentity} onNotice={setNotice} />}
+            {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewDocuments={Boolean(can("documents:view"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewFacilities={Boolean(can("facilities:view"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} canViewAuthorityPolicy={Boolean(can("authority_policy:view"))} canManageAuthorityPolicy={Boolean(can("authority_policy:manage"))} canReviewAuthorityPolicy={Boolean(can("authority_policy:review"))} canAnchorAuthorityPolicy={Boolean(can("authority_policy:anchor"))} canRevokeAuthorityPolicyAnchor={Boolean(can("authority_policy:anchor_revoke"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onOpenFacilities={(caseId) => { setFacilityFocus({ caseId }); setPage("facilities"); }} onSwitchIdentity={switchIdentity} onNotice={setNotice} />}
             {page === "models" && <ModelLab counterparties={counterparties} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} onNotice={setNotice} />}
             {page === "documents" && <DocumentCenter rows={documents} counterparties={counterparties} cases={cases} principal={principal} focus={documentFocus} canUpload={Boolean(can("documents:upload"))} canReview={Boolean(can("documents:review"))} onSwitchToReviewer={() => switchIdentity("dev-risk")} onRefresh={async () => setDocuments(await api.documents())} onNotice={setNotice} />}
             {page === "operations" && <OperationsCenter canViewTasks={Boolean(can("approvals:view"))} canViewOperations={Boolean(can("operations:view"))} canManageTasks={Boolean(can("tasks:manage"))} canViewNotifications={Boolean(can("notifications:view"))} canScan={Boolean(can("sla:scan"))} canActCorrections={Boolean(can("corrections:act"))} onNavigate={openNotificationTarget} onNotice={setNotice} />}
-            {page === "facilities" && <PostCreditCenter canView={Boolean(can("facilities:view"))} canTransact={Boolean(can("facilities:transact"))} canReview={Boolean(can("facilities:review"))} canScan={Boolean(can("facilities:scan"))} canActAlerts={Boolean(can("facility_alerts:act"))} canCreateRiskEvents={Boolean(can("risk_events:create"))} canControl={Boolean(can("facilities:control"))} onNotice={setNotice} />}
+            {page === "facilities" && <Suspense fallback={<LoadingState />}><PostCreditCenter key={principal?.subject ?? "anonymous"} focusCaseId={facilityFocus?.caseId} focusFacilityId={facilityFocus?.facilityId} focusConditionId={facilityFocus?.conditionId} canView={Boolean(can("facilities:view"))} canTransact={Boolean(can("facilities:transact"))} canReview={Boolean(can("facilities:review"))} canApproveControlExtensions={Boolean(principal?.roles.some((role) => ["approver", "admin"].includes(role)))} canScan={Boolean(can("facilities:scan"))} canActAlerts={Boolean(can("facility_alerts:act"))} canCreateRiskEvents={Boolean(can("risk_events:create"))} canControl={Boolean(can("facilities:control"))} canCreateRenewal={Boolean(can("approvals:create"))} onOpenApproval={async (caseId) => { await refreshCases(caseId); setPage("approvals"); }} onNotice={setNotice} /></Suspense>}
           </div>
         )}
       </main>
     </div>
   );
+}
+
+function PageContextBar({ page, meta, role }: { page: PageKey; meta: typeof pageMeta[PageKey]; role: string }) {
+  return <section className={`page-context-bar page-context-${page}`} aria-label="当前页面功能分区">
+    <div className="page-context-summary"><span>{meta.eyebrow}</span><h2>当前工作区</h2><p>{meta.description}</p></div>
+    <div className="page-zone-map" aria-label="功能分区">
+      {meta.zones.map((zone, index) => <div key={zone}><i>{String(index + 1).padStart(2, "0")}</i><strong>{zone}</strong></div>)}
+    </div>
+    <aside><span>当前角色</span><strong>{role}</strong><small>{meta.actionHint}</small></aside>
+  </section>;
 }
 
 function LoadingState() {
@@ -486,9 +516,38 @@ function renderEnterpriseValue(value: unknown): string {
   return String(value);
 }
 
-function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, canAdvance, canViewDocuments, canViewReports, canGenerateReports, canViewDecisionGovernance, canViewAuthorityPolicy, canManageAuthorityPolicy, canReviewAuthorityPolicy, canAnchorAuthorityPolicy, canRevokeAuthorityPolicyAnchor, onSelect, onRefresh, onOpenDocuments, onSwitchIdentity, onNotice }: { rows: ApprovalCase[]; counterparties: Counterparty[]; selected: ApprovalCase | null; principal: Principal | null; canCreate: boolean; canAdvance: boolean; canViewDocuments: boolean; canViewReports: boolean; canGenerateReports: boolean; canViewDecisionGovernance: boolean; canViewAuthorityPolicy: boolean; canManageAuthorityPolicy: boolean; canReviewAuthorityPolicy: boolean; canAnchorAuthorityPolicy: boolean; canRevokeAuthorityPolicyAnchor: boolean; onSelect: (id: string) => void; onRefresh: (id?: string) => Promise<void>; onOpenDocuments: (counterpartyId: string, caseId?: string) => void; onSwitchIdentity: (token: string) => void; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
+function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, canAdvance, canViewDocuments, canViewReports, canGenerateReports, canViewFacilities, canViewDecisionGovernance, canViewAuthorityPolicy, canManageAuthorityPolicy, canReviewAuthorityPolicy, canAnchorAuthorityPolicy, canRevokeAuthorityPolicyAnchor, onSelect, onRefresh, onOpenDocuments, onOpenFacilities, onSwitchIdentity, onNotice }: { rows: ApprovalCase[]; counterparties: Counterparty[]; selected: ApprovalCase | null; principal: Principal | null; canCreate: boolean; canAdvance: boolean; canViewDocuments: boolean; canViewReports: boolean; canGenerateReports: boolean; canViewFacilities: boolean; canViewDecisionGovernance: boolean; canViewAuthorityPolicy: boolean; canManageAuthorityPolicy: boolean; canReviewAuthorityPolicy: boolean; canAnchorAuthorityPolicy: boolean; canRevokeAuthorityPolicyAnchor: boolean; onSelect: (id: string) => void; onRefresh: (id?: string) => Promise<void>; onOpenDocuments: (counterpartyId: string, caseId?: string) => void; onOpenFacilities: (caseId: string) => void; onSwitchIdentity: (token: string) => void; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
   const [creating, setCreating] = useState(false);
   const [newParty, setNewParty] = useState(counterparties[0]?.id ?? "");
+  const [queueQuery, setQueueQuery] = useState("");
+  const [queueFilter, setQueueFilter] = useState<ApprovalQueueFilter>("all");
+  const [queueStage, setQueueStage] = useState("");
+  const queueMetrics = useMemo(() => ({
+    active: rows.filter((item) => !isTerminal(item.status)).length,
+    actionable: rows.filter((item) => !isTerminal(item.status) && canHandleCase(principal, item)).length,
+    urgent: rows.filter((item) => !isTerminal(item.status) && ["已超时", "即将超时"].includes(item.sla_status)).length,
+    supplement: rows.filter((item) => !isTerminal(item.status) && (item.current_stage === "supplement" || item.status === "待补件")).length,
+  }), [rows, principal]);
+  const queueStages = useMemo(() => [...new Set(rows.map((item) => item.current_stage))]
+    .sort((left, right) => workflowStageOrder(left) - workflowStageOrder(right)), [rows]);
+  const visibleRows = useMemo(() => {
+    const keyword = queueQuery.trim().toLocaleLowerCase("zh-CN");
+    return rows
+      .filter((item) => !keyword || `${item.counterparty_name} ${item.case_id}`.toLocaleLowerCase("zh-CN").includes(keyword))
+      .filter((item) => !queueStage || item.current_stage === queueStage)
+      .filter((item) => {
+        if (queueFilter === "active") return !isTerminal(item.status);
+        if (queueFilter === "mine") return !isTerminal(item.status) && canHandleCase(principal, item);
+        if (queueFilter === "urgent") return !isTerminal(item.status) && ["已超时", "即将超时"].includes(item.sla_status);
+        if (queueFilter === "supplement") return !isTerminal(item.status) && (item.current_stage === "supplement" || item.status === "待补件");
+        if (queueFilter === "completed") return isTerminal(item.status);
+        return true;
+      })
+      .sort((left, right) => approvalQueuePriority(left, principal) - approvalQueuePriority(right, principal)
+        || approvalQueueDueTime(left) - approvalQueueDueTime(right)
+        || right.case_id.localeCompare(left.case_id));
+  }, [rows, principal, queueFilter, queueQuery, queueStage]);
+  const selectedHidden = Boolean(selected && !visibleRows.some((item) => item.case_id === selected.case_id));
   async function create() {
     setCreating(true);
     try { const result = await api.createApprovalCase(newParty); await onRefresh(result.case_id); onNotice({ kind: "success", text: `已创建授信申请 ${result.case_id}` }); }
@@ -499,13 +558,45 @@ function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, 
     <section className="panel case-list-panel">
       <PanelHeader eyebrow="CASE QUEUE" title="申请队列" action={canCreate ? <button className="square-button" onClick={() => void create()} disabled={!newParty || creating}>＋</button> : undefined} />
       {canCreate && <select className="full-select" value={newParty} onChange={(event) => setNewParty(event.target.value)}>{counterparties.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}
-      <div className="case-list">{rows.map((item) => <button key={item.case_id} className={`case-card ${selected?.case_id === item.case_id ? "selected" : ""}`} onClick={() => onSelect(item.case_id)}><div><strong>{item.counterparty_name}</strong><StatusBadge value={item.status} /></div><span>{item.case_id}</span><p><StageBadge stage={item.current_stage} /><SlaBadge value={item.sla_status} compact /></p></button>)}</div>
+      <div className="case-queue-metrics">
+        <button className={queueFilter === "active" ? "active" : ""} onClick={() => setQueueFilter("active")}><span>在途申请</span><strong>{queueMetrics.active}</strong></button>
+        <button className={queueFilter === "mine" ? "active" : ""} onClick={() => setQueueFilter("mine")}><span>待我办理</span><strong>{queueMetrics.actionable}</strong></button>
+        <button className={queueFilter === "urgent" ? "active warning" : "warning"} onClick={() => setQueueFilter("urgent")}><span>SLA 风险</span><strong>{queueMetrics.urgent}</strong></button>
+        <button className={queueFilter === "supplement" ? "active supplement" : "supplement"} onClick={() => setQueueFilter("supplement")}><span>补件处理中</span><strong>{queueMetrics.supplement}</strong></button>
+      </div>
+      <div className="case-queue-toolbar">
+        <label><span>搜索申请</span><input aria-label="搜索企业或申请编号" value={queueQuery} onChange={(event) => setQueueQuery(event.target.value)} placeholder="企业名称 / 申请编号" /></label>
+        <label><span>当前环节</span><select aria-label="按当前环节筛选" value={queueStage} onChange={(event) => setQueueStage(event.target.value)}><option value="">全部环节</option>{queueStages.map((stage) => <option value={stage} key={stage}>{stageMeta[stage]?.label ?? stage}</option>)}</select></label>
+      </div>
+      <div className="case-queue-filter-tabs">
+        {([
+          ["all", "全部"],
+          ["mine", "待我办理"],
+          ["urgent", "时限风险"],
+          ["supplement", "补件"],
+          ["completed", "已结束"],
+        ] as Array<[ApprovalQueueFilter, string]>).map(([key, label]) => <button className={queueFilter === key ? "active" : ""} onClick={() => setQueueFilter(key)} key={key}>{label}</button>)}
+        <span>{visibleRows.length} 笔</span>
+      </div>
+      <div className="case-queue-sort-note"><span>排序规则</span><strong>超时优先 → 待我办理 → 截止时间</strong></div>
+      {selectedHidden && <div className="case-queue-hidden-note"><span>右侧当前申请已被筛选条件隐藏</span><button onClick={() => { setQueueQuery(""); setQueueStage(""); setQueueFilter("all"); }}>显示当前申请</button></div>}
+      <div className="case-list">{visibleRows.length ? visibleRows.map((item) => {
+        const actionable = !isTerminal(item.status) && canHandleCase(principal, item);
+        return <button key={item.case_id} className={`case-card ${selected?.case_id === item.case_id ? "selected" : ""} ${actionable ? "actionable" : ""}`} onClick={() => onSelect(item.case_id)}>
+          <div><strong>{item.counterparty_name}</strong><span className={`application-type-badge ${item.application_type}`}>{item.application_type === "renewal" ? "续授信" : "新授信"}</span><StatusBadge value={item.status} /></div>
+          <span>{item.case_id}</span>
+          <p><StageBadge stage={item.current_stage} /><SlaBadge value={item.sla_status} compact /></p>
+          <footer><b className={actionable ? "mine" : isTerminal(item.status) ? "closed" : ""}>{actionable ? "待我办理" : isTerminal(item.status) ? "流程已结束" : "等待其他角色"}</b><small>{item.assigned_to_name ? `已认领：${item.assigned_to_name}` : caseOwnerLabel(item)}</small></footer>
+        </button>;
+      }) : <div className="case-queue-empty"><strong>没有符合条件的申请</strong><p>调整搜索词、办理范围或当前环节后重试。</p><button onClick={() => { setQueueQuery(""); setQueueStage(""); setQueueFilter("all"); }}>清除筛选</button></div>}</div>
     </section>
     <section className="panel case-detail-panel">
       {selected ? <>
-        <PanelHeader eyebrow={selected.case_id} title={selected.counterparty_name} action={<div className="case-header-badges"><SlaBadge value={selected.sla_status} /><StatusBadge value={selected.status} /></div>} />
+        <PanelHeader eyebrow={selected.case_id} title={selected.counterparty_name} action={<div className="case-header-badges"><span className={`application-type-badge ${selected.application_type}`}>{selected.application_type === "renewal" ? "续授信" : "新授信"}</span><SlaBadge value={selected.sla_status} /><StatusBadge value={selected.status} /></div>} />
+        {isTerminal(selected.status) && <ApprovalCompletionSummary caseItem={selected} canViewReports={canViewReports} canViewFacilities={canViewFacilities} onOpenFacilities={onOpenFacilities} onNotice={onNotice} />}
         <div className="workflow-strip">{selected.progress?.map((step) => <div key={step.序号} className={`workflow-step ${step.状态 === "已完成" ? "done" : ["处理中", "待补件"].includes(step.状态) ? "active" : ""}`}><span>{step.状态 === "已完成" ? "✓" : step.序号}</span><strong>{step.审批环节}</strong><small>{step.负责角色}</small></div>)}</div>
         <WorkflowOperationGuide caseItem={selected} principal={principal} onSwitchIdentity={onSwitchIdentity} />
+        <RenewalDecisionComparison caseItem={selected} principal={principal} onDone={async () => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: "续授信风险复核已保存，评分门禁已更新" }); }} onError={(text) => onNotice({ kind: "error", text })} />
         <div className="case-work-grid">
           <div><h3>当前办理环节</h3><div className="current-stage"><span>{stageMeta[selected.current_stage]?.label}</span><p>负责角色：{caseOwnerLabel(selected)}</p><small>{formatSla(selected)} · 提交校验数据版本 v{selected.row_version}</small></div>{!isTerminal(selected.status) && <StageActionForm caseItem={selected} counterparty={counterparties.find((item) => item.id === selected.counterparty_id)} principal={principal} disabled={!canAdvance || !canHandleCase(principal, selected)} canViewDocuments={canViewDocuments} onOpenDocuments={() => onOpenDocuments(selected.counterparty_id, selected.case_id)} onDone={async (message) => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: message ?? "当前环节已完成，流程已进入下一阶段" }); }} onError={(text) => onNotice({ kind: "error", text })} />}{!isTerminal(selected.status) && canAdvance && <CaseActionPanel caseItem={selected} principal={principal} onDone={async (message) => { await onRefresh(selected.case_id); onNotice({ kind: "success", text: message }); }} onError={(text) => onNotice({ kind: "error", text })} />}</div>
           <div><h3>处理时间线</h3>{selected.timeline.length ? <div className="timeline">{selected.timeline.map((event, index) => <div key={`${event.处理时间}-${index}`}><i /><strong>{event.环节}</strong><span>{event.处理结果}</span><small>{event.处理人} · {event.处理时间}</small></div>)}</div> : <EmptyState title="尚未开始办理" detail="完成客户注册后，这里会形成不可抵赖的处理轨迹。" />}</div>
@@ -517,23 +608,218 @@ function ApprovalCenter({ rows, counterparties, selected, principal, canCreate, 
   </div>{canViewAuthorityPolicy && <AuthorityPolicyCenter principal={principal} canManage={canManageAuthorityPolicy} canReview={canReviewAuthorityPolicy} canAnchor={canAnchorAuthorityPolicy} canRevokeAnchor={canRevokeAuthorityPolicyAnchor} onNotice={onNotice} />}</>;
 }
 
+function RenewalDecisionComparison({ caseItem, principal, onDone, onError }: { caseItem: ApprovalCase; principal: Principal | null; onDone: () => Promise<void>; onError: (text: string) => void }) {
+  if (caseItem.application_type !== "renewal") return null;
+  const workflow = caseItem.data._workflow as unknown as { renewal_request?: Record<string, unknown>; renewal_risk_review?: RenewalRiskReview } | undefined;
+  const request = workflow?.renewal_request;
+  if (!request) return null;
+  const scoring = caseItem.data.scoring ?? {};
+  const proposal = caseItem.data.credit_proposal ?? {};
+  const decision = caseItem.data.final_strategy ?? {};
+  const riskBaseline: RenewalRiskBaseline = (request.risk_baseline as RenewalRiskBaseline | undefined) ?? {
+    capture_status: "legacy_missing",
+    unresolved_alert_count: 0,
+    critical_alert_count: 0,
+    active_risk_event_count: 0,
+    critical_risk_event_count: 0,
+    signals: [],
+  };
+  const baselineComplete = ["current_payment_term_days", "current_rating", "current_access_strategy", "current_monitoring_frequency", "source_expires_at"].every((key) => request[key] !== undefined);
+  const decisionFormed = decision.approved_limit !== undefined;
+  const proposalFormed = proposal.suggested_limit !== undefined;
+  const latestLabel = decisionFormed ? "最终决策" : proposalFormed ? "模型建议" : "等待重评";
+  const latestLimit = decisionFormed ? Number(decision.approved_limit) : proposalFormed ? Number(proposal.suggested_limit) : null;
+  const latestTerm = decisionFormed ? Number(decision.approved_payment_term_days) : proposalFormed ? Number(proposal.suggested_payment_term_days) : null;
+  const latestStrategy = decisionFormed ? String(decision.access_strategy ?? "—") : proposalFormed ? String(proposal.access_strategy ?? "—") : "待形成";
+  const latestRating = scoring.rating ? String(scoring.rating) : "待重评";
+  const sourceExpiry = String(request.source_expires_at ?? "");
+  return <section className="renewal-decision-comparison">
+    <header><div><span>RENEWAL DELTA REVIEW</span><h3>续授信基线、申请与决策对比</h3><p>{baselineComplete ? "原授信快照在发起时冻结，后续评分和决策变化不会覆盖历史基线。" : "该申请创建于完整基线冻结启用前，已保留原额度与余额；其余空缺字段明确标记为历史兼容。"}</p></div><i>{baselineComplete ? "冻结基线" : "历史兼容"} · {latestLabel}</i></header>
+    <div className="renewal-comparison-grid">
+      <article><span>授信额度</span><small>原授信</small><strong>{money.format(Number(request.current_approved_limit ?? 0))}</strong><em>申请 {money.format(Number(request.requested_limit ?? 0))}</em><b>{latestLimit === null ? "尚未形成" : `${latestLabel} ${money.format(latestLimit)}`}</b></article>
+      <article><span>账期</span><small>原授信</small><strong>{request.current_payment_term_days === undefined ? "历史未冻结" : `${Number(request.current_payment_term_days)} 天`}</strong><em>申请 {Number(request.requested_term_days ?? 0)} 天</em><b>{latestTerm === null ? "尚未形成" : `${latestLabel} ${latestTerm} 天`}</b></article>
+      <article><span>信用评级</span><small>原授信</small><strong>{String(request.current_rating ?? "—")}</strong><em>本次重新评级</em><b>{latestRating}</b></article>
+      <article><span>准入策略</span><small>原授信</small><strong>{String(request.current_access_strategy ?? "—")}</strong><em>本次重新决策</em><b>{latestStrategy}</b></article>
+    </div>
+    <div className={`renewal-approval-risk ${riskBaseline.capture_status === "legacy_missing" ? "legacy" : riskBaseline.critical_alert_count || riskBaseline.critical_risk_event_count ? "critical" : riskBaseline.unresolved_alert_count || riskBaseline.active_risk_event_count ? "warning" : "clear"}`}><header><div><span>风险复核基线</span><strong>{riskBaseline.capture_status === "legacy_missing" ? "历史申请未冻结风险信号" : riskBaseline.critical_alert_count || riskBaseline.critical_risk_event_count ? "存在重大风险，必须结合最新证据复核" : riskBaseline.unresolved_alert_count || riskBaseline.active_risk_event_count ? "存在未结风险，评分前需确认变化" : "发起时未见未结风险"}</strong></div><i>{scoring.rating ? `本次评级 ${String(scoring.rating)}` : "等待形成评分"}</i></header><div><span>未结预警 <b>{riskBaseline.unresolved_alert_count}</b></span><span>严重预警 <b>{riskBaseline.critical_alert_count}</b></span><span>活跃事件 <b>{riskBaseline.active_risk_event_count}</b></span><span>严重事件 <b>{riskBaseline.critical_risk_event_count}</b></span></div>{riskBaseline.signals.length > 0 && <ul>{riskBaseline.signals.slice(0, 3).map((signal, index) => <li className={signal.severity} key={`${signal.alert_type}-${index}`}><strong>{signal.title}</strong><small>{signal.message}</small></li>)}</ul>}{riskBaseline.capture_status === "legacy_missing" && <p>历史缺失不等于零风险；请回看来源授信的风险事件、预警处置和资料变更记录。</p>}</div>
+    <RenewalRiskReviewPanel caseItem={caseItem} review={workflow?.renewal_risk_review} baseline={riskBaseline} principal={principal} onDone={onDone} onError={onError} />
+    <footer><span>余额承接基线 <strong>{money.format(Number(request.current_used_limit ?? 0))}</strong></span><span>原授信到期 <strong>{sourceExpiry ? sourceExpiry.slice(0, 10) : "—"}</strong></span><p>{String(request.renewal_reason ?? "未填写续授信原因")}</p></footer>
+  </section>;
+}
+
+const renewalRiskConclusionLabels: Record<RenewalRiskReview["conclusion"], string> = {
+  cleared: "风险已排除",
+  controls_required: "落实控制措施后推进",
+  decline_recommended: "建议拒绝续授信",
+};
+
+function RenewalRiskReviewPanel({ caseItem, review, baseline, principal, onDone, onError }: { caseItem: ApprovalCase; review?: RenewalRiskReview; baseline: RenewalRiskBaseline; principal: Principal | null; onDone: () => Promise<void>; onError: (text: string) => void }) {
+  const hasBaselineRisk = baseline.unresolved_alert_count > 0 || baseline.active_risk_event_count > 0 || baseline.capture_status === "legacy_missing";
+  const [conclusion, setConclusion] = useState<RenewalRiskReview["conclusion"]>(review?.conclusion ?? (hasBaselineRisk ? "controls_required" : "cleared"));
+  const [reviewNote, setReviewNote] = useState(review?.review_note ?? "");
+  const [controls, setControls] = useState(review?.control_measures.join("\n") ?? "");
+  const [busy, setBusy] = useState(false);
+  const stageAllowsReview = ["model_selection", "scoring", "credit_proposal", "final_strategy"].includes(caseItem.current_stage) && !isTerminal(caseItem.status);
+  const canReview = Boolean(principal && (principal.roles.includes("risk_manager") || principal.roles.includes("admin")));
+  const latest = review?.latest_risk_snapshot;
+
+  useEffect(() => {
+    setConclusion(review?.conclusion ?? (hasBaselineRisk ? "controls_required" : "cleared"));
+    setReviewNote(review?.review_note ?? "");
+    setControls(review?.control_measures.join("\n") ?? "");
+  }, [caseItem.case_id, caseItem.row_version, hasBaselineRisk, review]);
+
+  async function submitReview(event: FormEvent) {
+    event.preventDefault();
+    const measures = controls.split(/[\n；]+/).map((item) => item.trim()).filter(Boolean);
+    if (reviewNote.trim().length < 10) {
+      onError("请填写不少于 10 个字的风险复核依据");
+      return;
+    }
+    if (conclusion === "controls_required" && measures.length === 0) {
+      onError("选择落实控制措施后推进时，至少填写一项控制措施");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.reviewRenewalRisk(caseItem.case_id, { expected_row_version: caseItem.row_version, conclusion, review_note: reviewNote, control_measures: conclusion === "cleared" ? [] : measures });
+      await onDone();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "续授信风险复核保存失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className={`renewal-risk-review ${review ? "completed" : "pending"}`}>
+    <header><div><span>RISK REVIEW GATE</span><strong>评分与最终决策前独立风险复核</strong><p>责任角色：风控经理 · 系统会在评分及最终策略提交时重新校验风险状态；最终阶段重做复核将重置授权会签。</p></div><i>{review ? "已完成复核" : "待风控复核"}</i></header>
+    {review ? <div className="renewal-review-result"><div><span>复核结论</span><strong>{renewalRiskConclusionLabels[review.conclusion]}</strong><small>{review.reviewed_by_name} · {review.reviewed_at}</small></div><div><span>复核时风险</span><strong>{latest ? `${latest.unresolved_alert_count} 项预警 / ${latest.active_risk_event_count} 项事件` : "—"}</strong><small>评分时如有变化，将自动阻断并要求重新复核</small></div><p>{review.review_note}</p>{review.control_measures.length > 0 && <ul>{review.control_measures.map((item) => <li key={item}>{item}</li>)}</ul>}</div> : <div className="renewal-review-guide"><b>当前阻断原因</b><span>尚未形成风控复核结论，不能进入形成评分环节。</span></div>}
+    {stageAllowsReview && canReview ? <details className="renewal-review-form" open={!review}><summary>{review ? "风险状态变化或结论调整时重新复核" : "填写风险复核结论"}</summary><form onSubmit={(event) => void submitReview(event)}><label><span>复核结论</span><select value={conclusion} onChange={(event) => setConclusion(event.target.value as RenewalRiskReview["conclusion"])}><option value="cleared">风险已排除</option><option value="controls_required">落实控制措施后推进</option><option value="decline_recommended">建议拒绝续授信</option></select></label><label><span>复核依据</span><textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="说明风险信号核验、证据结论及对续授信的影响（不少于10字）" required minLength={10} /></label>{conclusion !== "cleared" && <label><span>{conclusion === "controls_required" ? "控制措施（每行一项）" : "后续建议（可选，每行一项）"}</span><textarea value={controls} onChange={(event) => setControls(event.target.value)} placeholder={"例如：额度下调至申请额的80%\n增加月度经营监控"} /></label>}<button disabled={busy}>{busy ? "正在校验最新风险…" : review ? "重新获取风险并复核" : "获取最新风险并完成复核"}</button></form></details> : !review && <footer>{stageAllowsReview ? "请切换至风控经理身份完成本步骤。" : "流程进入选择模型后，由风控经理完成本步骤。"}</footer>}
+  </section>;
+}
+
+type FinalStrategySnapshot = {
+  decision?: string;
+  access_strategy?: string;
+  approved_limit?: number;
+  approved_payment_term_days?: number;
+  monitoring_frequency?: string;
+  facility_validity_days?: number;
+  adjustment_reason_category?: string;
+  adjustment_reason?: string;
+  compensating_controls?: string[];
+  decision_variance?: {
+    direction?: string;
+    materiality?: string;
+    deltas?: { limit_amount?: number; limit_ratio?: number; payment_term_days?: number };
+    reason_category?: string | null;
+    reason_detail?: string | null;
+  };
+};
+
+function ApprovalCompletionSummary({ caseItem, canViewReports, canViewFacilities, onOpenFacilities, onNotice }: { caseItem: ApprovalCase; canViewReports: boolean; canViewFacilities: boolean; onOpenFacilities: (caseId: string) => void; onNotice: (notice: { kind: "error" | "success"; text: string }) => void }) {
+  const [reports, setReports] = useState<CreditReport[]>([]);
+  const [facility, setFacility] = useState<CreditFacility | null>(null);
+  const [loading, setLoading] = useState(caseItem.status === "已完成");
+  const [deliveryErrors, setDeliveryErrors] = useState<{ reports: boolean; facility: boolean }>({ reports: false, facility: false });
+  const finalStrategy = (caseItem.data.final_strategy ?? {}) as FinalStrategySnapshot;
+  const proposal = caseItem.data.credit_proposal ?? {};
+  const scoring = caseItem.data.scoring ?? {};
+  const variance = finalStrategy.decision_variance;
+  const latestReport = reports[0];
+  const lastEvent = caseItem.timeline.at(-1);
+
+  useEffect(() => {
+    let active = true;
+    if (caseItem.status !== "已完成") {
+      setReports([]);
+      setFacility(null);
+      setLoading(false);
+      setDeliveryErrors({ reports: false, facility: false });
+      return () => { active = false; };
+    }
+    setLoading(true);
+    setReports([]);
+    setFacility(null);
+    setDeliveryErrors({ reports: false, facility: false });
+    const reportRequest = canViewReports ? api.creditReports(caseItem.case_id) : Promise.resolve<CreditReport[]>([]);
+    const facilityRequest = canViewFacilities ? api.creditFacilities() : Promise.resolve<CreditFacility[]>([]);
+    void Promise.allSettled([reportRequest, facilityRequest]).then(([reportResult, facilityResult]) => {
+      if (!active) return;
+      const nextErrors = { reports: reportResult.status === "rejected", facility: facilityResult.status === "rejected" };
+      setDeliveryErrors(nextErrors);
+      if (reportResult.status === "fulfilled") setReports(reportResult.value);
+      if (facilityResult.status === "fulfilled") setFacility(facilityResult.value.find((item) => item.case_id === caseItem.case_id) ?? null);
+      const messages = [
+        reportResult.status === "rejected" ? `报告归档读取失败：${errorMessage(reportResult.reason)}` : "",
+        facilityResult.status === "rejected" ? `授信台账读取失败：${errorMessage(facilityResult.reason)}` : "",
+      ].filter(Boolean);
+      if (messages.length) onNotice({ kind: "error", text: messages.join("；") });
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [canViewFacilities, canViewReports, caseItem.case_id, caseItem.status, caseItem.row_version, onNotice]);
+
+  if (caseItem.status !== "已完成") {
+    return <section className="approval-completion-summary closed">
+      <header><div><span>WORKFLOW CLOSURE</span><h3>申请已{caseItem.status === "已拒绝" ? "拒绝" : "撤回"}</h3><p>本申请已停止审批，不生成生效授信；完整处理原因保留在时间线中。</p></div><i>无需贷后移交</i></header>
+      <div className="approval-closure-result"><span>最后处理结果</span><strong>{lastEvent?.处理结果 ?? caseItem.status}</strong><small>{lastEvent ? `${lastEvent.处理人} · ${lastEvent.处理时间}` : "未记录结束事件"}</small></div>
+    </section>;
+  }
+
+  const proposalLimit = Number(proposal.suggested_limit ?? 0);
+  const finalLimit = Number(finalStrategy.approved_limit ?? facility?.approved_limit ?? 0);
+  const proposalTerm = Number(proposal.suggested_payment_term_days ?? 0);
+  const finalTerm = Number(finalStrategy.approved_payment_term_days ?? facility?.payment_term_days ?? 0);
+  const limitDelta = Number(variance?.deltas?.limit_amount ?? finalLimit - proposalLimit);
+  const limitRatio = Number(variance?.deltas?.limit_ratio ?? (proposalLimit ? limitDelta / proposalLimit : 0));
+  const varianceDirection = variance?.direction === "stricter" ? "审慎收紧" : variance?.direction === "relaxed" ? "风险放宽" : variance?.direction === "mixed" ? "混合调整" : variance?.direction === "rejected" ? "最终拒绝" : "模型一致";
+  const reportState = !canViewReports ? "无查看权限" : deliveryErrors.reports ? "读取失败" : loading ? "核对中" : latestReport ? "已归档" : "待生成";
+  const facilityState = !canViewFacilities ? "无查看权限" : deliveryErrors.facility ? "读取失败" : loading ? "核对中" : facility ? "已生效" : "待生成";
+  return <section className="approval-completion-summary">
+    <header><div><span>APPROVAL DELIVERY</span><h3>审批完成与交付闭环</h3><p>最终决策、模型偏差、报告归档和贷后责任均在此核对，避免“审批完成但无人接手”。</p></div><i>审批已完成</i></header>
+    <div className="completion-decision-grid">
+      <div><span>最终策略</span><strong>{finalStrategy.decision ?? "已通过"}</strong><small>{finalStrategy.access_strategy ?? facility?.access_strategy ?? "—"}</small></div>
+      <div><span>批准额度</span><strong>{money.format(finalLimit)}</strong><small>模型建议 {money.format(proposalLimit)}</small></div>
+      <div><span>账期与有效期</span><strong>{finalTerm} 天</strong><small>{finalStrategy.facility_validity_days ?? "—"} 天有效</small></div>
+      <div><span>评级与监控</span><strong>{String(scoring.rating ?? facility?.rating ?? "—")}</strong><small>{finalStrategy.monitoring_frequency ?? facility?.monitoring_frequency ?? "—"}监控</small></div>
+    </div>
+    <div className={`completion-variance ${variance?.materiality ?? "none"}`}>
+      <div><span>模型建议 → 最终审批</span><strong>{money.format(proposalLimit)} → {money.format(finalLimit)}</strong><small>{proposalTerm} 天 → {finalTerm} 天</small></div>
+      <i>{varianceDirection}</i>
+      <div><span>额度调整</span><strong>{limitDelta === 0 ? "无调整" : `${limitDelta > 0 ? "+" : ""}${money.format(limitDelta)}`}</strong><small>{limitDelta === 0 ? "与模型一致" : `${limitRatio > 0 ? "+" : ""}${(limitRatio * 100).toFixed(2)}%`}</small></div>
+      <p><b>{variance?.reason_category ?? finalStrategy.adjustment_reason_category ?? "模型一致"}</b>{variance?.reason_detail ?? finalStrategy.adjustment_reason ?? "最终决策与模型建议一致。"}</p>
+    </div>
+    <div className="completion-delivery-grid">
+      <article className={latestReport ? "done" : deliveryErrors.reports ? "error" : ""}><i>{latestReport ? "✓" : "1"}</i><div><span>归档报告</span><strong>{reportState}</strong><small>{latestReport ? `V${latestReport.report_version} · ${latestReport.report_no}` : canViewReports ? "由具备生成权限的风控或审批角色处理" : "请由具备报告权限的角色核对"}</small></div>{canViewReports && <button type="button" onClick={() => document.querySelector(".credit-report-center")?.scrollIntoView({ behavior: "smooth", block: "start" })}>{latestReport ? "查看报告" : "前往生成"}</button>}</article>
+      <article className={facility ? "done" : deliveryErrors.facility ? "error" : ""}><i>{facility ? "✓" : "2"}</i><div><span>授信台账</span><strong>{facilityState}</strong><small>{facility ? `可用 ${money.format(facility.available_limit)} · ${facility.expires_at ? new Date(facility.expires_at).toLocaleDateString("zh-CN") : "—"} 到期` : canViewFacilities ? "通过审批后应自动创建" : "请由贷后管理角色核对"}</small></div>{canViewFacilities && facility && <button type="button" onClick={() => onOpenFacilities(caseItem.case_id)}>前往贷后管理</button>}</article>
+      <article className={facility?.next_review_at ? "done" : ""}><i>{facility?.next_review_at ? "✓" : "3"}</i><div><span>贷后责任</span><strong>{facility?.next_review_at ? "已排期" : "待台账建立"}</strong><small>{facility?.next_review_at ? `贷后管理角色于 ${new Date(facility.next_review_at).toLocaleDateString("zh-CN")} 前复评` : "台账生效后按监控频率自动排期"}</small></div></article>
+    </div>
+  </section>;
+}
+
 function WorkflowOperationGuide({ caseItem, principal, onSwitchIdentity }: { caseItem: ApprovalCase; principal: Principal | null; onSwitchIdentity: (token: string) => void }) {
-  const guide = workflowStageGuides[caseItem.current_stage];
+  const baseGuide = workflowStageGuides[caseItem.current_stage];
+  const guide = caseItem.application_type === "renewal" && caseItem.current_stage === "document_upload" ? {
+    ...baseGuide,
+    action: "前往资料中心查看续授信差异清单，先承接仍在核验有效期内的静态可信资料，再上传最新财务、授权和业务资料。",
+    completion: "营业执照等静态资料完成可信承接，且至少一项最新财务、业务或授权资料经独立风控核验。",
+  } : baseGuide;
   if (!guide) return null;
-  const canHandle = canHandleCase(principal, caseItem);
+  const terminal = isTerminal(caseItem.status);
+  const canHandle = !terminal && canHandleCase(principal, caseItem);
   const targetToken = recommendedIdentityToken(caseItem);
   const targetIdentity = devIdentities.find((item) => item.token === targetToken);
   const progressByIndex = new Map((caseItem.progress ?? []).map((item) => [item.序号, item]));
-  return <section className={`workflow-operation-guide ${canHandle ? "actionable" : "handoff"}`}>
-    <header><div><span>STEP-BY-STEP GUIDE</span><h3>当前流程与角色操作指引</h3><p>系统会明确当前该谁处理、需要完成什么、为什么不能继续，以及完成后交给谁。</p></div><i>{canHandle ? "当前身份可办理" : "需要切换办理角色"}</i></header>
+  return <section className={`workflow-operation-guide ${terminal ? "terminal" : canHandle ? "actionable" : "handoff"}`}>
+    <header><div><span>STEP-BY-STEP GUIDE</span><h3>当前流程与角色操作指引</h3><p>系统会明确当前该谁处理、需要完成什么、为什么不能继续，以及完成后交给谁。</p></div><i>{terminal ? "流程已结束" : canHandle ? "当前身份可办理" : "需要切换办理角色"}</i></header>
     <div className="current-operation-guide">
-      <div><span>当前第 {(caseItem.progress ?? []).find((item) => item.审批环节 === stageMeta[caseItem.current_stage]?.label)?.序号 ?? "—"} 步</span><strong>{stageMeta[caseItem.current_stage]?.label}</strong><small>{caseItem.status === "待补件" ? "申请处于补件暂停状态" : "申请正在本环节处理中"}</small></div>
-      <div><span>应该谁处理</span><strong>{caseOwnerLabel(caseItem)}</strong><small>当前登录：{principal?.name ?? "未识别"}</small></div>
+      <div><span>{terminal ? "结束于第" : "当前第"} {(caseItem.progress ?? []).find((item) => item.审批环节 === stageMeta[caseItem.current_stage]?.label)?.序号 ?? "—"} 步</span><strong>{stageMeta[caseItem.current_stage]?.label}</strong><small>{terminal ? `申请状态：${caseItem.status}` : caseItem.status === "待补件" ? "申请处于补件暂停状态" : "申请正在本环节处理中"}</small></div>
+      <div><span>{terminal ? "最后办理角色" : "应该谁处理"}</span><strong>{caseOwnerLabel(caseItem)}</strong><small>当前登录：{principal?.name ?? "未识别"}</small></div>
       <div><span>怎么操作</span><p>{guide.action}</p></div>
       <div><span>完成条件</span><p>{guide.completion}</p></div>
       <div><span>完成后流转</span><p>{guide.next}</p></div>
     </div>
-    {!canHandle && targetIdentity && <div className="workflow-blocker"><b>当前无法继续的原因</b><p>你当前是“{principal?.name ?? "未识别身份"}”，本环节须由“{caseOwnerLabel(caseItem)}”办理。请先切换身份，再按上方操作完成本环节。</p><button type="button" onClick={() => onSwitchIdentity(targetIdentity.token)}>切换为{targetIdentity.label}继续</button></div>}
+    {!terminal && !canHandle && targetIdentity && <div className="workflow-blocker"><b>当前无法继续的原因</b><p>你当前是“{principal?.name ?? "未识别身份"}”，本环节须由“{caseOwnerLabel(caseItem)}”办理。请先切换身份，再按上方操作完成本环节。</p><button type="button" onClick={() => onSwitchIdentity(targetIdentity.token)}>切换为{targetIdentity.label}继续</button></div>}
     <details className="all-stage-guide">
       <summary>查看全部八个环节的角色与操作</summary>
       <div>{Object.entries(workflowStageGuides).map(([stage, item], index) => {
@@ -660,6 +946,9 @@ function StageActionForm({ caseItem, counterparty, principal, disabled, canViewD
   const documentGateDiagnosis = documentGate ? diagnoseDocumentGate(caseItem, documentGate) : null;
   const documentGateReady = documentGateDiagnosis?.ready ?? null;
   const authority = creditAuthority(caseItem);
+  const workflow = caseItem.data._workflow as unknown as { renewal_risk_review?: RenewalRiskReview } | undefined;
+  const renewalReview = caseItem.application_type === "renewal" ? workflow?.renewal_risk_review : undefined;
+  const declineOverrideRequired = Boolean(renewalReview?.conclusion === "decline_recommended" && values.decision !== "拒绝" && values.access_strategy !== "禁入");
   if (caseItem.current_stage === "final_strategy" && authority?.status === "pending") {
     return <CreditAuthorityPanel caseItem={caseItem} authority={authority} principal={principal} disabled={disabled} onDone={onDone} onError={onError} />;
   }
@@ -668,6 +957,7 @@ function StageActionForm({ caseItem, counterparty, principal, disabled, canViewD
     setSubmitting(true);
     const payload: Record<string, unknown> = {};
     for (const field of fields) payload[field.key] = field.kind === "number" ? Number(values[field.key]) : field.kind === "list" ? values[field.key].split(/[，,\n]/).map((item) => item.trim()).filter(Boolean) : values[field.key];
+    if (declineOverrideRequired) payload.renewal_risk_override_reason = values.renewal_risk_override_reason ?? "";
     try {
       if (automated) await api.automateApprovalCase(caseItem.case_id, caseItem.row_version, values.template_key);
       else await api.advanceApprovalCase(caseItem.case_id, caseItem.row_version, payload);
@@ -676,7 +966,14 @@ function StageActionForm({ caseItem, counterparty, principal, disabled, canViewD
     catch (error) { onError(error instanceof Error ? error.message : "提交失败"); }
     finally { setSubmitting(false); }
   }
-  return <form className="stage-form" onSubmit={(event) => void submit(event)}>{fields.map((field) => <label key={field.key} className={field.key.startsWith("adjustment_") || field.key === "compensating_controls" ? "governance-field" : ""}><span>{field.label}{decisionAdjusted && ["adjustment_reason_category", "adjustment_reason"].includes(field.key) ? " *" : ""}</span>{field.key === "template_key" ? <select value={values.template_key ?? "general"} onChange={(event) => setValues({ ...values, template_key: event.target.value })}>{models.map((model) => <option key={model.key} value={model.key}>{model.name} / {model.version}</option>)}</select> : field.kind === "select" ? <select required={decisionAdjusted && field.key === "adjustment_reason_category"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>{field.options?.map((option) => <option key={option || "empty"} value={option}>{option || "请选择"}</option>)}</select> : <input required={decisionAdjusted && field.key === "adjustment_reason"} minLength={field.key === "adjustment_reason" ? 10 : undefined} type={field.kind === "number" ? "number" : "text"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} placeholder={field.placeholder} />}</label>)}{caseItem.current_stage === "final_strategy" && <DecisionVariancePreview values={values} proposal={caseItem.data.credit_proposal ?? {}} adjusted={decisionAdjusted} />}{caseItem.current_stage === "model_selection" && counterparty?.data_quality?.recommended_model === "corporate_credit_v2" && <div className="model-fit-note"><span>模型适配建议</span><strong>材料增强型工商企业信用模型</strong><p>已识别三年财务、行业和外部风险材料；内部订单、应收与逾期数据仍需补充。</p></div>}{canViewDocuments && ["document_upload", "supplement"].includes(caseItem.current_stage) && <DocumentStageGate checklist={documentGate} diagnosis={documentGateDiagnosis} disabled={disabled} ownerLabel={caseOwnerLabel(caseItem)} onOpen={onOpenDocuments} />}{automated && <div className="automation-note"><span>AI</span><p>{automationDescriptions[caseItem.current_stage]}</p></div>}<button className="primary-button full" disabled={disabled || submitting || (caseItem.current_stage === "model_selection" && !values.template_key) || (canViewDocuments && ["document_upload", "supplement"].includes(caseItem.current_stage) && documentGateReady !== true)}>{disabled ? `请切换为${caseOwnerLabel(caseItem)}办理` : submitting ? "正在执行可信编排…" : automationButtonLabels[caseItem.current_stage] ?? `完成${stageMeta[caseItem.current_stage]?.label}`}</button></form>;
+  return <form className="stage-form" onSubmit={(event) => void submit(event)}>{fields.map((field) => <label key={field.key} className={field.key.startsWith("adjustment_") || field.key === "compensating_controls" ? "governance-field" : ""}><span>{field.label}{decisionAdjusted && ["adjustment_reason_category", "adjustment_reason"].includes(field.key) ? " *" : ""}</span>{field.key === "template_key" ? <select value={values.template_key ?? "general"} onChange={(event) => setValues({ ...values, template_key: event.target.value })}>{models.map((model) => <option key={model.key} value={model.key}>{model.name} / {model.version}</option>)}</select> : field.kind === "select" ? <select required={decisionAdjusted && field.key === "adjustment_reason_category"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>{field.options?.map((option) => <option key={option || "empty"} value={option}>{option || "请选择"}</option>)}</select> : <input required={decisionAdjusted && field.key === "adjustment_reason"} minLength={field.key === "adjustment_reason" ? 10 : undefined} type={field.kind === "number" ? "number" : "text"} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} placeholder={field.placeholder} />}</label>)}{caseItem.current_stage === "final_strategy" && <DecisionVariancePreview values={values} proposal={caseItem.data.credit_proposal ?? {}} adjusted={decisionAdjusted} />}{caseItem.current_stage === "final_strategy" && renewalReview && <RenewalFinalDispositionPanel review={renewalReview} values={values} onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))} />}{caseItem.current_stage === "model_selection" && counterparty?.data_quality?.recommended_model === "corporate_credit_v2" && <div className="model-fit-note"><span>模型适配建议</span><strong>材料增强型工商企业信用模型</strong><p>已识别三年财务、行业和外部风险材料；内部订单、应收与逾期数据仍需补充。</p></div>}{canViewDocuments && ["document_upload", "supplement"].includes(caseItem.current_stage) && <DocumentStageGate checklist={documentGate} diagnosis={documentGateDiagnosis} disabled={disabled} ownerLabel={caseOwnerLabel(caseItem)} onOpen={onOpenDocuments} />}{automated && <div className="automation-note"><span>AI</span><p>{automationDescriptions[caseItem.current_stage]}</p></div>}<button className="primary-button full" disabled={disabled || submitting || declineOverrideRequired && ((values.renewal_risk_override_reason ?? "").trim().length < 10 || !(values.compensating_controls ?? "").trim()) || (caseItem.current_stage === "model_selection" && !values.template_key) || (canViewDocuments && ["document_upload", "supplement"].includes(caseItem.current_stage) && documentGateReady !== true)}>{disabled ? `请切换为${caseOwnerLabel(caseItem)}办理` : submitting ? "正在执行可信编排…" : automationButtonLabels[caseItem.current_stage] ?? `完成${stageMeta[caseItem.current_stage]?.label}`}</button></form>;
+}
+
+function RenewalFinalDispositionPanel({ review, values, onChange }: { review: RenewalRiskReview; values: Record<string, string>; onChange: (key: string, value: string) => void }) {
+  const rejected = values.decision === "拒绝" || values.access_strategy === "禁入";
+  const override = review.conclusion === "decline_recommended" && !rejected;
+  const tone = review.conclusion === "cleared" ? "clear" : review.conclusion === "controls_required" ? "controlled" : rejected ? "declined" : "override";
+  return <section className={`renewal-final-disposition ${tone}`}><header><div><span>RISK DECISION HANDOFF</span><strong>续授信风险结论承接</strong><p>风控结论会写入最终策略，并在授信生效后形成可追踪的贷后控制任务。</p></div><i>{renewalRiskConclusionLabels[review.conclusion]}</i></header>{review.control_measures.length > 0 && <ul>{review.control_measures.map((item) => <li key={item}>{item}<small>{rejected ? "申请拒绝后不生成贷后任务" : "批准后自动生成贷后任务"}</small></li>)}</ul>}{review.conclusion === "cleared" && <p>风险已排除，本次决策无需承接额外控制条件。</p>}{review.conclusion === "decline_recommended" && rejected && <p>最终决策采纳风控拒绝建议，不会生成新授信台账。</p>}{override && <label><span>偏离风控拒绝建议的特别审批理由 *</span><textarea minLength={10} required value={values.renewal_risk_override_reason ?? ""} onChange={(event) => onChange("renewal_risk_override_reason", event.target.value)} placeholder="说明继续授信的特别依据、风险承担边界及授权判断（不少于10字）" /><small>同时必须在上方“补偿性控制措施”填写至少一项措施；本申请已强制升级委员会授权。</small></label>}</section>;
 }
 
 function CreditAuthorityPanel({ caseItem, authority, principal, disabled, onDone, onError }: { caseItem: ApprovalCase; authority: CreditAuthority; principal: Principal | null; disabled: boolean; onDone: (message?: string) => Promise<void>; onError: (text: string) => void }) {
@@ -699,7 +996,7 @@ function CreditAuthorityPanel({ caseItem, authority, principal, disabled, onDone
   }
   return <section className="authority-panel">
     <header><div><span>AUTHORITY MATRIX · {authority.policy.version}</span><strong>{authority.tier_label}授权会签</strong><p>{authority.reason} · 策略哈希 {authority.policy.config_hash.slice(0, 12)}</p></div><b>{authority.slots.filter((slot) => slot.status === "approved").length}/{authority.slots.length}</b></header>
-    <div className="authority-basis"><span>建议额度 <b>{money.format(authority.basis.suggested_limit)}</b></span><span>模型评级 <b>{authority.basis.rating}</b></span><span>准入策略 <b>{authority.basis.access_strategy}</b></span></div>
+    <div className="authority-basis"><span>建议额度 <b>{money.format(authority.basis.suggested_limit)}</b></span><span>模型评级 <b>{authority.basis.rating}</b></span><span>准入策略 <b>{authority.basis.access_strategy}</b></span>{authority.basis.renewal_risk_conclusion && <span>续授信风险 <b>{renewalRiskConclusionLabels[authority.basis.renewal_risk_conclusion]}</b></span>}</div>
     <div className="authority-slots">{authority.slots.map((slot, index) => <div key={slot.key} className={`${slot.status} ${slot.key === current?.key ? "current" : ""}`}><i>{index + 1}</i><span><b>{slot.label}</b><small>{slot.status === "approved" ? `${slot.signed_by_name} · 已同意` : slot.status === "rejected" ? `${slot.signed_by_name} · 已否决` : slot.key === current?.key ? `当前待 ${roleLabel[slot.role] ?? slot.role} 处理` : "等待前序会签"}</small>{slot.comment && <em>{slot.comment}</em>}</span></div>)}</div>
     {current && <div className="authority-action"><label><span>会签意见</span><textarea value={comment} onChange={(event) => setComment(event.target.value)} maxLength={1000} placeholder={`请填写${current.label}的独立判断依据（至少 5 个字）`} /></label><div><button type="button" className="action-submit danger" disabled={actionDisabled || submitting || comment.trim().length < 5} onClick={() => void submit("reject")}>否决申请</button><button type="button" className="primary-button" disabled={actionDisabled || submitting || comment.trim().length < 5} onClick={() => void submit("approve")}>{submitting ? "正在签署…" : `同意并流转至下一席位`}</button></div>{duplicateSigner ? <small>四眼原则：你已签署前序席位，请切换另一名授信审批人。</small> : disabled && <small>请切换为当前会签席位对应的身份：{roleLabel[current.role] ?? current.role}</small>}</div>}
   </section>;
@@ -767,7 +1064,19 @@ function stageDefaults(stage: string, counterparty?: Counterparty, caseData?: Re
   if (stage === "model_selection") result.template_key = counterparty?.data_quality?.recommended_model ?? "general";
   if (!counterparty) return result;
   if (stage === "registration") Object.assign(result, { registered_name: counterparty.name, unified_social_credit_code: counterparty.credit_code });
-  if (stage === "approval_submit") Object.assign(result, { business_type: "供应链赊销", requested_limit: String(counterparty.requested_limit), requested_term_days: String(counterparty.current_payment_term_days || 30) });
+  if (stage === "approval_submit") {
+    const workflow = caseData?._workflow;
+    const renewal = workflow?.renewal_request as Record<string, unknown> | undefined;
+    Object.assign(result, renewal ? {
+      business_type: "续授信",
+      requested_limit: String(renewal.requested_limit ?? counterparty.requested_limit),
+      requested_term_days: String(renewal.requested_term_days ?? counterparty.current_payment_term_days ?? 30),
+    } : {
+      business_type: "供应链赊销",
+      requested_limit: String(counterparty.requested_limit),
+      requested_term_days: String(counterparty.current_payment_term_days || 30),
+    });
+  }
   if (stage === "final_strategy") {
     const proposal = caseData?.credit_proposal ?? {};
     const strategy = String(proposal.access_strategy ?? "人工复核");
@@ -839,6 +1148,8 @@ function availableCaseActions(caseItem: ApprovalCase, principal: Principal | nul
 
 function isTerminal(status: string): boolean { return ["已完成", "已拒绝", "已撤回"].includes(status); }
 
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : "未知错误"; }
+
 function formatSla(caseItem: ApprovalCase): string {
   if (caseItem.sla_status === "已停止") return "SLA 已停止";
   if (caseItem.sla_status === "已暂停") return "等待补件，主流程 SLA 已暂停";
@@ -872,15 +1183,22 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
   const [correctionComparisons, setCorrectionComparisons] = useState<Record<string, DocumentVersionComparison>>({});
   const [comparisonUnavailableIds, setComparisonUnavailableIds] = useState<string[]>([]);
   const [correctionId, setCorrectionId] = useState("");
+  const [renewalCarryover, setRenewalCarryover] = useState<RenewalDocumentCarryover | null>(null);
+  const [carryingRenewalDocuments, setCarryingRenewalDocuments] = useState(false);
   const matchingCases = cases.filter((item) => item.counterparty_id === partyId);
   const selectedParty = counterparties.find((item) => item.id === partyId);
+  const selectedApprovalCase = matchingCases.find((item) => item.case_id === caseId);
   const selectedRows = rows.filter((item) => item.counterparty_id === partyId && (!caseId || item.case_id === caseId));
   const unlinkedRows = caseId ? rows.filter((item) => item.counterparty_id === partyId && !item.case_id) : [];
   const pendingRows = selectedRows.filter((item) => item.review_status === "pending_review");
   const reviewablePendingRows = pendingRows.filter((item) => item.uploaded_by !== principal?.subject);
   const selfUploadedPendingRows = pendingRows.filter((item) => item.uploaded_by === principal?.subject);
-  const currentChecklistDocumentIds = new Set((checklist?.items ?? []).flatMap((item) => item.document ? [item.document.id] : []));
-  const precheckAttentionCount = Object.values(prechecks).filter((item) => currentChecklistDocumentIds.has(item.document_id) && item.overall_status !== "pass").length;
+  const precheckAttentionCount = (checklist?.items ?? []).filter((item) =>
+    item.document
+    && !item.document.source_document_id
+    && prechecks[item.document.id]?.overall_status !== undefined
+    && prechecks[item.document.id]?.overall_status !== "pass"
+  ).length;
   const selectedCorrection = corrections.find((item) => item.id === correctionId);
   const loadChecklist = useCallback(async () => {
     if (!partyId) return setChecklist(null);
@@ -912,6 +1230,11 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
     }
     catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "补件任务加载失败" }); }
   }, [partyId, caseId, onNotice]);
+  const loadRenewalCarryover = useCallback(async () => {
+    if (!caseId || selectedApprovalCase?.application_type !== "renewal") return setRenewalCarryover(null);
+    try { setRenewalCarryover(await api.renewalDocumentCarryover(caseId, templateKey)); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "续授信资料差异清单加载失败" }); }
+  }, [caseId, templateKey, selectedApprovalCase?.application_type, onNotice]);
   useEffect(() => {
     if (!availableParties.some((item) => item.id === partyId)) {
       const nextPartyId = availableParties[0]?.id ?? "";
@@ -936,6 +1259,7 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
   useEffect(() => { void loadChecklist(); }, [loadChecklist, rows]);
   useEffect(() => { void loadPrechecks(); }, [loadPrechecks, rows]);
   useEffect(() => { void loadCorrections(); }, [loadCorrections, rows]);
+  useEffect(() => { void loadRenewalCarryover(); }, [loadRenewalCarryover, rows]);
   async function upload(event: FormEvent) {
     event.preventDefault();
     if (!file) return;
@@ -970,6 +1294,17 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
       onNotice({ kind: "error", text: error instanceof Error ? error.message : "关联资料失败" });
     } finally { setLinkingId(""); }
   }
+  async function carryOverRenewalDocuments() {
+    if (!caseId || !selectedApprovalCase) return;
+    setCarryingRenewalDocuments(true);
+    try {
+      const result = await api.carryOverRenewalDocuments(caseId, templateKey, selectedApprovalCase.row_version);
+      await onRefresh();
+      await Promise.all([loadChecklist(), loadPrechecks(), loadRenewalCarryover()]);
+      onNotice({ kind: "success", text: result.idempotent ? "可复用资料已承接，无需重复处理" : `已承接 ${result.created_count ?? 0} 份历史可信资料；动态资料仍须更新` });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "续授信资料承接失败" }); }
+    finally { setCarryingRenewalDocuments(false); }
+  }
   function prepareCorrectionUpload(correction: DocumentCorrection) {
     setCorrectionId(correction.id);
     setDocumentType(correction.document_type);
@@ -977,6 +1312,11 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
   }
   return <div className="document-layout">
     <section className={`panel document-review-handoff ${canReview ? "reviewer" : "uploader"}`}><div><span>{canReview ? "REVIEW QUEUE" : "FOUR-EYE HANDOFF"}</span><h2>{canReview ? "独立核验工作队列" : pendingRows.length ? "资料已上传，等待独立核验" : "上传后由风控独立核验"}</h2><p>{canReview ? `当前企业有 ${reviewablePendingRows.length} 份资料可核验${selfUploadedPendingRows.length ? `，另有 ${selfUploadedPendingRows.length} 份由本人上传，须交由其他复核人` : ""}。` : "上传人与核验人必须分离；仅完成上传不能推进审批，需由风控经理逐份完成五项检查。"}</p></div><div className="review-handoff-metrics"><span><b>{selectedRows.length}</b>已上传</span><span><b>{pendingRows.length}</b>待核验</span><span><b>{selectedRows.filter((item) => item.review_status === "verified").length}</b>已通过</span><span className={precheckAttentionCount ? "attention" : ""}><b>{precheckAttentionCount}</b>预检提醒</span></div>{canReview ? <button disabled={!reviewablePendingRows.length} onClick={() => reviewablePendingRows[0] && startReview(reviewablePendingRows[0])}>{reviewablePendingRows.length ? "开始核验下一份" : "当前队列已处理"}</button> : pendingRows.length > 0 ? <button onClick={onSwitchToReviewer}>切换风控经理核验</button> : <small>上传资料后，这里会自动形成待核验任务。</small>}</section>
+    {renewalCarryover && <section className="panel renewal-document-diff">
+      <header><div><span>RENEWAL DOCUMENT DIFF</span><h2>续授信资料承接与更新清单</h2><p>来源审批 {renewalCarryover.source_case_id}。静态资料仅在原核验有效期内承接；财务、授权和业务资料必须提交最新版本。</p></div><button disabled={!canUpload || !renewalCarryover.summary.reusable_count || carryingRenewalDocuments} onClick={() => void carryOverRenewalDocuments()}>{carryingRenewalDocuments ? "正在校验并承接…" : renewalCarryover.summary.reusable_count ? `承接 ${renewalCarryover.summary.reusable_count} 份可信资料` : "暂无可承接资料"}</button></header>
+      <div className="renewal-document-metrics"><span className="reusable"><b>{renewalCarryover.summary.reusable_count}</b>可直接承接</span><span className="carried"><b>{renewalCarryover.summary.carried_count}</b>已承接</span><span className="current"><b>{renewalCarryover.summary.current_count}</b>本次已提交</span><span className="refresh"><b>{renewalCarryover.summary.refresh_required_count}</b>必需项待更新</span></div>
+      <div className="renewal-document-diff-list">{renewalCarryover.items.map((item) => <article className={item.action} key={item.key}><i>{renewalDocumentActionIcon(item.action)}</i><div><strong>{item.document_type}{item.required && <b>必</b>}</strong><p>{item.reason}</p><small>{item.source_document ? `来源：${item.source_document.original_name}${item.age_days !== null ? ` · 核验距今 ${item.age_days} 天` : ""}` : item.description}</small></div><em>{renewalDocumentActionLabel(item.action)}</em></article>)}</div>
+    </section>}
     {caseId && unlinkedRows.length > 0 && <section className="panel case-document-linker"><div><span>EXISTING DOCUMENTS</span><h2>已有资料尚未计入当前申请</h2><p>以下资料属于同一企业，但上传时未关联审批单。关联后仍需独立核验，核验通过才会计入门禁。</p></div><div className="case-document-link-list">{unlinkedRows.map((item) => <div key={item.id}><span><strong>{item.document_type}</strong><small>{item.original_name}</small></span>{canUpload ? <button disabled={Boolean(linkingId)} onClick={() => void linkExistingDocument(item)}>{linkingId === item.id ? "正在关联…" : "关联本申请"}</button> : <em>请由客户经理关联</em>}</div>)}</div></section>}
     {caseId && <DocumentCorrectionPanel corrections={corrections} comparisons={correctionComparisons} comparisonUnavailableIds={comparisonUnavailableIds} rows={rows} canUpload={canUpload} canReview={canReview} onPrepareUpload={prepareCorrectionUpload} onReview={startReview} />}
     <section className="panel document-checklist-panel">
@@ -993,7 +1333,7 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
               return <a href={`#document-checklist-${item.key}`} className={tone} key={item.key}><i>{tone === "pass" ? "✓" : tone === "missing" ? "×" : "!"}</i><span><strong>{item.document_type}</strong><small>{documentNavigationStatus(item, item.document ? prechecks[item.document.id] : undefined)}</small></span>{item.required && <b>必</b>}</a>;
             })}</div>
           </nav>
-          <div className="document-checklist-list">{checklist.items.map((item) => <article id={`document-checklist-${item.key}`} className={item.status} key={item.key}><header><div><i>{item.required ? "必" : "选"}</i><span><strong>{item.document_type}</strong><small>{item.description}</small></span></div><b>{documentChecklistStatus(item.status)}</b></header>{item.document ? <><div className="document-linked-file"><span>{item.document.original_name}</span><code>{item.document.sha256.slice(0, 16)}…</code><button onClick={() => void api.downloadDocument(item.document!).catch((error: Error) => onNotice({ kind: "error", text: error.message }))}>下载</button>{canReview && item.document.review_status === "pending_review" && item.document.uploaded_by !== principal?.subject ? <button className="secondary" onClick={() => startReview(item.document!)}>逐项检查</button> : item.document.review_status === "pending_review" ? <em className="document-handoff-note">{item.document.uploaded_by === principal?.subject ? "本人上传，需他人核验" : "待风控经理核验"}</em> : null}</div><DocumentPrecheckCard precheck={prechecks[item.document.id]} />{reviewingId === item.document.id && <div className="document-review-form"><div>{checklist.review_checks.map((check) => <label key={check.key}><span>{check.label}</span><select value={reviewChecks[check.key] ?? "pass"} onChange={(event) => setReviewChecks({ ...reviewChecks, [check.key]: event.target.value as DocumentCheckResult["status"] })}><option value="pass">通过</option><option value="fail">不通过</option><option value="not_applicable">不适用</option></select></label>)}</div><label><span>检查意见</span><textarea value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} /></label><footer><button className="reject" disabled={reviewing} onClick={() => void submitReview(item.document!, "reject")}>驳回</button><button className="secondary" disabled={reviewing} onClick={() => void submitReview(item.document!, "needs_supplement")}>要求补充</button><button disabled={reviewing} onClick={() => void submitReview(item.document!, "verify")}>核验通过</button></footer></div>}{item.document.review_comment && <p className="document-review-comment">检查意见：{item.document.review_comment}{item.document.reviewed_by_name ? ` · ${item.document.reviewed_by_name}` : ""}</p>}</> : canUpload ? <button className="document-upload-shortcut" onClick={() => setDocumentType(item.document_type)}>选择此项上传</button> : <p>尚未上传</p>}</article>)}</div>
+          <div className="document-checklist-list">{checklist.items.map((item) => <article id={`document-checklist-${item.key}`} className={item.status} key={item.key}><header><div><i>{item.required ? "必" : "选"}</i><span><strong>{item.document_type}</strong><small>{item.description}</small></span></div><b>{documentChecklistStatus(item.status)}</b></header>{item.document ? <>{item.document.source_document_id && <div className="document-carryover-lineage"><span>历史可信资料承接</span><small>来源资料 {item.document.source_document_id.slice(0, 8)}… · {item.document.carried_over_by}</small></div>}<div className="document-linked-file"><span>{item.document.original_name}</span><code>{item.document.sha256.slice(0, 16)}…</code><button onClick={() => void api.downloadDocument(item.document!).catch((error: Error) => onNotice({ kind: "error", text: error.message }))}>下载</button>{canReview && item.document.review_status === "pending_review" && item.document.uploaded_by !== principal?.subject ? <button className="secondary" onClick={() => startReview(item.document!)}>逐项检查</button> : item.document.review_status === "pending_review" ? <em className="document-handoff-note">{item.document.uploaded_by === principal?.subject ? "本人上传，需他人核验" : "待风控经理核验"}</em> : null}</div>{!item.document.source_document_id && <DocumentPrecheckCard precheck={prechecks[item.document.id]} />}{reviewingId === item.document.id && <div className="document-review-form"><div>{checklist.review_checks.map((check) => <label key={check.key}><span>{check.label}</span><select value={reviewChecks[check.key] ?? "pass"} onChange={(event) => setReviewChecks({ ...reviewChecks, [check.key]: event.target.value as DocumentCheckResult["status"] })}><option value="pass">通过</option><option value="fail">不通过</option><option value="not_applicable">不适用</option></select></label>)}</div><label><span>检查意见</span><textarea value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} /></label><footer><button className="reject" disabled={reviewing} onClick={() => void submitReview(item.document!, "reject")}>驳回</button><button className="secondary" disabled={reviewing} onClick={() => void submitReview(item.document!, "needs_supplement")}>要求补充</button><button disabled={reviewing} onClick={() => void submitReview(item.document!, "verify")}>核验通过</button></footer></div>}{item.document.review_comment && <p className="document-review-comment">检查意见：{item.document.review_comment}{item.document.reviewed_by_name ? ` · ${item.document.reviewed_by_name}` : ""}</p>}</> : canUpload ? <button className="document-upload-shortcut" onClick={() => setDocumentType(item.document_type)}>选择此项上传</button> : <p>尚未上传</p>}</article>)}</div>
         </div>
       </> : <div className="model-loading">正在生成资料逐项清单…</div>}
     </section>
@@ -1018,12 +1358,16 @@ function DocumentCenter({ rows, counterparties, cases, principal, focus, canUplo
 }
 
 function documentChecklistStatus(status: string): string { return ({ missing: "未上传", pending_review: "待检查", verified: "已核验", needs_supplement: "待补充", rejected: "已驳回" } as Record<string, string>)[status] ?? status; }
+function renewalDocumentActionLabel(action: RenewalDocumentCarryover["items"][number]["action"]): string { return ({ reusable: "可承接", carried: "已承接", current: "本次资料", refresh_required: "必须更新", expired_source: "已过期", missing_source: "来源缺失" } as Record<string, string>)[action] ?? action; }
+function renewalDocumentActionIcon(action: RenewalDocumentCarryover["items"][number]["action"]): string { return action === "reusable" ? "↗" : action === "carried" || action === "current" ? "✓" : action === "refresh_required" ? "新" : "!"; }
 function documentNavigationTone(item: DocumentChecklist["items"][number], precheck?: DocumentPrecheck): "pass" | "missing" | "issue" {
   if (item.status === "missing") return "missing";
+  if (item.status === "verified" && item.document?.source_document_id) return "pass";
   if (item.status === "verified" && (!precheck || precheck.overall_status === "pass")) return "pass";
   return "issue";
 }
 function documentNavigationStatus(item: DocumentChecklist["items"][number], precheck?: DocumentPrecheck): string {
+  if (item.status === "verified" && item.document?.source_document_id) return "历史可信承接";
   if (precheck && precheck.overall_status !== "pass") {
     return `预检${({ warning: "提醒", manual_review: "待人工判断", block: "阻断" } as Record<string, string>)[precheck.overall_status] ?? "异常"}`;
   }
@@ -1216,6 +1560,26 @@ function caseOwnerLabel(caseItem: ApprovalCase): string {
     return authority.slots.find((slot) => slot.status === "pending")?.label ?? "授权会签";
   }
   return stageMeta[caseItem.current_stage]?.owner ?? "待分配";
+}
+
+function workflowStageOrder(stage: string): number {
+  const index = Object.keys(stageMeta).indexOf(stage);
+  return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
+}
+
+function approvalQueuePriority(caseItem: ApprovalCase, principal: Principal | null): number {
+  if (isTerminal(caseItem.status)) return 50;
+  if (caseItem.sla_status === "已超时") return 0;
+  if (caseItem.sla_status === "即将超时") return 5;
+  if (canHandleCase(principal, caseItem)) return 10;
+  if (caseItem.current_stage === "supplement" || caseItem.status === "待补件") return 15;
+  return 20;
+}
+
+function approvalQueueDueTime(caseItem: ApprovalCase): number {
+  if (!caseItem.stage_due_at) return Number.MAX_SAFE_INTEGER;
+  const value = Date.parse(caseItem.stage_due_at);
+  return Number.isNaN(value) ? Number.MAX_SAFE_INTEGER : value;
 }
 
 export default App;

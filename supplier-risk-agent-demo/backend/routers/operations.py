@@ -114,7 +114,7 @@ def supervisor_release_task(
 
 @router.post("/team-tasks/{task_type}/{task_id}/remind")
 def supervisor_remind_task(
-    task_type: Literal["approval", "correction"],
+    task_type: Literal["approval", "correction", "facility_control", "control_extension"],
     task_id: str,
     request: SupervisorTaskReminderRequest,
     session: Session = Depends(get_db_session),

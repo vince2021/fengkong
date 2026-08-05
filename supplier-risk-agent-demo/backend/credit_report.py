@@ -26,7 +26,7 @@ except ModuleNotFoundError:
     _REPORTLAB_AVAILABLE = False
 
 
-REPORT_SCHEMA_VERSION = "1.1"
+REPORT_SCHEMA_VERSION = "1.2"
 FONT_NAME = "STSong-Light"
 
 
@@ -44,6 +44,7 @@ def build_credit_report_snapshot(
     decision_variance = final_strategy.get("decision_variance") or build_decision_variance(proposal, final_strategy)
     application = case["data"].get("approval_submit", {})
     raw_profile = raw_profile or {}
+    workflow = case.get("data", {}).get("_workflow", {})
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "report_type": "credit_decision",
@@ -110,6 +111,11 @@ def build_credit_report_snapshot(
             "facility_validity_days": final_strategy.get("facility_validity_days", 0),
         },
         "decision_variance": decision_variance,
+        "renewal_risk": {
+            "application_type": case.get("application_type", "new_credit"),
+            "review": workflow.get("renewal_risk_review"),
+            "disposition": final_strategy.get("renewal_risk_disposition"),
+        },
         "documents": [
             {
                 "id": item["id"],
@@ -211,6 +217,8 @@ def render_credit_report_pdf(snapshot: dict, report_no: str, report_version: int
         story.append(Paragraph("未命中强制覆盖规则。", styles["body"]))
     story.append(Spacer(1, 2 * mm))
     story.append(Paragraph(f"人工复核要求：{'需要' if rating.get('review_required') else '无需'}。最终策略以授权审批人的归档决策为准，模型仅提供可解释的决策支持。", styles["note"]))
+    if snapshot.get("renewal_risk", {}).get("application_type") == "renewal":
+        story.extend([Spacer(1, 2 * mm), _renewal_risk_note(snapshot["renewal_risk"], styles)])
 
     _section(story, "五、可信资料与数据来源", styles)
     story.append(_document_table(snapshot.get("documents", []), styles))
@@ -241,6 +249,7 @@ def build_report_preview(snapshot: dict) -> dict:
         "proposal": snapshot["proposal"],
         "decision": snapshot["decision"],
         "decision_variance": snapshot.get("decision_variance", {}),
+        "renewal_risk": snapshot.get("renewal_risk", {}),
         "document_count": len(snapshot.get("documents", [])),
         "timeline_count": len(snapshot.get("timeline", [])),
         "source_count": len(snapshot.get("source_lineage", [])),
@@ -346,6 +355,31 @@ def _decision_variance_note(variance: dict, styles: dict[str, ParagraphStyle]) -
     controls = "、".join(str(item) for item in variance.get("compensating_controls", [])) or "无"
     text = f"审批偏差治理：{direction} / {materiality}；原因类别：{category}；具体说明：{reason}；补偿性控制：{controls}"
     return Paragraph(_safe(text), styles["warning"] if variance.get("materiality") == "material" else styles["note"])
+
+
+def _renewal_risk_note(renewal_risk: dict, styles: dict[str, ParagraphStyle]) -> Paragraph:
+    review = renewal_risk.get("review") or {}
+    disposition = renewal_risk.get("disposition") or {}
+    conclusion_labels = {
+        "cleared": "风险已排除",
+        "controls_required": "落实控制措施后推进",
+        "decline_recommended": "建议拒绝续授信",
+    }
+    alignment_labels = {
+        "cleared": "无额外条件",
+        "controls_adopted": "已承接控制措施",
+        "application_rejected": "申请已拒绝",
+        "decline_adopted": "已采纳拒绝建议",
+        "decline_overridden": "特别审批偏离拒绝建议",
+    }
+    controls = "、".join(str(item) for item in disposition.get("adopted_controls", [])) or "无"
+    text = (
+        f"续授信风险复核：{conclusion_labels.get(review.get('conclusion'), review.get('conclusion') or '未记录')}；"
+        f"最终处置：{alignment_labels.get(disposition.get('alignment'), disposition.get('alignment') or '未记录')}；"
+        f"承接控制条件：{controls}；复核人：{review.get('reviewed_by_name') or '-'}；"
+        f"特别审批理由：{disposition.get('override_reason') or '无'}"
+    )
+    return Paragraph(_safe(text), styles["warning"] if disposition.get("alignment") == "decline_overridden" else styles["note"])
 
 
 def _indicator_table(items: list[dict], styles: dict[str, ParagraphStyle]) -> Table:

@@ -13,6 +13,8 @@ def build_credit_authority(case: dict, policy_snapshot: dict | None = None) -> d
     suggested_limit = _number(proposal.get("suggested_limit"))
     rating = str(scoring.get("rating") or proposal.get("rating") or "").upper()
     strategy = str(proposal.get("access_strategy") or "")
+    renewal_review = case.get("data", {}).get("_workflow", {}).get("renewal_risk_review", {})
+    renewal_conclusion = str(renewal_review.get("conclusion") or "") if case.get("application_type") == "renewal" else ""
     policy = deepcopy(policy_snapshot or builtin_policy_snapshot())
     config = policy["config"]
     if (
@@ -29,6 +31,13 @@ def build_credit_authority(case: dict, policy_snapshot: dict | None = None) -> d
         tier = "enhanced"
     else:
         tier = "standard"
+    risk_reason = ""
+    if renewal_conclusion == "decline_recommended":
+        tier = "committee"
+        risk_reason = "风控复核建议拒绝，强制升级委员会授权"
+    elif renewal_conclusion == "controls_required" and tier == "standard":
+        tier = "enhanced"
+        risk_reason = "风控复核要求落实控制措施，至少升级加强授权"
     tier_config = config["tiers"][tier]
     slots = [_slot(item["key"], item["role"], item["label"]) for item in tier_config["slots"]]
 
@@ -36,7 +45,7 @@ def build_credit_authority(case: dict, policy_snapshot: dict | None = None) -> d
         "version": "2026.07",
         "tier": tier,
         "tier_label": tier_config["label"],
-        "reason": tier_config["reason"],
+        "reason": f"{tier_config['reason']}；{risk_reason}" if risk_reason else tier_config["reason"],
         "policy": {
             "id": policy.get("id"),
             "version": policy["policy_version"],
@@ -47,6 +56,7 @@ def build_credit_authority(case: dict, policy_snapshot: dict | None = None) -> d
             "suggested_limit": suggested_limit,
             "rating": rating or "-",
             "access_strategy": strategy or "-",
+            "renewal_risk_conclusion": renewal_conclusion or None,
         },
         "slots": slots,
         "status": "pending",

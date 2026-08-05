@@ -242,7 +242,7 @@ export type CreditAuthority = {
   tier_label: string;
   reason: string;
   policy: { id: string | null; version: string; config_hash: string; source: "builtin" | "published" };
-  basis: { suggested_limit: number; rating: string; access_strategy: string };
+  basis: { suggested_limit: number; rating: string; access_strategy: string; renewal_risk_conclusion?: RenewalRiskReview["conclusion"] | null };
   slots: CreditAuthoritySlot[];
   status: "pending" | "approved" | "rejected";
 };
@@ -633,6 +633,8 @@ export type ApprovalCase = {
   case_id: string;
   counterparty_id: string;
   counterparty_name: string;
+  application_type: "new_credit" | "renewal";
+  source_facility_id: string | null;
   current_stage: string;
   status: string;
   completed_stages: string[];
@@ -662,6 +664,7 @@ export type CreditReportPreview = {
   proposal: { suggested_limit: number; suggested_payment_term_days: number; access_strategy: string; monitoring_frequency: string };
   decision: { decision: string; access_strategy: string; approved_limit: number; approved_payment_term_days: number; monitoring_frequency: string; facility_validity_days: number };
   decision_variance: DecisionVarianceSnapshot;
+  renewal_risk: { application_type?: "new_credit" | "renewal"; review?: RenewalRiskReview | null; disposition?: { review_conclusion: RenewalRiskReview["conclusion"]; risk_review_hash: string; alignment: string; adopted_controls: string[]; override_reason: string | null } | null };
   document_count: number;
   timeline_count: number;
   source_count: number;
@@ -747,6 +750,9 @@ export type DocumentRecord = {
   reviewed_by: string | null;
   reviewed_by_name: string | null;
   reviewed_at: string | null;
+  source_document_id: string | null;
+  carried_over_by: string | null;
+  carried_over_at: string | null;
   row_version: number;
   created_at: string;
 };
@@ -911,6 +917,35 @@ export type DocumentChecklist = {
     missing_required_count: number;
     exception_count: number;
   };
+};
+
+export type RenewalDocumentCarryover = {
+  case_id: string;
+  source_case_id: string;
+  counterparty_id?: string;
+  template_key: string;
+  items: Array<{
+    key: string;
+    document_type: string;
+    description: string;
+    required: boolean;
+    models: string[];
+    action: "reusable" | "carried" | "current" | "refresh_required" | "expired_source" | "missing_source";
+    reason: string;
+    age_days: number | null;
+    max_age_days: number | null;
+    source_document: DocumentRecord | null;
+    current_document: DocumentRecord | null;
+  }>;
+  summary: {
+    reusable_count: number;
+    carried_count: number;
+    current_count: number;
+    refresh_required_count: number;
+  };
+  carried_documents?: DocumentRecord[];
+  created_count?: number;
+  idempotent?: boolean;
 };
 
 export type RatingResult = {
@@ -1415,10 +1450,12 @@ export type ModelGovernanceNotification = {
 export type ApiErrorShape = { detail?: string };
 
 export type TaskAction = {
-  page?: "documents" | "approvals";
+  page?: "documents" | "approvals" | "facilities";
   counterparty_id?: string;
   case_id?: string;
   correction_id?: string;
+  facility_id?: string;
+  condition_id?: string;
 };
 
 export type NotificationRecord = {
@@ -1440,7 +1477,7 @@ export type NotificationRecord = {
 
 export type PersonalTask = {
   id: string;
-  task_type: "approval" | "correction";
+  task_type: "approval" | "correction" | "facility_control" | "control_extension";
   title: string;
   description: string;
   counterparty_id: string;
@@ -1450,6 +1487,9 @@ export type PersonalTask = {
   stage_label: string;
   correction_id: string | null;
   document_type: string | null;
+  facility_id?: string | null;
+  condition_id?: string | null;
+  extension_id?: string | null;
   status: string;
   sla_status: "normal" | "due_soon" | "overdue" | "escalated";
   due_at: string | null;
@@ -1462,8 +1502,10 @@ export type PersonalTask = {
   assignment_expires_at: string | null;
   lease_remaining_seconds: number | null;
   assignment_expired: boolean;
-  assignment_state: "unassigned" | "mine" | "assigned_other";
+  assignment_state: "unassigned" | "mine" | "assigned_other" | "direct";
   can_release: boolean;
+  claimable: boolean;
+  reminder_role: string | null;
   row_version: number;
   action: TaskAction;
 };
@@ -1487,6 +1529,9 @@ export type PersonalTaskQueue = {
     truncated: boolean;
     approval: number;
     correction: number;
+    facility_control: number;
+    control_extension: number;
+    post_credit: number;
     due_soon: number;
     overdue: number;
     escalated: number;
@@ -1496,6 +1541,7 @@ export type PersonalTaskQueue = {
 
 export type TeamTask = PersonalTask & {
   can_force_release: boolean;
+  can_remind: boolean;
 };
 
 export type TeamTaskBoard = {
@@ -1506,10 +1552,11 @@ export type TeamTaskBoard = {
     truncated: boolean;
     claimed: number;
     unassigned: number;
+    direct: number;
     expired: number;
     at_risk: number;
   };
-  role_load: Array<{ role: string; total: number; claimed: number; unassigned: number; risk: number }>;
+  role_load: Array<{ role: string; total: number; claimed: number; unassigned: number; direct: number; risk: number }>;
   assignee_load: Array<{ subject: string | null; name: string; total: number; risk: number }>;
   tasks: TeamTask[];
 };
@@ -1547,6 +1594,8 @@ export type CreditFacility = {
   counterparty_name: string;
   approved_limit: number;
   used_limit: number;
+  opening_balance: number;
+  supersedes_facility_id: string | null;
   available_limit: number;
   utilization_rate: number;
   payment_term_days: number;
@@ -1558,7 +1607,56 @@ export type CreditFacility = {
   expires_at: string | null;
   last_review_at: string | null;
   next_review_at: string | null;
+  control_condition_count: number;
+  pending_control_count: number;
+  overdue_control_count: number;
+  critical_control_count: number;
   row_version: number;
+};
+
+export type FacilityControlCondition = {
+  id: string;
+  facility_id: string;
+  source_case_id: string;
+  source_review_hash: string;
+  sequence: number;
+  measure: string;
+  owner_role: "risk_manager";
+  status: "pending" | "completed";
+  due_at: string | null;
+  escalation_level: number;
+  escalation_role: "risk_manager" | "approver" | "admin" | null;
+  escalated_at: string | null;
+  linked_alert_id: string | null;
+  extension_requests: FacilityControlExtension[];
+  sla_status: "on_track" | "due_soon" | "overdue" | "completed";
+  days_remaining: number | null;
+  overdue_days: number;
+  completion_note: string | null;
+  completed_by: string | null;
+  completed_at: string | null;
+  row_version: number;
+  created_at: string | null;
+};
+
+export type FacilityControlExtension = {
+  id: string;
+  condition_id: string;
+  facility_id: string;
+  extension_days: number;
+  previous_due_at: string;
+  proposed_due_at: string;
+  reason: string;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  requested_by: string;
+  requested_by_name: string;
+  requested_at: string;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
+  row_version: number;
+  created_at: string | null;
 };
 
 export type CreditUsageTransaction = {
@@ -1573,7 +1671,61 @@ export type CreditUsageTransaction = {
   reason: string;
 };
 
-export type CreditFacilityDetail = CreditFacility & { transactions: CreditUsageTransaction[] };
+export type RenewalRiskBaseline = {
+  capture_status: "captured" | "legacy_missing";
+  unresolved_alert_count: number;
+  critical_alert_count: number;
+  active_risk_event_count: number;
+  critical_risk_event_count: number;
+  signals: Array<{
+    alert_type: string;
+    severity: "warning" | "critical";
+    title: string;
+    message: string;
+    created_at: string | null;
+  }>;
+};
+
+export type RenewalRiskReview = {
+  status: "completed";
+  conclusion: "cleared" | "controls_required" | "decline_recommended";
+  review_note: string;
+  control_measures: string[];
+  baseline_hash: string;
+  latest_risk_snapshot: RenewalRiskBaseline;
+  latest_risk_hash: string;
+  reviewed_by: string;
+  reviewed_by_name: string;
+  reviewed_at: string;
+};
+
+export type CreditFacilityDetail = CreditFacility & {
+  transactions: CreditUsageTransaction[];
+  control_conditions: FacilityControlCondition[];
+  renewal_case: {
+    case_id: string;
+    application_type: "renewal";
+    status: string;
+    current_stage: string;
+    created_at: string | null;
+    request_snapshot: {
+      baseline_status: "frozen" | "legacy_facility_fallback";
+      current_approved_limit: number;
+      current_used_limit: number;
+      current_payment_term_days: number;
+      current_rating: string | null;
+      current_access_strategy: string | null;
+      current_monitoring_frequency: string | null;
+      source_expires_at: string | null;
+      risk_baseline: RenewalRiskBaseline;
+      requested_limit: number;
+      requested_term_days: number;
+      limit_delta: number;
+      term_delta_days: number;
+      renewal_reason: string;
+    };
+  } | null;
+};
 
 export type FacilityAlert = {
   id: string;
@@ -1624,4 +1776,7 @@ export type FacilitySummary = {
   high_utilization_facilities: number;
   unresolved_alerts: number;
   critical_alerts: number;
+  pending_control_conditions: number;
+  overdue_control_conditions: number;
+  critical_control_conditions: number;
 };

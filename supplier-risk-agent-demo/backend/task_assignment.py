@@ -7,7 +7,14 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from backend.credit_authority import authority_has_signer, authority_owner_roles
-from backend.db_models import ApprovalCaseRecord, DocumentCorrectionRecord, NotificationRecord
+from backend.db_models import (
+    ApprovalCaseRecord,
+    CreditFacilityRecord,
+    DocumentCorrectionRecord,
+    FacilityControlConditionRecord,
+    FacilityControlExtensionRecord,
+    NotificationRecord,
+)
 from backend.repository import AuditRepository, NotificationRepository
 from backend.security import APPROVAL_STAGE_ROLES, Principal
 from backend.task_lease import (
@@ -184,6 +191,15 @@ def remind_task_as_supervisor(
     reason: str,
     principal: Principal,
 ) -> dict:
+    if task_type in {"facility_control", "control_extension"}:
+        return _remind_direct_task_as_supervisor(
+            session,
+            task_type,
+            task_id,
+            expected_row_version,
+            reason,
+            principal,
+        )
     record = _get_task_record(session, task_type, task_id)
     _ensure_task_is_active(task_type, record)
     if record.row_version != expected_row_version:
@@ -241,6 +257,105 @@ def remind_task_as_supervisor(
             "recipient_name": record.assigned_to_name,
             "notification_id": notification["id"],
             "supervisor_subject": principal.subject,
+        },
+    )
+    session.commit()
+    return notification
+
+
+def _remind_direct_task_as_supervisor(
+    session: Session,
+    task_type: str,
+    task_id: str,
+    expected_row_version: int,
+    reason: str,
+    principal: Principal,
+) -> dict:
+    if task_type == "facility_control":
+        condition = session.get(FacilityControlConditionRecord, task_id)
+        if not condition:
+            raise TaskAssignmentNotFound("贷后控制任务不存在")
+        if condition.status != "pending":
+            raise TaskAssignmentConflict("贷后控制任务已经完成，无需继续催办")
+        if condition.row_version != expected_row_version:
+            raise TaskAssignmentConflict(f"任务版本已变化，当前版本为 {condition.row_version}")
+        recipient_role = condition.escalation_role or condition.owner_role
+        subject = condition.measure
+        extension_id = None
+        record_version = condition.row_version
+    else:
+        extension = session.get(FacilityControlExtensionRecord, task_id)
+        if not extension:
+            raise TaskAssignmentNotFound("控制条件延期审批任务不存在")
+        if extension.status != "pending":
+            raise TaskAssignmentConflict("控制条件延期审批已经结束，无需继续催办")
+        if extension.row_version != expected_row_version:
+            raise TaskAssignmentConflict(f"任务版本已变化，当前版本为 {extension.row_version}")
+        condition = session.get(FacilityControlConditionRecord, extension.condition_id)
+        if not condition or condition.status != "pending":
+            raise TaskAssignmentConflict("关联控制条件已经结束，无需继续催办延期审批")
+        if extension.facility_id != condition.facility_id:
+            raise TaskAssignmentConflict("延期任务与控制条件的授信关联不一致，请先修复数据")
+        recipient_role = "approver"
+        subject = f"控制条件延期 {extension.extension_days} 天：{condition.measure}"
+        extension_id = extension.id
+        record_version = extension.row_version
+
+    facility = session.get(CreditFacilityRecord, condition.facility_id)
+    if not facility:
+        raise TaskAssignmentNotFound("关联授信台账不存在")
+    now = datetime.now(timezone.utc)
+    dedup_prefix = f"task-role-reminder:{task_type}:{task_id}:{recipient_role}:"
+    recent = session.scalars(
+        select(NotificationRecord).where(
+            NotificationRecord.category == "task_assignment",
+            NotificationRecord.level == "supervisor_reminder",
+            NotificationRecord.recipient_role == recipient_role,
+            NotificationRecord.recipient_subject.is_(None),
+            NotificationRecord.dedup_key.like(f"{dedup_prefix}%"),
+            NotificationRecord.created_at >= now - timedelta(minutes=SUPERVISOR_REMINDER_INTERVAL_MINUTES),
+        ).order_by(NotificationRecord.created_at.desc())
+    ).first()
+    if recent:
+        raise TaskAssignmentConflict("同一系统直派任务两次角色催办至少间隔 30 分钟")
+    action = {
+        "page": "facilities",
+        "case_id": facility.case_id,
+        "facility_id": facility.id,
+        "condition_id": condition.id,
+    }
+    notification_payload = {
+        "case_id": facility.case_id,
+        "counterparty_id": facility.counterparty_id,
+        "recipient_role": recipient_role,
+        "recipient_subject": None,
+        "category": "task_assignment",
+        "level": "supervisor_reminder",
+        "severity": "critical" if condition.escalation_level >= 2 else "warning",
+        "title": "贷后控制条件角色催办" if task_type == "facility_control" else "控制条件延期审批催办",
+        "message": f"{facility.counterparty_name} 的{subject}需要尽快处理。运营催办原因：{reason}",
+        "action_json": action,
+        "dedup_key": f"{dedup_prefix}{now.isoformat()}",
+        "status": "unread",
+    }
+    notifications = NotificationRepository(session)
+    audit = AuditRepository(session)
+    notification, _ = notifications.create_if_absent(notification_payload)
+    audit.append(
+        "facility_control_condition",
+        condition.id,
+        "direct_task_supervisor_reminded",
+        principal.name,
+        {
+            "task_type": task_type,
+            "task_id": task_id,
+            "extension_id": extension_id,
+            "reason": reason,
+            "recipient_role": recipient_role,
+            "notification_id": notification["id"],
+            "record_version": record_version,
+            "supervisor_subject": principal.subject,
+            "supervisor_roles": list(principal.roles),
         },
     )
     session.commit()

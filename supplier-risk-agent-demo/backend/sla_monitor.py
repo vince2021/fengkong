@@ -8,7 +8,15 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from backend.credit_authority import authority_has_signer, authority_owner_roles
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, DocumentCorrectionRecord, NotificationRecord
+from backend.db_models import (
+    ApprovalCaseRecord,
+    AuditEventRecord,
+    CreditFacilityRecord,
+    DocumentCorrectionRecord,
+    FacilityControlConditionRecord,
+    FacilityControlExtensionRecord,
+    NotificationRecord,
+)
 from backend.document_correction_sla import ACTIVE_CORRECTION_STATUSES, correction_sla_snapshot
 from backend.repository import AuditRepository, NotificationRepository
 from backend.security import APPROVAL_STAGE_ROLES
@@ -419,6 +427,8 @@ def build_personal_task_queue(
                 "assignment_expired": expired_assignment,
                 "assignment_state": "assigned_other" if active_assignment and case.assigned_to != actor_subject else "mine" if active_assignment else "unassigned",
                 "can_release": bool(active_assignment and (case.assigned_to == actor_subject or is_admin)),
+                "claimable": True,
+                "reminder_role": None,
                 "row_version": case.row_version,
                 "action": {
                     "page": "approvals",
@@ -466,6 +476,8 @@ def build_personal_task_queue(
                 "assignment_expired": expired_assignment,
                 "assignment_state": "assigned_other" if active_assignment and correction.assigned_to != actor_subject else "mine" if active_assignment else "unassigned",
                 "can_release": bool(active_assignment and (correction.assigned_to == actor_subject or is_admin)),
+                "claimable": True,
+                "reminder_role": None,
                 "row_version": correction.row_version,
                 "action": {
                     "page": "documents",
@@ -475,6 +487,16 @@ def build_personal_task_queue(
                 },
             }
         )
+
+    _append_facility_control_tasks(
+        session,
+        tasks,
+        queue_time,
+        role_set,
+        is_admin,
+        actor_subject,
+        counterparty_id,
+    )
 
     priority = {"escalated": 0, "overdue": 1, "due_soon": 2, "normal": 3}
     tasks.sort(
@@ -496,6 +518,9 @@ def build_personal_task_queue(
             "truncated": len(returned_tasks) < len(tasks),
             "approval": counts["approval"],
             "correction": counts["correction"],
+            "facility_control": counts["facility_control"],
+            "control_extension": counts["control_extension"],
+            "post_credit": counts["facility_control"] + counts["control_extension"],
             "due_soon": risk_counts["due_soon"],
             "overdue": risk_counts["overdue"],
             "escalated": risk_counts["escalated"],
@@ -522,23 +547,25 @@ def build_team_task_board(
     role_load: dict[str, Counter[str]] = {}
     assignee_load: dict[tuple[str | None, str], Counter[str]] = {}
     for task in tasks:
+        is_direct = not task["claimable"]
         is_claimed = task["assignment_state"] == "assigned_other"
         is_risk = task["sla_status"] != "normal"
         for role in task["owner_roles"]:
             counters = role_load.setdefault(role, Counter())
             counters["total"] += 1
-            counters["claimed" if is_claimed else "unassigned"] += 1
+            counters["direct" if is_direct else "claimed" if is_claimed else "unassigned"] += 1
             if is_risk:
                 counters["risk"] += 1
         assignee_key = (
-            task["assigned_to"] if is_claimed else None,
-            task["assigned_to_name"] if is_claimed else "未认领",
+            task["assigned_to"] if is_claimed else "__direct__" if is_direct else None,
+            task["assigned_to_name"] if is_claimed else "系统直派" if is_direct else "未认领",
         )
         assignee_counters = assignee_load.setdefault(assignee_key, Counter())
         assignee_counters["total"] += 1
         assignee_counters["risk"] += int(is_risk)
         task["can_release"] = False
         task["can_force_release"] = bool(can_manage and is_claimed)
+        task["can_remind"] = bool(can_manage and (is_claimed or is_direct))
 
     returned_tasks = tasks[:limit]
     return {
@@ -548,7 +575,8 @@ def build_team_task_board(
             "returned": len(returned_tasks),
             "truncated": len(returned_tasks) < len(tasks),
             "claimed": sum(task["assignment_state"] == "assigned_other" for task in tasks),
-            "unassigned": sum(task["assignment_state"] == "unassigned" for task in tasks),
+            "unassigned": sum(task["claimable"] and task["assignment_state"] == "unassigned" for task in tasks),
+            "direct": sum(not task["claimable"] for task in tasks),
             "expired": sum(task["assignment_expired"] for task in tasks),
             "at_risk": sum(task["sla_status"] != "normal" for task in tasks),
         },
@@ -558,6 +586,7 @@ def build_team_task_board(
                 "total": counters["total"],
                 "claimed": counters["claimed"],
                 "unassigned": counters["unassigned"],
+                "direct": counters["direct"],
                 "risk": counters["risk"],
             }
             for role, counters in sorted(role_load.items(), key=lambda item: (-item[1]["total"], item[0]))
@@ -576,6 +605,143 @@ def build_team_task_board(
         ],
         "tasks": returned_tasks,
     }
+
+
+def _append_facility_control_tasks(
+    session: Session,
+    tasks: list[dict],
+    queue_time: datetime,
+    role_set: set[str],
+    is_admin: bool,
+    actor_subject: str | None,
+    counterparty_id: str | None,
+) -> None:
+    condition_statement = (
+        select(FacilityControlConditionRecord, CreditFacilityRecord)
+        .select_from(FacilityControlConditionRecord)
+        .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlConditionRecord.facility_id)
+        .where(FacilityControlConditionRecord.status == "pending")
+    )
+    extension_statement = (
+        select(FacilityControlExtensionRecord, FacilityControlConditionRecord, CreditFacilityRecord)
+        .select_from(FacilityControlExtensionRecord)
+        .join(FacilityControlConditionRecord, FacilityControlConditionRecord.id == FacilityControlExtensionRecord.condition_id)
+        .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlExtensionRecord.facility_id)
+        .where(
+            FacilityControlExtensionRecord.status == "pending",
+            FacilityControlConditionRecord.status == "pending",
+        )
+    )
+    if counterparty_id:
+        condition_statement = condition_statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
+        extension_statement = extension_statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
+
+    for condition, facility in session.execute(condition_statement).all():
+        owner_roles = {condition.owner_role}
+        if condition.escalation_role:
+            owner_roles.add(condition.escalation_role)
+        if not is_admin and not owner_roles.intersection(role_set):
+            continue
+        sla_status, remaining_seconds = _facility_control_sla(condition, queue_time)
+        is_escalation_viewer = condition.owner_role not in role_set and not is_admin
+        tasks.append(
+            {
+                "id": f"facility_control:{condition.id}",
+                "task_type": "facility_control",
+                "title": f"{'升级督办' if is_escalation_viewer else '落实'}贷后控制条件 #{condition.sequence}",
+                "description": condition.measure,
+                "counterparty_id": facility.counterparty_id,
+                "counterparty_name": facility.counterparty_name,
+                "case_id": facility.case_id,
+                "stage": "post_credit_control",
+                "stage_label": "贷后控制",
+                "correction_id": None,
+                "document_type": None,
+                "facility_id": facility.id,
+                "condition_id": condition.id,
+                "extension_id": None,
+                "status": condition.status,
+                "sla_status": sla_status,
+                "due_at": _as_utc(condition.due_at).isoformat(),
+                "remaining_seconds": remaining_seconds,
+                "owner_roles": sorted(owner_roles),
+                "viewer_mode": "owner",
+                "assigned_to": None,
+                "assigned_to_name": None,
+                "assigned_at": None,
+                "assignment_expires_at": None,
+                "lease_remaining_seconds": None,
+                "assignment_expired": False,
+                "assignment_state": "direct",
+                "can_release": False,
+                "claimable": False,
+                "reminder_role": condition.escalation_role or condition.owner_role,
+                "row_version": condition.row_version,
+                "action": {
+                    "page": "facilities",
+                    "case_id": facility.case_id,
+                    "facility_id": facility.id,
+                    "condition_id": condition.id,
+                },
+            }
+        )
+
+    for extension, condition, facility in session.execute(extension_statement).all():
+        if not is_admin and "approver" not in role_set:
+            continue
+        if extension.requested_by == actor_subject:
+            continue
+        sla_status, remaining_seconds = _facility_control_sla(condition, queue_time)
+        tasks.append(
+            {
+                "id": f"control_extension:{extension.id}",
+                "task_type": "control_extension",
+                "title": f"审批控制条件延期 {extension.extension_days} 天",
+                "description": f"申请人：{extension.requested_by_name}；申请理由：{extension.reason}",
+                "counterparty_id": facility.counterparty_id,
+                "counterparty_name": facility.counterparty_name,
+                "case_id": facility.case_id,
+                "stage": "control_extension_review",
+                "stage_label": "延期审批",
+                "correction_id": None,
+                "document_type": None,
+                "facility_id": facility.id,
+                "condition_id": condition.id,
+                "extension_id": extension.id,
+                "status": extension.status,
+                "sla_status": sla_status,
+                "due_at": _as_utc(condition.due_at).isoformat(),
+                "remaining_seconds": remaining_seconds,
+                "owner_roles": ["approver"],
+                "viewer_mode": "owner",
+                "assigned_to": None,
+                "assigned_to_name": None,
+                "assigned_at": None,
+                "assignment_expires_at": None,
+                "lease_remaining_seconds": None,
+                "assignment_expired": False,
+                "assignment_state": "direct",
+                "can_release": False,
+                "claimable": False,
+                "reminder_role": "approver",
+                "row_version": extension.row_version,
+                "action": {
+                    "page": "facilities",
+                    "case_id": facility.case_id,
+                    "facility_id": facility.id,
+                    "condition_id": condition.id,
+                },
+            }
+        )
+
+
+def _facility_control_sla(condition: FacilityControlConditionRecord, now: datetime) -> tuple[str, int]:
+    remaining_seconds = int((_as_utc(condition.due_at) - now).total_seconds())
+    if remaining_seconds < 0:
+        return ("escalated" if condition.escalation_level >= 2 else "overdue"), remaining_seconds
+    if remaining_seconds <= 3 * 86400:
+        return "due_soon", remaining_seconds
+    return "normal", remaining_seconds
 
 
 def _sla_level(case: ApprovalCaseRecord, now: datetime) -> str | None:

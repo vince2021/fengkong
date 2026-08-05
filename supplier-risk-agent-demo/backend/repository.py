@@ -8,12 +8,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord
 from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
 from backend.security import APPROVAL_STAGE_ROLES
@@ -1252,13 +1252,23 @@ class ApprovalCaseRepository:
         previous_stage = record.current_stage if record else None
         previous_status = record.status if record else None
         if record is None:
-            record = ApprovalCaseRecord(case_id=case["case_id"], counterparty_id=case["counterparty_id"], counterparty_name=case["counterparty_name"], current_stage=case["current_stage"], status=case["status"])
+            record = ApprovalCaseRecord(
+                case_id=case["case_id"],
+                counterparty_id=case["counterparty_id"],
+                counterparty_name=case["counterparty_name"],
+                application_type=case.get("application_type", "new_credit"),
+                source_facility_id=case.get("source_facility_id"),
+                current_stage=case["current_stage"],
+                status=case["status"],
+            )
             self.session.add(record)
         elif expected_row_version is not None and record.row_version != expected_row_version:
             raise ConcurrentUpdateError(f"审批记录版本已变化，当前版本为 {record.row_version}")
         try:
             record.current_stage = case["current_stage"]
             record.status = case["status"]
+            record.application_type = case.get("application_type", record.application_type or "new_credit")
+            record.source_facility_id = case.get("source_facility_id", record.source_facility_id)
             record.completed_stages = deepcopy(case["completed_stages"])
             record.case_data = deepcopy(case["data"])
             record.timeline = deepcopy(case["timeline"])
@@ -1297,6 +1307,17 @@ class ApprovalCaseRepository:
             statement = statement.where(ApprovalCaseRecord.counterparty_id == counterparty_id)
         rows = self.session.scalars(statement).all()
         return [_case_to_dict(row) for row in rows]
+
+    def latest_renewal(self, source_facility_id: str, active_only: bool = False) -> dict | None:
+        statement = (
+            select(ApprovalCaseRecord)
+            .where(ApprovalCaseRecord.source_facility_id == source_facility_id)
+            .order_by(ApprovalCaseRecord.created_at.desc(), ApprovalCaseRecord.case_id.desc())
+        )
+        if active_only:
+            statement = statement.where(ApprovalCaseRecord.status.in_(["处理中", "待补件"]))
+        record = self.session.scalars(statement).first()
+        return _case_to_dict(record) if record else None
 
 
 class DecisionGovernanceRepository:
@@ -1641,6 +1662,77 @@ class DocumentRepository:
             statement = statement.where(DocumentRecord.case_id == case_id)
         return [_document_to_dict(row) for row in self.session.scalars(statement).all()]
 
+    def carry_over(self, metadata_rows: list[dict], actor_name: str) -> dict:
+        if not metadata_rows:
+            return {"documents": [], "created_ids": [], "idempotent": True}
+        case_id = metadata_rows[0]["case_id"]
+        source_ids = [row["source_document_id"] for row in metadata_rows]
+        existing_rows = self.session.scalars(
+            select(DocumentRecord).where(
+                DocumentRecord.case_id == case_id,
+                DocumentRecord.source_document_id.in_(source_ids),
+            )
+        ).all()
+        existing_by_source = {row.source_document_id: row for row in existing_rows}
+        created_ids: list[str] = []
+        result_records = list(existing_rows)
+        try:
+            for input_row in metadata_rows:
+                source_id = input_row["source_document_id"]
+                if source_id in existing_by_source:
+                    continue
+                metadata = deepcopy(input_row)
+                source_row_version = metadata.pop("source_row_version")
+                source = self.session.get(DocumentRecord, source_id)
+                if not source:
+                    raise LookupError("待承接的来源资料不存在")
+                if source.row_version != source_row_version or source.review_status != "verified":
+                    raise ConcurrentUpdateError(f"{source.document_type} 的核验状态已变化，请刷新后重试")
+                if source.counterparty_id != metadata["counterparty_id"]:
+                    raise ValueError("来源资料与续授信企业不一致")
+                record = DocumentRecord(**metadata)
+                self.session.add(record)
+                self.session.flush()
+                created_ids.append(record.id)
+                result_records.append(record)
+                self.audit.append(
+                    "document",
+                    record.id,
+                    "renewal_document_carried_over",
+                    actor_name,
+                    {
+                        "case_id": record.case_id,
+                        "source_document_id": source.id,
+                        "source_case_id": source.case_id,
+                        "document_type": record.document_type,
+                        "sha256": record.sha256,
+                    },
+                )
+                self.audit.append(
+                    "document",
+                    source.id,
+                    "document_reused_for_renewal",
+                    actor_name,
+                    {"target_document_id": record.id, "target_case_id": record.case_id},
+                )
+            self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raced = self.session.scalars(
+                select(DocumentRecord).where(
+                    DocumentRecord.case_id == case_id,
+                    DocumentRecord.source_document_id.in_(source_ids),
+                )
+            ).all()
+            if len(raced) == len(set(source_ids)):
+                return {"documents": [_document_to_dict(row) for row in raced], "created_ids": [], "idempotent": True}
+            raise ConcurrentUpdateError("续授信资料承接发生并发冲突，请刷新后重试") from exc
+        return {
+            "documents": [_document_to_dict(row) for row in result_records],
+            "created_ids": created_ids,
+            "idempotent": not created_ids,
+        }
+
     def get_correction(self, correction_id: str) -> dict | None:
         record = self.session.get(DocumentCorrectionRecord, correction_id)
         return _document_correction_to_dict(record) if record else None
@@ -1926,6 +2018,8 @@ class DocumentRepository:
             raise LookupError("资料不存在")
         if record.row_version != expected_row_version:
             raise ConcurrentUpdateError("资料检查状态已更新，请刷新后重试")
+        if record.source_document_id:
+            raise ValueError("历史承接资料沿用原核验结论，不能直接改写；如需更新请上传本次新版本")
         if record.uploaded_by == actor_subject:
             raise PermissionError("资料上传人与检查人必须分离")
         active_correction = self.session.scalars(
@@ -2303,6 +2397,8 @@ class NotificationRepository:
 
 class CreditFacilityRepository:
     REVIEW_INTERVAL_DAYS = {"实时监控": 1, "月度": 30, "季度": 90, "半年": 180, "年度": 365}
+    MAX_CONTROL_EXTENSION_COUNT = 2
+    MAX_CONTROL_EXTENSION_TOTAL_DAYS = 60
 
     def __init__(self, session: Session) -> None:
         self.session = session
@@ -2324,7 +2420,7 @@ class CreditFacilityRepository:
             return None
         existing = self.session.scalars(select(CreditFacilityRecord).where(CreditFacilityRecord.case_id == case["case_id"])).first()
         if existing:
-            return _facility_to_dict(existing)
+            return self._with_control_summary(existing)
         proposal = case.get("data", {}).get("credit_proposal", {})
         scoring = case.get("data", {}).get("scoring", {})
         suggested_limit = _money(proposal.get("suggested_limit", 0))
@@ -2337,6 +2433,19 @@ class CreditFacilityRepository:
         validity_days = int(strategy.get("facility_validity_days", 365))
         if validity_days < 30 or validity_days > 1825:
             raise ValueError("授信有效期必须介于 30 至 1825 天")
+        source_facility_id = case.get("source_facility_id")
+        source_facility = self.session.get(CreditFacilityRecord, source_facility_id) if source_facility_id else None
+        opening_balance = Decimal("0.00")
+        if source_facility_id:
+            if not source_facility:
+                raise ValueError("续授信来源台账不存在，不能完成额度承接")
+            if source_facility.counterparty_id != case["counterparty_id"]:
+                raise ValueError("续授信来源台账与审批主体不一致")
+            if source_facility.status == "closed":
+                raise ValueError("续授信来源台账已关闭，不能重复承接")
+            opening_balance = _money(source_facility.used_limit)
+            if approved_limit < opening_balance:
+                raise ValueError(f"最终批准额度不能低于需承接的已用余额 {float(opening_balance):.2f}")
         now = datetime.now(timezone.utc)
         monitoring_frequency = str(strategy.get("monitoring_frequency", "月度"))
         record = CreditFacilityRecord(
@@ -2345,7 +2454,9 @@ class CreditFacilityRepository:
             counterparty_id=case["counterparty_id"],
             counterparty_name=case["counterparty_name"],
             approved_limit=approved_limit,
-            used_limit=Decimal("0.00"),
+            used_limit=opening_balance,
+            opening_balance=opening_balance,
+            supersedes_facility_id=source_facility_id,
             payment_term_days=payment_term_days,
             rating=str(scoring.get("rating", "-")),
             access_strategy=str(strategy.get("access_strategy", proposal.get("access_strategy", "人工复核"))),
@@ -2357,18 +2468,412 @@ class CreditFacilityRepository:
         )
         self.session.add(record)
         self.session.flush()
-        self.audit.append("credit_facility", record.id, "credit_facility_activated", actor, {"case_id": record.case_id, "approved_limit": float(approved_limit), "payment_term_days": payment_term_days, "expires_at": record.expires_at.isoformat(), "rating": record.rating})
-        return _facility_to_dict(record)
+        risk_disposition = strategy.get("renewal_risk_disposition", {})
+        adopted_controls = list(risk_disposition.get("adopted_controls", []))
+        control_due_at = now + timedelta(days=self.REVIEW_INTERVAL_DAYS.get(monitoring_frequency, 30))
+        for sequence, measure in enumerate(adopted_controls, start=1):
+            condition = FacilityControlConditionRecord(
+                id=str(uuid4()),
+                facility_id=record.id,
+                source_case_id=case["case_id"],
+                source_review_hash=str(risk_disposition.get("risk_review_hash") or ""),
+                sequence=sequence,
+                measure=str(measure),
+                owner_role="risk_manager",
+                status="pending",
+                due_at=control_due_at,
+            )
+            self.session.add(condition)
+            self.audit.append(
+                "facility_control_condition",
+                condition.id,
+                "facility_control_condition_created",
+                actor,
+                {
+                    "facility_id": record.id,
+                    "source_case_id": case["case_id"],
+                    "sequence": sequence,
+                    "measure": str(measure),
+                    "due_at": control_due_at.isoformat(),
+                },
+            )
+        if source_facility:
+            source_facility.used_limit = Decimal("0.00")
+            source_facility.status = "closed"
+            self.session.flush()
+            self.audit.append(
+                "credit_facility",
+                source_facility.id,
+                "credit_facility_superseded",
+                actor,
+                {
+                    "successor_facility_id": record.id,
+                    "renewal_case_id": case["case_id"],
+                    "transferred_balance": float(opening_balance),
+                },
+            )
+        self.audit.append(
+            "credit_facility",
+            record.id,
+            "credit_facility_activated",
+            actor,
+            {
+                "case_id": record.case_id,
+                "approved_limit": float(approved_limit),
+                "payment_term_days": payment_term_days,
+                "expires_at": record.expires_at.isoformat(),
+                "rating": record.rating,
+                "supersedes_facility_id": source_facility_id,
+                "opening_balance": float(opening_balance),
+                "control_condition_count": len(adopted_controls),
+            },
+        )
+        return self._with_control_summary(record)
 
     def list(self, counterparty_id: str | None = None) -> list[dict]:
         statement = select(CreditFacilityRecord).order_by(CreditFacilityRecord.created_at.desc(), CreditFacilityRecord.id.desc())
         if counterparty_id:
             statement = statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
-        return [_facility_to_dict(record) for record in self.session.scalars(statement).all()]
+        records = list(self.session.scalars(statement).all())
+        controls_by_facility: dict[str, list[FacilityControlConditionRecord]] = {record.id: [] for record in records}
+        if records:
+            controls = self.session.scalars(
+                select(FacilityControlConditionRecord).where(
+                    FacilityControlConditionRecord.facility_id.in_(controls_by_facility)
+                )
+            ).all()
+            for control in controls:
+                controls_by_facility[control.facility_id].append(control)
+        return [self._with_control_summary(record, controls_by_facility[record.id]) for record in records]
 
     def get(self, facility_id: str) -> dict | None:
         record = self.session.get(CreditFacilityRecord, facility_id)
-        return _facility_to_dict(record) if record else None
+        return self._with_control_summary(record) if record else None
+
+    def list_control_conditions(self, facility_id: str) -> list[dict]:
+        statement = (
+            select(FacilityControlConditionRecord)
+            .where(FacilityControlConditionRecord.facility_id == facility_id)
+            .order_by(FacilityControlConditionRecord.sequence, FacilityControlConditionRecord.created_at)
+        )
+        conditions = list(self.session.scalars(statement).all())
+        extensions_by_condition: dict[str, list[FacilityControlExtensionRecord]] = {condition.id: [] for condition in conditions}
+        if conditions:
+            extensions = self.session.scalars(
+                select(FacilityControlExtensionRecord)
+                .where(FacilityControlExtensionRecord.condition_id.in_(extensions_by_condition))
+                .order_by(FacilityControlExtensionRecord.requested_at.desc(), FacilityControlExtensionRecord.id.desc())
+            ).all()
+            for extension in extensions:
+                extensions_by_condition[extension.condition_id].append(extension)
+        return [_facility_control_condition_to_dict(record, extensions_by_condition[record.id]) for record in conditions]
+
+    def request_control_extension(
+        self,
+        facility_id: str,
+        condition_id: str,
+        expected_condition_version: int,
+        extension_days: int,
+        reason: str,
+        actor_subject: str,
+        actor_name: str,
+    ) -> dict:
+        condition = self.session.get(FacilityControlConditionRecord, condition_id)
+        if not condition or condition.facility_id != facility_id:
+            raise LookupError("授信控制条件不存在")
+        if condition.row_version != expected_condition_version:
+            raise ConcurrentUpdateError(f"控制条件版本已变化，当前版本为 {condition.row_version}")
+        if condition.status != "pending":
+            raise ValueError("只有待落实的控制条件可以申请延期")
+        history = list(
+            self.session.scalars(
+                select(FacilityControlExtensionRecord).where(FacilityControlExtensionRecord.condition_id == condition_id)
+            ).all()
+        )
+        if any(item.status == "pending" for item in history):
+            raise ValueError("该控制条件已有待审批延期申请")
+        approved = [item for item in history if item.status == "approved"]
+        if len(approved) >= self.MAX_CONTROL_EXTENSION_COUNT:
+            raise ValueError(f"单项控制条件最多允许延期 {self.MAX_CONTROL_EXTENSION_COUNT} 次")
+        approved_days = sum(item.extension_days for item in approved)
+        if approved_days + extension_days > self.MAX_CONTROL_EXTENSION_TOTAL_DAYS:
+            raise ValueError(f"单项控制条件累计延期不能超过 {self.MAX_CONTROL_EXTENSION_TOTAL_DAYS} 天")
+        now = datetime.now(timezone.utc)
+        previous_due_at = _as_utc(condition.due_at)
+        proposed_due_at = previous_due_at + timedelta(days=extension_days)
+        if proposed_due_at <= now:
+            raise ValueError("延期后的截止时间必须晚于当前时间，请增加延期天数或立即完成控制条件")
+        extension = FacilityControlExtensionRecord(
+            id=str(uuid4()),
+            condition_id=condition.id,
+            facility_id=facility_id,
+            extension_days=extension_days,
+            previous_due_at=previous_due_at,
+            proposed_due_at=proposed_due_at,
+            reason=reason,
+            status="pending",
+            requested_by=actor_subject,
+            requested_by_name=actor_name,
+            requested_at=now,
+        )
+        self.session.add(extension)
+        try:
+            self.session.flush()
+        except IntegrityError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("该控制条件已有并发提交的延期申请，请刷新后重试") from exc
+        facility = self.session.get(CreditFacilityRecord, facility_id)
+        if not facility:
+            raise LookupError("授信台账不存在")
+        NotificationRepository(self.session).create_if_absent(
+            {
+                "case_id": facility.case_id,
+                "counterparty_id": facility.counterparty_id,
+                "recipient_role": "approver",
+                "category": "facility_control",
+                "level": "extension",
+                "severity": "warning",
+                "title": "控制条件延期申请待审批",
+                "message": f"{facility.counterparty_name} 的控制条件申请延期 {extension_days} 天，请独立复核业务依据。",
+                "action_json": {"page": "facilities", "case_id": facility.case_id, "facility_id": facility.id, "condition_id": condition.id},
+                "dedup_key": f"control-extension-request:{extension.id}:approver",
+                "status": "unread",
+            }
+        )
+        self.audit.append(
+            "facility_control_condition",
+            condition.id,
+            "facility_control_extension_requested",
+            actor_name,
+            {
+                "extension_id": extension.id,
+                "extension_days": extension_days,
+                "previous_due_at": previous_due_at.isoformat(),
+                "proposed_due_at": proposed_due_at.isoformat(),
+                "reason": reason,
+            },
+        )
+        try:
+            self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("延期申请发生并发冲突，请刷新后重试") from exc
+        self.session.refresh(extension)
+        return _facility_control_extension_to_dict(extension)
+
+    def review_control_extension(
+        self,
+        facility_id: str,
+        condition_id: str,
+        extension_id: str,
+        expected_extension_version: int,
+        expected_condition_version: int,
+        decision: str,
+        comment: str,
+        actor_subject: str,
+        actor_name: str,
+    ) -> dict:
+        extension = self.session.get(FacilityControlExtensionRecord, extension_id)
+        condition = self.session.get(FacilityControlConditionRecord, condition_id)
+        if not extension or extension.condition_id != condition_id or extension.facility_id != facility_id:
+            raise LookupError("控制条件延期申请不存在")
+        if not condition or condition.facility_id != facility_id:
+            raise LookupError("授信控制条件不存在")
+        if extension.row_version != expected_extension_version:
+            raise ConcurrentUpdateError(f"延期申请版本已变化，当前版本为 {extension.row_version}")
+        if condition.row_version != expected_condition_version:
+            raise ConcurrentUpdateError(f"控制条件版本已变化，当前版本为 {condition.row_version}")
+        if extension.status != "pending":
+            raise ValueError("延期申请已经完成审批")
+        if extension.requested_by == actor_subject:
+            raise ValueError("延期申请人与审批人必须分离")
+        if condition.status != "pending":
+            raise ValueError("控制条件已完成，不能继续审批延期")
+        now = datetime.now(timezone.utc)
+        extension.status = "approved" if decision == "approve" else "rejected"
+        extension.reviewed_by = actor_subject
+        extension.reviewed_by_name = actor_name
+        extension.reviewed_at = now
+        extension.review_comment = comment
+        alert = self.session.get(FacilityAlertRecord, condition.linked_alert_id) if condition.linked_alert_id else None
+        if decision == "approve":
+            if _as_utc(condition.due_at) != _as_utc(extension.previous_due_at):
+                raise ConcurrentUpdateError("控制条件截止时间已变化，请重新提交延期申请")
+            if _as_utc(extension.proposed_due_at) <= now:
+                raise ValueError("申请的新截止时间已经过期，不能批准")
+            condition.due_at = extension.proposed_due_at
+            condition.escalation_level = 0
+            condition.escalation_role = None
+            condition.escalated_at = None
+            if alert and alert.status != "resolved":
+                alert.status = "resolved"
+                alert.disposition_action = "extension_approved"
+                alert.disposition_note = f"延期申请已批准，新截止时间 {extension.proposed_due_at.isoformat()}"
+                alert.resolved_at = now
+                alert.resolved_by = actor_name
+        try:
+            self.session.flush()
+        except StaleDataError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("延期审批状态已被其他人员更新，请刷新后重试") from exc
+        facility = self.session.get(CreditFacilityRecord, facility_id)
+        if not facility:
+            raise LookupError("授信台账不存在")
+        NotificationRepository(self.session).create_if_absent(
+            {
+                "case_id": facility.case_id,
+                "counterparty_id": facility.counterparty_id,
+                "recipient_role": "personal",
+                "recipient_subject": extension.requested_by,
+                "category": "facility_control",
+                "level": "extension",
+                "severity": "info" if decision == "approve" else "warning",
+                "title": "控制条件延期已批准" if decision == "approve" else "控制条件延期被驳回",
+                "message": f"控制条件延期申请已{'批准' if decision == 'approve' else '驳回'}。审批意见：{comment}",
+                "action_json": {"page": "facilities", "case_id": facility.case_id, "facility_id": facility.id, "condition_id": condition.id},
+                "dedup_key": f"control-extension-review:{extension.id}:{decision}:{extension.requested_by}",
+                "status": "unread",
+            }
+        )
+        self.audit.append(
+            "facility_control_condition",
+            condition.id,
+            "facility_control_extension_approved" if decision == "approve" else "facility_control_extension_rejected",
+            actor_name,
+            {
+                "extension_id": extension.id,
+                "extension_days": extension.extension_days,
+                "new_due_at": extension.proposed_due_at.isoformat() if decision == "approve" else None,
+                "comment": comment,
+                "requested_by": extension.requested_by,
+            },
+        )
+        try:
+            self.session.commit()
+        except StaleDataError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("延期审批发生并发冲突，请刷新后重试") from exc
+        return {
+            "extension": _facility_control_extension_to_dict(extension),
+            "condition": _facility_control_condition_to_dict(
+                condition,
+                list(
+                    self.session.scalars(
+                        select(FacilityControlExtensionRecord)
+                        .where(FacilityControlExtensionRecord.condition_id == condition.id)
+                        .order_by(FacilityControlExtensionRecord.requested_at.desc(), FacilityControlExtensionRecord.id.desc())
+                    ).all()
+                ),
+            ),
+        }
+
+    def complete_control_condition(self, facility_id: str, condition_id: str, expected_row_version: int, actor: str, conclusion: str) -> dict:
+        condition = self.session.get(FacilityControlConditionRecord, condition_id)
+        if not condition or condition.facility_id != facility_id:
+            raise LookupError("授信控制条件不存在")
+        if condition.row_version != expected_row_version:
+            raise ConcurrentUpdateError(f"控制条件版本已变化，当前版本为 {condition.row_version}")
+        if condition.status == "completed":
+            raise ValueError("该控制条件已经完成")
+        condition.status = "completed"
+        condition.completion_note = conclusion
+        condition.completed_by = actor
+        condition.completed_at = datetime.now(timezone.utc)
+        with self.session.no_autoflush:
+            pending_extensions = list(
+                self.session.scalars(
+                    select(FacilityControlExtensionRecord).where(
+                        FacilityControlExtensionRecord.condition_id == condition.id,
+                        FacilityControlExtensionRecord.status == "pending",
+                    )
+                ).all()
+            )
+        for extension in pending_extensions:
+            extension.status = "cancelled"
+            extension.reviewed_by_name = actor
+            extension.reviewed_at = condition.completed_at
+            extension.review_comment = "控制条件已完成，延期申请自动取消"
+        try:
+            self.session.flush()
+        except StaleDataError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("控制条件或延期申请已被其他人员更新，请刷新后重试") from exc
+        for extension in pending_extensions:
+            pending_notice = self.session.scalars(
+                select(NotificationRecord).where(
+                    NotificationRecord.dedup_key == f"control-extension-request:{extension.id}:approver"
+                )
+            ).first()
+            if pending_notice and pending_notice.status == "unread":
+                pending_notice.status = "read"
+                pending_notice.read_at = condition.completed_at
+        if pending_extensions:
+            facility = self.session.get(CreditFacilityRecord, facility_id)
+            if facility:
+                NotificationRepository(self.session).create_if_absent(
+                    {
+                        "case_id": facility.case_id,
+                        "counterparty_id": facility.counterparty_id,
+                        "recipient_role": "approver",
+                        "category": "facility_control",
+                        "level": "completed",
+                        "severity": "info",
+                        "title": "控制条件延期申请已自动取消",
+                        "message": f"{facility.counterparty_name} 的控制条件已提前完成，关联延期申请无需继续审批。",
+                        "action_json": {"page": "facilities", "case_id": facility.case_id, "facility_id": facility.id, "condition_id": condition.id},
+                        "dedup_key": f"control-extension-cancelled:{condition.id}:{condition.completed_at.isoformat()}:approver",
+                        "status": "unread",
+                    }
+                )
+        if condition.linked_alert_id:
+            alert = self.session.get(FacilityAlertRecord, condition.linked_alert_id)
+            if alert and alert.status != "resolved":
+                alert.status = "resolved"
+                alert.disposition_action = "condition_completed"
+                alert.disposition_note = f"控制条件已由 {actor} 完成：{conclusion}"
+                alert.resolved_at = condition.completed_at
+                alert.resolved_by = actor
+        self.audit.append(
+            "facility_control_condition",
+            condition.id,
+            "facility_control_condition_completed",
+            actor,
+            {
+                "facility_id": facility_id,
+                "source_case_id": condition.source_case_id,
+                "measure": condition.measure,
+                "conclusion": conclusion,
+                "escalation_level": condition.escalation_level,
+                "linked_alert_id": condition.linked_alert_id,
+                "cancelled_extension_ids": [item.id for item in pending_extensions],
+            },
+        )
+        try:
+            self.session.commit()
+        except StaleDataError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("控制条件已被其他人员更新，请刷新后重试") from exc
+        self.session.refresh(condition)
+        return _facility_control_condition_to_dict(condition)
+
+    def _with_control_summary(
+        self,
+        record: CreditFacilityRecord,
+        controls: list[FacilityControlConditionRecord] | None = None,
+    ) -> dict:
+        if controls is None:
+            controls = list(
+                self.session.scalars(
+                    select(FacilityControlConditionRecord).where(FacilityControlConditionRecord.facility_id == record.id)
+                ).all()
+            )
+        return {
+            **_facility_to_dict(record),
+            "control_condition_count": len(controls),
+            "pending_control_count": sum(item.status == "pending" for item in controls),
+            "overdue_control_count": sum(_control_condition_sla(item)["sla_status"] == "overdue" for item in controls),
+            "critical_control_count": sum(item.status == "pending" and item.escalation_level >= 2 for item in controls),
+        }
 
     def list_transactions(self, facility_id: str) -> list[dict]:
         statement = select(CreditUsageRecord).where(CreditUsageRecord.facility_id == facility_id).order_by(CreditUsageRecord.occurred_at.desc(), CreditUsageRecord.id.desc())
@@ -2478,7 +2983,7 @@ class CreditFacilityRepository:
             raise ConcurrentUpdateError("额度交易发生并发冲突，请刷新后重试") from exc
         self.session.refresh(facility)
         self.session.refresh(transaction)
-        return {"facility": _facility_to_dict(facility), "transaction": _usage_to_dict(transaction), "idempotent": False}
+        return {"facility": self._with_control_summary(facility), "transaction": _usage_to_dict(transaction), "idempotent": False}
 
     def review(self, facility_id: str, expected_row_version: int, rating: str, next_review_days: int, actor: str, conclusion: str) -> dict:
         facility = self.session.get(CreditFacilityRecord, facility_id)
@@ -2500,7 +3005,7 @@ class CreditFacilityRepository:
             self.session.rollback()
             raise ConcurrentUpdateError("贷后复评发生并发冲突，请刷新后重试") from exc
         self.session.refresh(facility)
-        return _facility_to_dict(facility)
+        return self._with_control_summary(facility)
 
     def control(self, facility_id: str, expected_row_version: int, action: str, target_limit: float | None, actor: str, reason: str) -> dict:
         facility = self.session.get(CreditFacilityRecord, facility_id)
@@ -2515,7 +3020,7 @@ class CreditFacilityRepository:
             self.session.rollback()
             raise ConcurrentUpdateError("授信控制发生并发冲突，请刷新后重试") from exc
         self.session.refresh(facility)
-        return _facility_to_dict(facility)
+        return self._with_control_summary(facility)
 
     def dispose_alert(self, alert_id: str, expected_alert_version: int, expected_facility_version: int, action: str, target_limit: float | None, actor: str, conclusion: str) -> dict:
         alert = self.session.get(FacilityAlertRecord, alert_id)
@@ -2525,6 +3030,11 @@ class CreditFacilityRepository:
             raise ConcurrentUpdateError(f"预警版本已变化，当前版本为 {alert.row_version}")
         if alert.status == "resolved":
             raise ValueError("贷后预警已经闭环")
+        if alert.alert_type == "control_condition_overdue":
+            condition_id = alert.dedup_key.removeprefix("control-condition:")
+            pending_condition = self.session.get(FacilityControlConditionRecord, condition_id)
+            if pending_condition and pending_condition.status == "pending":
+                raise ValueError("控制条件逾期预警不能独立关闭，请先在执行台账完成对应控制条件")
         facility = self.session.get(CreditFacilityRecord, alert.facility_id)
         if not facility:
             raise LookupError("授信台账不存在")
@@ -2550,7 +3060,7 @@ class CreditFacilityRepository:
             raise ConcurrentUpdateError("预警处置发生并发冲突，请刷新后重试") from exc
         self.session.refresh(alert)
         self.session.refresh(facility)
-        return {"alert": _alert_to_dict(alert), "facility": _facility_to_dict(facility)}
+        return {"alert": _alert_to_dict(alert), "facility": self._with_control_summary(facility)}
 
     def scan(self, actor: str, now: datetime | None = None) -> dict:
         scan_time = _as_utc(now or datetime.now(timezone.utc))
@@ -2571,15 +3081,114 @@ class CreditFacilityRepository:
             utilization = facility.used_limit / facility.approved_limit if facility.approved_limit else 0
             if utilization >= Decimal("0.90"):
                 opened += int(self._ensure_alert(facility, "high_utilization", "critical", "额度使用率过高", f"额度使用率已达到 {utilization:.1%}。", f"utilization:{facility.id}:90"))
-        self.audit.append("post_credit_scan", str(uuid4()), "post_credit_scan_completed", actor, {"run_at": scan_time.isoformat(), "active_facilities_scanned": len(facilities), "facilities_expired": expired, "alerts_opened": opened})
+        overdue_conditions = list(
+            self.session.scalars(
+                select(FacilityControlConditionRecord).where(
+                    FacilityControlConditionRecord.status == "pending",
+                    FacilityControlConditionRecord.due_at <= scan_time,
+                )
+            ).all()
+        )
+        condition_alerts_opened = 0
+        conditions_escalated = 0
+        condition_notifications_created = 0
+        facility_cache = {facility.id: facility for facility in facilities}
+        notifications = NotificationRepository(self.session)
+        for condition in overdue_conditions:
+            due_at = _as_utc(condition.due_at)
+            overdue_days = max(1, int((scan_time - due_at).total_seconds() // 86400) + 1)
+            level, escalation_role = _control_condition_escalation(overdue_days)
+            facility = facility_cache.get(condition.facility_id) or self.session.get(CreditFacilityRecord, condition.facility_id)
+            if not facility:
+                continue
+            if condition.escalation_level < level:
+                condition.escalation_level = level
+                condition.escalation_role = escalation_role
+                condition.escalated_at = scan_time
+                conditions_escalated += 1
+                self.audit.append(
+                    "facility_control_condition",
+                    condition.id,
+                    "facility_control_condition_escalated",
+                    actor,
+                    {
+                        "facility_id": condition.facility_id,
+                        "overdue_days": overdue_days,
+                        "escalation_level": level,
+                        "escalation_role": escalation_role,
+                    },
+                )
+                _, created = notifications.create_if_absent(
+                    {
+                        "case_id": facility.case_id,
+                        "counterparty_id": facility.counterparty_id,
+                        "recipient_role": escalation_role,
+                        "category": "facility_control",
+                        "level": "escalated" if level >= 2 else "overdue",
+                        "severity": "critical" if level >= 2 else "warning",
+                        "title": "审批控制条件升级督办" if level >= 2 else "审批控制条件已逾期",
+                        "message": f"{facility.counterparty_name} 的控制条件“{condition.measure}”已逾期 {overdue_days} 天，请按当前升级责任及时督办。",
+                        "action_json": {
+                            "page": "facilities",
+                            "case_id": facility.case_id,
+                            "facility_id": facility.id,
+                            "condition_id": condition.id,
+                        },
+                        "dedup_key": f"control-condition-sla:{condition.id}:L{level}:{escalation_role}",
+                        "status": "unread",
+                    }
+                )
+                condition_notifications_created += int(created)
+            condition_alerts_opened += int(
+                self._ensure_control_condition_alert(facility, condition, overdue_days, level, escalation_role)
+            )
+        opened += condition_alerts_opened
+        scan_result = {
+            "run_at": scan_time.isoformat(),
+            "active_facilities_scanned": len(facilities),
+            "facilities_expired": expired,
+            "alerts_opened": opened,
+            "control_conditions_scanned": len(overdue_conditions),
+            "control_alerts_opened": condition_alerts_opened,
+            "control_conditions_escalated": conditions_escalated,
+            "control_notifications_created": condition_notifications_created,
+        }
+        self.audit.append("post_credit_scan", str(uuid4()), "post_credit_scan_completed", actor, scan_result)
         self.session.commit()
-        return {"run_at": scan_time.isoformat(), "active_facilities_scanned": len(facilities), "facilities_expired": expired, "alerts_opened": opened}
+        return scan_result
 
-    def list_alerts(self, counterparty_id: str | None = None) -> list[dict]:
+    def list_alerts(self, counterparty_id: str | None = None, facility_id: str | None = None) -> list[dict]:
         statement = select(FacilityAlertRecord, CreditFacilityRecord).join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityAlertRecord.facility_id).order_by(FacilityAlertRecord.created_at.desc(), FacilityAlertRecord.id.desc())
         if counterparty_id:
             statement = statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
+        if facility_id:
+            statement = statement.where(FacilityAlertRecord.facility_id == facility_id)
         return [{**_alert_to_dict(alert), "counterparty_id": facility.counterparty_id, "counterparty_name": facility.counterparty_name} for alert, facility in self.session.execute(statement).all()]
+
+    def risk_snapshot(self, facility_id: str) -> dict:
+        """Return the current unresolved risk state used by renewal review gates."""
+        unresolved_alerts = [item for item in self.list_alerts(facility_id=facility_id) if item["status"] != "resolved"]
+        active_events = [item for item in self.list_risk_events(facility_id=facility_id) if item["status"] == "active"]
+        # list_alerts already returns newest first; Python's stable sort only promotes
+        # critical items and preserves recency within each severity group.
+        unresolved_alerts.sort(key=lambda item: item["severity"] != "critical")
+        return {
+            "capture_status": "captured",
+            "unresolved_alert_count": len(unresolved_alerts),
+            "critical_alert_count": sum(item["severity"] == "critical" for item in unresolved_alerts),
+            "active_risk_event_count": len(active_events),
+            "critical_risk_event_count": sum(item["severity"] == "critical" for item in active_events),
+            "signals": [
+                {
+                    "alert_type": item["alert_type"],
+                    "severity": item["severity"],
+                    "title": item["title"],
+                    "message": item["message"],
+                    "created_at": item["created_at"],
+                }
+                for item in unresolved_alerts[:5]
+            ],
+        }
 
     def acknowledge_alert(self, alert_id: str, actor: str) -> dict | None:
         alert = self.session.get(FacilityAlertRecord, alert_id)
@@ -2608,6 +3217,9 @@ class CreditFacilityRepository:
         if counterparty_id:
             alert_statement = alert_statement.where(FacilityAlertRecord.facility_id.in_(facility_ids))
         unresolved = self.session.scalars(alert_statement).all()
+        control_scope = [FacilityControlConditionRecord.status == "pending"]
+        if counterparty_id:
+            control_scope.append(FacilityControlConditionRecord.facility_id.in_(facility_ids))
         return {
             "total_facilities": len(facilities),
             "active_facilities": sum(item.status == "active" for item in facilities),
@@ -2617,7 +3229,70 @@ class CreditFacilityRepository:
             "high_utilization_facilities": sum(item.status == "active" and item.approved_limit > 0 and item.used_limit / item.approved_limit >= Decimal("0.90") for item in facilities),
             "unresolved_alerts": len(unresolved),
             "critical_alerts": sum(item.severity == "critical" for item in unresolved),
+            "pending_control_conditions": self.session.scalar(
+                select(func.count()).select_from(FacilityControlConditionRecord).where(
+                    *control_scope,
+                )
+            ) if facility_ids or not counterparty_id else 0,
+            "overdue_control_conditions": self.session.scalar(
+                select(func.count()).select_from(FacilityControlConditionRecord).where(
+                    *control_scope,
+                    FacilityControlConditionRecord.due_at <= datetime.now(timezone.utc),
+                )
+            ) if facility_ids or not counterparty_id else 0,
+            "critical_control_conditions": self.session.scalar(
+                select(func.count()).select_from(FacilityControlConditionRecord).where(
+                    *control_scope,
+                    FacilityControlConditionRecord.escalation_level >= 2,
+                )
+            ) if facility_ids or not counterparty_id else 0,
         }
+
+    def _ensure_control_condition_alert(
+        self,
+        facility: CreditFacilityRecord,
+        condition: FacilityControlConditionRecord,
+        overdue_days: int,
+        level: int,
+        escalation_role: str,
+    ) -> bool:
+        dedup_key = f"control-condition:{condition.id}"
+        severity = "critical" if level >= 2 else "warning"
+        role_labels = {"risk_manager": "风控经理", "approver": "授信审批人", "admin": "平台管理员"}
+        title = "审批控制条件严重逾期" if level >= 2 else "审批控制条件逾期"
+        message = f"控制条件“{condition.measure}”已逾期 {overdue_days} 天，执行责任人为风控经理，当前升级督办角色：{role_labels[escalation_role]}。"
+        alert = self.session.scalars(
+            select(FacilityAlertRecord).where(FacilityAlertRecord.dedup_key == dedup_key)
+        ).first()
+        opened = False
+        if not alert:
+            alert = FacilityAlertRecord(
+                id=str(uuid4()),
+                facility_id=facility.id,
+                alert_type="control_condition_overdue",
+                severity=severity,
+                title=title,
+                message=message,
+                dedup_key=dedup_key,
+                status="open",
+            )
+            self.session.add(alert)
+            opened = True
+        else:
+            alert.severity = severity
+            alert.title = title
+            alert.message = message
+            if alert.status == "resolved":
+                alert.status = "open"
+                alert.acknowledged_at = None
+                alert.acknowledged_by = None
+                alert.disposition_action = None
+                alert.disposition_note = None
+                alert.resolved_at = None
+                alert.resolved_by = None
+                opened = True
+        condition.linked_alert_id = alert.id
+        return opened
 
     def _ensure_alert(self, facility: CreditFacilityRecord, alert_type: str, severity: str, title: str, message: str, dedup_key: str) -> bool:
         existing = self.session.scalars(select(FacilityAlertRecord).where(FacilityAlertRecord.dedup_key == dedup_key)).first()
@@ -2691,6 +3366,8 @@ def clear_persistent_data(session: Session) -> None:
     session.execute(delete(ModelOutcomeRecord))
     session.execute(delete(NotificationRecord))
     session.execute(delete(RiskEventRecord))
+    session.execute(delete(FacilityControlExtensionRecord))
+    session.execute(delete(FacilityControlConditionRecord))
     session.execute(delete(FacilityAlertRecord))
     session.execute(delete(CreditUsageRecord))
     session.execute(delete(CreditFacilityRecord))
@@ -2720,6 +3397,8 @@ def _case_to_dict(record: ApprovalCaseRecord) -> dict:
         "case_id": record.case_id,
         "counterparty_id": record.counterparty_id,
         "counterparty_name": record.counterparty_name,
+        "application_type": record.application_type or "new_credit",
+        "source_facility_id": record.source_facility_id,
         "current_stage": record.current_stage,
         "status": record.status,
         "completed_stages": deepcopy(record.completed_stages or []),
@@ -2952,6 +3631,9 @@ def _document_to_dict(record: DocumentRecord) -> dict:
         "reviewed_by": record.reviewed_by,
         "reviewed_by_name": record.reviewed_by_name,
         "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
+        "source_document_id": record.source_document_id,
+        "carried_over_by": record.carried_over_by,
+        "carried_over_at": record.carried_over_at.isoformat() if record.carried_over_at else None,
         "row_version": record.row_version,
         "created_at": record.created_at.isoformat() if record.created_at else None,
     }
@@ -3024,6 +3706,8 @@ def _facility_to_dict(record: CreditFacilityRecord) -> dict:
         "counterparty_name": record.counterparty_name,
         "approved_limit": float(approved),
         "used_limit": float(used),
+        "opening_balance": float(_money(record.opening_balance)),
+        "supersedes_facility_id": record.supersedes_facility_id,
         "available_limit": float(_money(approved - used)),
         "utilization_rate": float(round(used / approved, 4)) if approved else 0,
         "payment_term_days": record.payment_term_days,
@@ -3038,6 +3722,81 @@ def _facility_to_dict(record: CreditFacilityRecord) -> dict:
         "row_version": record.row_version,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
+
+
+def _facility_control_condition_to_dict(
+    record: FacilityControlConditionRecord,
+    extensions: list[FacilityControlExtensionRecord] | None = None,
+) -> dict:
+    return {
+        "id": record.id,
+        "facility_id": record.facility_id,
+        "source_case_id": record.source_case_id,
+        "source_review_hash": record.source_review_hash,
+        "sequence": record.sequence,
+        "measure": record.measure,
+        "owner_role": record.owner_role,
+        "status": record.status,
+        "due_at": record.due_at.isoformat() if record.due_at else None,
+        "escalation_level": record.escalation_level,
+        "escalation_role": record.escalation_role,
+        "escalated_at": record.escalated_at.isoformat() if record.escalated_at else None,
+        "linked_alert_id": record.linked_alert_id,
+        "extension_requests": [_facility_control_extension_to_dict(item) for item in (extensions or [])],
+        **_control_condition_sla(record),
+        "completion_note": record.completion_note,
+        "completed_by": record.completed_by,
+        "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+        "row_version": record.row_version,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
+def _facility_control_extension_to_dict(record: FacilityControlExtensionRecord) -> dict:
+    return {
+        "id": record.id,
+        "condition_id": record.condition_id,
+        "facility_id": record.facility_id,
+        "extension_days": record.extension_days,
+        "previous_due_at": record.previous_due_at.isoformat() if record.previous_due_at else None,
+        "proposed_due_at": record.proposed_due_at.isoformat() if record.proposed_due_at else None,
+        "reason": record.reason,
+        "status": record.status,
+        "requested_by": record.requested_by,
+        "requested_by_name": record.requested_by_name,
+        "requested_at": record.requested_at.isoformat() if record.requested_at else None,
+        "reviewed_by": record.reviewed_by,
+        "reviewed_by_name": record.reviewed_by_name,
+        "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
+        "review_comment": record.review_comment,
+        "row_version": record.row_version,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
+def _control_condition_escalation(overdue_days: int) -> tuple[int, str]:
+    if overdue_days >= 30:
+        return 3, "admin"
+    if overdue_days >= 7:
+        return 2, "approver"
+    return 1, "risk_manager"
+
+
+def _control_condition_sla(record: FacilityControlConditionRecord, now: datetime | None = None) -> dict:
+    if record.status == "completed":
+        return {"sla_status": "completed", "days_remaining": None, "overdue_days": 0}
+    current = _as_utc(now or datetime.now(timezone.utc))
+    due_at = _as_utc(record.due_at)
+    seconds_remaining = (due_at - current).total_seconds()
+    if seconds_remaining < 0:
+        overdue_days = max(1, int((-seconds_remaining) // 86400) + 1)
+        return {"sla_status": "overdue", "days_remaining": 0, "overdue_days": overdue_days}
+    days_remaining = int(seconds_remaining // 86400) + (1 if seconds_remaining % 86400 else 0)
+    return {
+        "sla_status": "due_soon" if days_remaining <= 3 else "on_track",
+        "days_remaining": days_remaining,
+        "overdue_days": 0,
     }
 
 

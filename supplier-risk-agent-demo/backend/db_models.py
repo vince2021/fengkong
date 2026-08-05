@@ -11,10 +11,21 @@ from backend.database import Base
 
 class ApprovalCaseRecord(Base):
     __tablename__ = "approval_cases"
+    __table_args__ = (
+        Index(
+            "uq_approval_cases_open_renewal",
+            "source_facility_id",
+            unique=True,
+            sqlite_where=text("source_facility_id IS NOT NULL AND status IN ('处理中', '待补件')"),
+            postgresql_where=text("source_facility_id IS NOT NULL AND status IN ('处理中', '待补件')"),
+        ),
+    )
 
     case_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     counterparty_id: Mapped[str] = mapped_column(String(128), index=True)
     counterparty_name: Mapped[str] = mapped_column(String(255))
+    application_type: Mapped[str] = mapped_column(String(32), default="new_credit", index=True)
+    source_facility_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     current_stage: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), index=True)
     completed_stages: Mapped[list] = mapped_column(JSON, default=list)
@@ -642,7 +653,10 @@ class EnterpriseIndicatorObservationRecord(Base):
 
 class DocumentRecord(Base):
     __tablename__ = "documents"
-    __table_args__ = (Index("ix_documents_counterparty_case", "counterparty_id", "case_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_documents_counterparty_case", "counterparty_id", "case_id", "created_at"),
+        UniqueConstraint("case_id", "source_document_id", name="uq_documents_case_source_document"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     counterparty_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -661,6 +675,9 @@ class DocumentRecord(Base):
     reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.id"), nullable=True, index=True)
+    carried_over_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    carried_over_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
@@ -747,6 +764,8 @@ class CreditFacilityRecord(Base):
     counterparty_name: Mapped[str] = mapped_column(String(255))
     approved_limit: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     used_limit: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"))
+    opening_balance: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"))
+    supersedes_facility_id: Mapped[str | None] = mapped_column(ForeignKey("credit_facilities.id"), nullable=True, index=True)
     payment_term_days: Mapped[int] = mapped_column(Integer)
     rating: Mapped[str] = mapped_column(String(32), index=True)
     access_strategy: Mapped[str] = mapped_column(String(64))
@@ -758,6 +777,75 @@ class CreditFacilityRecord(Base):
     next_review_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     row_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class FacilityControlConditionRecord(Base):
+    __tablename__ = "facility_control_conditions"
+    __table_args__ = (
+        Index("ix_facility_control_conditions_facility_status_due", "facility_id", "status", "due_at"),
+        Index("ix_facility_control_conditions_status_due", "status", "due_at"),
+        UniqueConstraint("source_case_id", "sequence", name="uq_facility_control_condition_source_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    facility_id: Mapped[str] = mapped_column(ForeignKey("credit_facilities.id"))
+    source_case_id: Mapped[str] = mapped_column(ForeignKey("approval_cases.case_id"))
+    source_review_hash: Mapped[str] = mapped_column(String(64))
+    sequence: Mapped[int] = mapped_column(Integer)
+    measure: Mapped[str] = mapped_column(Text)
+    owner_role: Mapped[str] = mapped_column(String(64), default="risk_manager")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
+    escalation_role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    linked_alert_id: Mapped[str | None] = mapped_column(
+        ForeignKey("facility_alerts.id", name="fk_facility_control_conditions_linked_alert"),
+        nullable=True,
+    )
+    completion_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class FacilityControlExtensionRecord(Base):
+    __tablename__ = "facility_control_extensions"
+    __table_args__ = (
+        Index("ix_facility_control_extensions_condition_requested", "condition_id", "requested_at"),
+        Index(
+            "uq_facility_control_extensions_pending",
+            "condition_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    condition_id: Mapped[str] = mapped_column(ForeignKey("facility_control_conditions.id"))
+    facility_id: Mapped[str] = mapped_column(ForeignKey("credit_facilities.id"))
+    extension_days: Mapped[int] = mapped_column(Integer)
+    previous_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    proposed_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    requested_by: Mapped[str] = mapped_column(String(128))
+    requested_by_name: Mapped[str] = mapped_column(String(128))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __mapper_args__ = {"version_id_col": row_version}

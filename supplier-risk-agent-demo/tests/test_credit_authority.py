@@ -39,6 +39,25 @@ def test_authority_matrix_selects_tier_and_signoff_roles(case: dict, tier: str, 
     assert authority_owner_roles(case) == {roles[0]}
 
 
+@pytest.mark.parametrize(
+    ("conclusion", "tier", "roles"),
+    [
+        ("controls_required", "enhanced", ["risk_manager", "approver"]),
+        ("decline_recommended", "committee", ["risk_manager", "approver", "approver"]),
+    ],
+)
+def test_renewal_risk_review_escalates_authority(conclusion: str, tier: str, roles: list[str]) -> None:
+    case = _case(1_000_000, "A", "准入")
+    case["application_type"] = "renewal"
+    case["data"]["_workflow"] = {"renewal_risk_review": {"conclusion": conclusion}}
+
+    authority = build_credit_authority(case)
+
+    assert authority["tier"] == tier
+    assert [slot["role"] for slot in authority["slots"]] == roles
+    assert authority["basis"]["renewal_risk_conclusion"] == conclusion
+
+
 def test_committee_signoff_is_sequential_and_enforces_distinct_people() -> None:
     authority = build_credit_authority(_case(30_000_000))
 

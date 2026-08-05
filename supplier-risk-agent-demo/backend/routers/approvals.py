@@ -14,7 +14,7 @@ from backend.document_policy import ALLOWED_DOCUMENT_TYPES, INITIAL_DOCUMENT_TYP
 from backend.indicator_observations import apply_effective_observations
 from backend.rating_input_mapping import prepare_rating_input, readiness_summary
 from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditFacilityRepository, DecisionGovernanceRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, RatingRunRepository, content_hash
-from backend.schemas import ApprovalActionRequest, ApprovalAdvanceRequest, ApprovalAutomateRequest, ApprovalCaseCreate, ApprovalSignoffRequest
+from backend.schemas import ApprovalActionRequest, ApprovalAdvanceRequest, ApprovalAutomateRequest, ApprovalCaseCreate, ApprovalSignoffRequest, RenewalRiskReviewRequest
 from backend.security import Principal, enforce_approval_stage_role, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
 from backend.task_lease import assignment_values_are_active
@@ -42,6 +42,65 @@ def _enforce_personal_task_owner(principal: Principal, case: dict) -> None:
     )
     if active_assignment and case["assigned_to"] != principal.subject and "admin" not in principal.roles:
         raise HTTPException(status_code=409, detail=f"当前审批任务已由{case.get('assigned_to_name') or '其他人员'}认领")
+
+
+def _ensure_current_renewal_risk_review(case: dict, facility_repository: CreditFacilityRepository) -> None:
+    if case.get("application_type") != "renewal":
+        return
+    review = case.get("data", {}).get("_workflow", {}).get("renewal_risk_review", {})
+    if review.get("status") != "completed":
+        raise HTTPException(status_code=422, detail="续授信风险复核尚未完成，请由风控经理先形成复核结论")
+    source_facility_id = case.get("source_facility_id")
+    if not source_facility_id:
+        raise HTTPException(status_code=409, detail="续授信申请缺少来源台账，无法校验风险复核")
+    latest_risk_snapshot = facility_repository.risk_snapshot(source_facility_id)
+    if review.get("latest_risk_hash") != content_hash(latest_risk_snapshot):
+        raise HTTPException(status_code=409, detail="风险状态在复核后已发生变化，请由风控经理重新复核后再继续")
+
+
+def _renewal_final_disposition(case: dict, payload: dict) -> dict:
+    if case.get("application_type") != "renewal":
+        return payload
+    review = case.get("data", {}).get("_workflow", {}).get("renewal_risk_review", {})
+    conclusion = str(review.get("conclusion") or "")
+    if conclusion not in {"cleared", "controls_required", "decline_recommended"}:
+        raise ValueError("续授信风险复核结论无效，请由风控经理重新完成风险复核")
+    rejected = payload.get("decision") == "拒绝" or payload.get("access_strategy") in {"禁入", "不建议准入"}
+    review_controls = list(dict.fromkeys(str(item).strip() for item in review.get("control_measures", []) if str(item).strip()))
+    raw_compensating = payload.get("compensating_controls", [])
+    compensating = (
+        list(dict.fromkeys(item.strip() for item in raw_compensating.replace("，", ",").split(",") if item.strip()))
+        if isinstance(raw_compensating, str)
+        else list(dict.fromkeys(str(item).strip() for item in raw_compensating if str(item).strip()))
+    )
+    override_reason = str(payload.pop("renewal_risk_override_reason", "") or "").strip()
+    adopted_controls: list[str] = []
+    alignment = "cleared"
+    if conclusion == "controls_required":
+        alignment = "application_rejected" if rejected else "controls_adopted"
+        adopted_controls = [] if rejected else review_controls
+        if not rejected and not adopted_controls:
+            raise ValueError("风险复核要求附加控制措施，但未形成可执行措施，请退回风控经理重新复核")
+    elif conclusion == "decline_recommended":
+        if rejected:
+            alignment = "decline_adopted"
+        else:
+            if len(override_reason) < 10:
+                raise ValueError("偏离风控拒绝建议时必须填写不少于 10 个字的特别审批理由")
+            if not compensating:
+                raise ValueError("偏离风控拒绝建议时必须至少填写一项补偿性控制措施")
+            alignment = "decline_overridden"
+            adopted_controls = compensating
+    payload["renewal_risk_disposition"] = {
+        "review_conclusion": conclusion,
+        "risk_review_hash": content_hash(review),
+        "alignment": alignment,
+        "adopted_controls": adopted_controls,
+        "override_reason": override_reason or None,
+        "reviewed_by_name": review.get("reviewed_by_name"),
+        "reviewed_at": review.get("reviewed_at"),
+    }
+    return payload
 
 
 @router.get("")
@@ -85,6 +144,95 @@ def get_case(
     return {**case, "progress": build_workflow_progress(case)}
 
 
+@router.post("/{case_id}/renewal-risk-review")
+def review_renewal_risk(
+    case_id: str,
+    request: RenewalRiskReviewRequest,
+    repository: ApprovalCaseRepository = Depends(get_approval_repository),
+    facility_repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
+    authority_policy_repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
+    principal: Principal = Depends(require_permissions("approvals:act")),
+) -> dict:
+    case = repository.get(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="审批申请不存在")
+    enforce_counterparty_scope(principal, case["counterparty_id"])
+    if case["application_type"] != "renewal" or not case.get("source_facility_id"):
+        raise HTTPException(status_code=409, detail="只有续授信申请需要执行风险复核")
+    if case["status"] in TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="审批流程已经终止")
+    if case["current_stage"] not in {"model_selection", "scoring", "credit_proposal", "final_strategy"}:
+        raise HTTPException(status_code=409, detail="续授信风险复核应在模型选择后、最终决策前完成")
+    if "admin" not in principal.roles and "risk_manager" not in principal.roles:
+        raise HTTPException(status_code=403, detail="续授信风险复核必须由风控经理完成")
+    if request.expected_row_version != case["row_version"]:
+        raise HTTPException(status_code=409, detail=f"审批记录版本已变化，当前版本为 {case['row_version']}")
+    if request.conclusion == "controls_required" and not request.control_measures:
+        raise HTTPException(status_code=422, detail="结论为落实控制措施时，至少填写一项控制措施")
+    if request.conclusion == "cleared" and request.control_measures:
+        raise HTTPException(status_code=422, detail="风险已排除结论不应同时填写未落实的控制措施")
+
+    source_facility = facility_repository.get(case["source_facility_id"])
+    if not source_facility:
+        raise HTTPException(status_code=409, detail="续授信来源台账不存在，无法完成风险复核")
+    if source_facility["counterparty_id"] != case["counterparty_id"]:
+        raise HTTPException(status_code=409, detail="续授信来源台账与审批主体不一致")
+
+    workflow = case.get("data", {}).get("_workflow", {})
+    renewal_request = workflow.get("renewal_request", {})
+    baseline = renewal_request.get("risk_baseline", {"capture_status": "legacy_missing"})
+    latest_snapshot = facility_repository.risk_snapshot(case["source_facility_id"])
+    review = {
+        "status": "completed",
+        "conclusion": request.conclusion,
+        "review_note": request.review_note,
+        "control_measures": request.control_measures,
+        "baseline_hash": content_hash(baseline),
+        "latest_risk_snapshot": latest_snapshot,
+        "latest_risk_hash": content_hash(latest_snapshot),
+        "reviewed_by": principal.subject,
+        "reviewed_by_name": principal.name,
+        "reviewed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    updated = deepcopy(case)
+    updated.setdefault("data", {}).setdefault("_workflow", {})["renewal_risk_review"] = review
+    reset_authority = case["current_stage"] == "final_strategy"
+    if reset_authority:
+        updated["data"]["_workflow"]["credit_authority"] = build_credit_authority(
+            updated,
+            authority_policy_repository.active_snapshot(),
+        )
+    updated.setdefault("timeline", []).append({
+        "环节": "续授信风险复核",
+        "处理结果": {
+            "cleared": "风险已排除",
+            "controls_required": "落实控制措施后推进",
+            "decline_recommended": "建议拒绝续授信",
+        }[request.conclusion],
+        "处理人": principal.name,
+        "处理时间": review["reviewed_at"],
+    })
+    try:
+        saved = repository.save(
+            updated,
+            actor=principal.name,
+            event_type="renewal_risk_review_completed",
+            expected_row_version=request.expected_row_version,
+            audit_payload={
+                "source_facility_id": case["source_facility_id"],
+                "conclusion": request.conclusion,
+                "control_measure_count": len(request.control_measures),
+                "baseline_hash": review["baseline_hash"],
+                "latest_risk_hash": review["latest_risk_hash"],
+                "authority_signoffs_reset": reset_authority,
+            },
+            release_assignment=reset_authority,
+        )
+        return {**saved, "progress": build_workflow_progress(saved)}
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/{case_id}/advance")
 def advance_case(
     case_id: str,
@@ -110,6 +258,7 @@ def advance_case(
     payload = deepcopy(request.payload)
     try:
         if case["current_stage"] == "final_strategy":
+            _ensure_current_renewal_risk_review(case, facility_repository)
             authority = ensure_credit_authority(case)
             if authority["status"] != "approved":
                 pending = current_authority_slot(case)
@@ -129,6 +278,7 @@ def advance_case(
                 and final_approver.get("signed_by") != principal.subject
             ):
                 raise HTTPException(status_code=403, detail="最终策略必须由最后一名有权审批会签人提交")
+            payload = _renewal_final_disposition(case, payload)
             payload.pop("decision_variance", None)
             variance = build_decision_variance(case.get("data", {}).get("credit_proposal", {}), payload)
             validate_decision_variance(variance)
@@ -305,6 +455,7 @@ def automate_case_stage(
     enterprise_data_repository: EnterpriseDataRepository = Depends(get_enterprise_data_repository),
     indicator_observation_repository: EnterpriseIndicatorObservationRepository = Depends(get_enterprise_indicator_observation_repository),
     authority_policy_repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
+    facility_repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
     case = approval_repository.get(case_id)
@@ -392,6 +543,7 @@ def automate_case_stage(
             raise HTTPException(status_code=422, detail=f"模型与当前客商数据不兼容：{validation_result.get('error', '无法计算')}")
         payload = {"template_key": template_key, "model_name": config["name"], "model_version": config["version"], "input_readiness": readiness_summary(readiness)}
     elif stage == "scoring":
+        _ensure_current_renewal_risk_review(case, facility_repository)
         selection = case["data"].get("model_selection", {})
         template_key = selection.get("template_key")
         selected_version = selection.get("model_version")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import zipfile
+from datetime import datetime, timezone
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -11,10 +12,10 @@ from fastapi.responses import Response
 
 from backend.dependencies import get_approval_repository, get_demo_repository, get_document_repository, get_object_storage
 from backend.document_comparison import build_document_version_comparison
-from backend.document_policy import ALLOWED_DOCUMENT_TYPES, DOCUMENT_REVIEW_CHECKS, build_document_checklist
+from backend.document_policy import ALLOWED_DOCUMENT_TYPES, DOCUMENT_REVIEW_CHECKS, assess_renewal_document_carryover, build_document_checklist
 from backend.document_precheck import precheck_document
 from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, DemoRepository, DocumentRepository, TaskOwnershipConflict
-from backend.schemas import DocumentCaseLinkRequest, DocumentReviewRequest
+from backend.schemas import DocumentCaseLinkRequest, DocumentReviewRequest, RenewalDocumentCarryoverRequest
 from backend.security import Principal, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
 
@@ -128,6 +129,137 @@ def get_document_checklist(
 ) -> dict:
     enforce_counterparty_scope(principal, counterparty_id)
     return build_document_checklist(repository.list(counterparty_id, case_id), template_key)
+
+
+@router.get("/renewal-carryover")
+def get_renewal_document_carryover(
+    case_id: str,
+    template_key: str = "general",
+    principal: Principal = Depends(require_permissions("documents:view")),
+    approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
+    repository: DocumentRepository = Depends(get_document_repository),
+) -> dict:
+    approval_case, source_case_id = _renewal_document_context(case_id, approval_repository, principal)
+    assessment = assess_renewal_document_carryover(
+        repository.list(case_id=source_case_id),
+        repository.list(case_id=case_id),
+        template_key,
+    )
+    return {
+        **assessment,
+        "case_id": case_id,
+        "source_case_id": source_case_id,
+        "counterparty_id": approval_case["counterparty_id"],
+    }
+
+
+@router.post("/renewal-carryover")
+def carry_over_renewal_documents(
+    request: RenewalDocumentCarryoverRequest,
+    principal: Principal = Depends(require_permissions("documents:upload")),
+    approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
+    repository: DocumentRepository = Depends(get_document_repository),
+    storage: ObjectStorage = Depends(get_object_storage),
+) -> dict:
+    approval_case, source_case_id = _renewal_document_context(request.case_id, approval_repository, principal)
+    if approval_case["row_version"] != request.expected_case_row_version:
+        raise HTTPException(status_code=409, detail=f"审批记录版本已变化，当前版本为 {approval_case['row_version']}")
+    if approval_case["status"] not in {"处理中", "待补件"} or approval_case["current_stage"] not in {"document_upload", "supplement"}:
+        raise HTTPException(status_code=409, detail="只有资料上传或补件环节可以承接历史资料")
+    assessment = assess_renewal_document_carryover(
+        repository.list(case_id=source_case_id),
+        repository.list(case_id=request.case_id),
+        request.template_key,
+    )
+    reusable = [item for item in assessment["items"] if item["action"] == "reusable" and item["source_document"]]
+    if not reusable:
+        if assessment["summary"]["carried_count"]:
+            return {
+                **assessment,
+                "case_id": request.case_id,
+                "source_case_id": source_case_id,
+                "carried_documents": [],
+                "created_count": 0,
+                "idempotent": True,
+            }
+        raise HTTPException(status_code=422, detail="原授信没有符合时效与核验要求的可承接资料")
+
+    copied_objects: list[tuple[str, str]] = []
+    metadata_rows = []
+    now = datetime.now(timezone.utc)
+    try:
+        for item in reusable:
+            source = item["source_document"]
+            try:
+                content = storage.get(source["object_key"])
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=409, detail=f"来源资料对象不存在：{source['original_name']}") from exc
+            if hashlib.sha256(content).hexdigest() != source["sha256"]:
+                raise HTTPException(status_code=409, detail=f"来源资料指纹校验失败：{source['original_name']}")
+            document_id = str(uuid4())
+            suffix = _safe_suffix(source["original_name"])
+            object_key = f"{approval_case['counterparty_id']}/{document_id}{suffix}"
+            storage.put(object_key, content, source["content_type"])
+            copied_objects.append((document_id, object_key))
+            metadata_rows.append(
+                {
+                    "id": document_id,
+                    "counterparty_id": approval_case["counterparty_id"],
+                    "case_id": request.case_id,
+                    "document_type": source["document_type"],
+                    "original_name": source["original_name"],
+                    "object_key": object_key,
+                    "content_type": source["content_type"],
+                    "size_bytes": source["size_bytes"],
+                    "sha256": source["sha256"],
+                    "uploaded_by": source["uploaded_by"],
+                    "status": "历史可信资料承接",
+                    "checklist_json": source["checklist"],
+                    "review_status": "verified",
+                    "review_comment": f"续授信沿用原核验结论：{source.get('review_comment') or '历史资料已逐项核验通过'}",
+                    "reviewed_by": source["reviewed_by"],
+                    "reviewed_by_name": source["reviewed_by_name"],
+                    "reviewed_at": datetime.fromisoformat(source["reviewed_at"]) if source["reviewed_at"] else now,
+                    "source_document_id": source["id"],
+                    "source_row_version": source["row_version"],
+                    "carried_over_by": principal.name,
+                    "carried_over_at": now,
+                }
+            )
+        result = repository.carry_over(metadata_rows, principal.name)
+        created_ids = set(result["created_ids"])
+        for document_id, object_key in copied_objects:
+            if document_id not in created_ids:
+                storage.delete(object_key)
+        refreshed = assess_renewal_document_carryover(
+            repository.list(case_id=source_case_id),
+            repository.list(case_id=request.case_id),
+            request.template_key,
+        )
+        return {
+            **refreshed,
+            "case_id": request.case_id,
+            "source_case_id": source_case_id,
+            "carried_documents": result["documents"],
+            "created_count": len(result["created_ids"]),
+            "idempotent": result["idempotent"],
+        }
+    except HTTPException:
+        for _, object_key in copied_objects:
+            storage.delete(object_key)
+        raise
+    except (LookupError, ValueError) as exc:
+        for _, object_key in copied_objects:
+            storage.delete(object_key)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        for _, object_key in copied_objects:
+            storage.delete(object_key)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception:
+        for _, object_key in copied_objects:
+            storage.delete(object_key)
+        raise
 
 
 @router.get("/corrections")
@@ -314,6 +446,26 @@ def download_document(
         raise HTTPException(status_code=404, detail="资料对象不存在") from exc
     filename = quote(document["original_name"])
     return Response(content=content, media_type=document["content_type"], headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}", "X-Content-SHA256": document["sha256"]})
+
+
+def _renewal_document_context(
+    case_id: str,
+    approval_repository: ApprovalCaseRepository,
+    principal: Principal,
+) -> tuple[dict, str]:
+    approval_case = approval_repository.get(case_id)
+    if not approval_case:
+        raise HTTPException(status_code=404, detail="审批申请不存在")
+    enforce_counterparty_scope(principal, approval_case["counterparty_id"])
+    if approval_case.get("application_type") != "renewal" or not approval_case.get("source_facility_id"):
+        raise HTTPException(status_code=422, detail="当前申请不是续授信，不能承接历史资料")
+    source_case_id = approval_case.get("data", {}).get("_workflow", {}).get("renewal_request", {}).get("source_case_id")
+    if not source_case_id:
+        raise HTTPException(status_code=409, detail="续授信缺少原审批血缘，不能承接历史资料")
+    source_case = approval_repository.get(source_case_id)
+    if not source_case or source_case["counterparty_id"] != approval_case["counterparty_id"]:
+        raise HTTPException(status_code=409, detail="续授信原审批不存在或主体不一致")
+    return approval_case, source_case_id
 
 
 def _safe_suffix(filename: str) -> str:

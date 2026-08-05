@@ -74,6 +74,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
   }
 
   async function assignTask(task: PersonalTask, action: "claim" | "renew" | "release") {
+    if (task.task_type !== "approval" && task.task_type !== "correction") return;
     setAssigningId(task.id);
     try {
       await api.assignPersonalTask(
@@ -92,6 +93,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
   }
 
   async function supervisorRelease(task: TeamTask, reason: string) {
+    if (task.task_type !== "approval" && task.task_type !== "correction") return;
     setSupervisingId(task.id);
     try {
       await api.releaseTeamTask(
@@ -111,16 +113,18 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
   }
 
   async function supervisorRemind(task: TeamTask, reason: string) {
+    const taskId = taskBackendId(task);
+    if (!taskId) return;
     setSupervisingId(task.id);
     try {
       await api.remindTeamTask(
         task.task_type,
-        task.task_type === "approval" ? task.case_id! : task.correction_id!,
+        taskId,
         task.row_version,
         reason,
       );
       await reload();
-      onNotice({ kind: "success", text: `已向 ${task.assigned_to_name ?? "任务处理人"} 发送个人定向催办` });
+      onNotice({ kind: "success", text: task.claimable ? `已向 ${task.assigned_to_name ?? "任务处理人"} 发送个人定向催办` : `已向${teamRoleLabel(task.reminder_role ?? task.owner_roles[0])}发送角色催办` });
     } catch (error) {
       onNotice({ kind: "error", text: error instanceof Error ? error.message : "定向催办失败" });
       throw error;
@@ -134,7 +138,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
 
   return <div className="operations-center">
     <section className="operations-hero">
-      <div><span>RISK OPERATIONS</span><h2>个人待办与 SLA 运营监控</h2><p>按当前角色汇总真正需要处理的审批与补件任务，并识别即将超时、已超时及持续超时事项。</p></div>
+      <div><span>RISK OPERATIONS</span><h2>个人待办与 SLA 运营监控</h2><p>统一汇总审批、补件、贷后控制与延期审批任务，并识别即将超时、已超时及升级处置事项。</p></div>
       {canScan && <button className="primary-button" disabled={scanning} onClick={() => void scan()}>{scanning ? "正在扫描…" : "立即运行 SLA 扫描"}</button>}
     </section>
 
@@ -174,9 +178,10 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
 }
 
 function PersonalTaskPanel({ queue, assigningId, onAssign, onNavigate }: { queue: PersonalTaskQueue; assigningId: string; onAssign: (task: PersonalTask, action: "claim" | "renew" | "release") => Promise<void>; onNavigate: (action: TaskAction) => void }) {
-  const [filter, setFilter] = useState<"all" | "approval" | "correction" | "risk">("all");
+  const [filter, setFilter] = useState<"all" | "approval" | "correction" | "post_credit" | "risk">("all");
   const tasks = queue.tasks.filter((task) => filter === "all"
     || task.task_type === filter
+    || (filter === "post_credit" && ["facility_control", "control_extension"].includes(task.task_type))
     || (filter === "risk" && task.sla_status !== "normal"));
   return <section className="panel personal-task-panel">
     <div className="ops-section-head">
@@ -187,10 +192,11 @@ function PersonalTaskPanel({ queue, assigningId, onAssign, onNavigate }: { queue
       <span><small>全部待办</small><strong>{queue.summary.total}</strong></span>
       <span><small>审批环节</small><strong>{queue.summary.approval}</strong></span>
       <span><small>补件任务</small><strong>{queue.summary.correction}</strong></span>
+      <span><small>贷后任务</small><strong>{queue.summary.post_credit}</strong></span>
       <span className={queue.summary.overdue + queue.summary.escalated ? "danger" : ""}><small>超时风险</small><strong>{queue.summary.overdue + queue.summary.escalated}</strong></span>
     </div>
     <div className="personal-task-filters">
-      {([["all", "全部"], ["approval", "审批"], ["correction", "补件"], ["risk", "时限风险"]] as const).map(([key, label]) => <button className={filter === key ? "active" : ""} key={key} onClick={() => setFilter(key)}>{label}</button>)}
+      {([["all", "全部"], ["approval", "审批"], ["correction", "补件"], ["post_credit", "贷后"], ["risk", "时限风险"]] as const).map(([key, label]) => <button className={filter === key ? "active" : ""} key={key} onClick={() => setFilter(key)}>{label}</button>)}
     </div>
     {tasks.length ? <div className="personal-task-list">{tasks.map((task) => <PersonalTaskCard task={task} assigning={assigningId === task.id} onAssign={onAssign} onNavigate={onNavigate} key={task.id} />)}</div> : <div className="notification-empty compact"><span>✓</span><strong>{queue.tasks.length ? "当前筛选条件下没有待办" : "当前角色没有待办任务"}</strong><p>任务会随审批环节和补件责任自动流转。</p></div>}
   </section>;
@@ -198,27 +204,28 @@ function PersonalTaskPanel({ queue, assigningId, onAssign, onNavigate }: { queue
 
 function PersonalTaskCard({ task, assigning, onAssign, onNavigate }: { task: PersonalTask; assigning: boolean; onAssign: (task: PersonalTask, action: "claim" | "renew" | "release") => Promise<void>; onNavigate: (action: TaskAction) => void }) {
   return <article className={`personal-task-card ${task.sla_status}`}>
-    <div className="personal-task-kind">{task.task_type === "approval" ? "审批" : "补件"}</div>
+    <div className={`personal-task-kind ${task.task_type}`}>{taskTypeLabel(task.task_type)}</div>
     <div className="personal-task-main">
       <header><strong>{task.title}</strong><span>{taskSlaLabel(task.sla_status)}</span></header>
       <p>{task.counterparty_name} · {task.case_id ?? "未关联审批单"}</p>
       <small>{task.description}</small>
-      <footer><span>截止 {formatTime(task.due_at)}</span>{task.viewer_mode === "collaborator" && <em>协作处理</em>}{task.assigned_to_name && <em>{task.assigned_to_name} 已认领 · {formatLease(task.lease_remaining_seconds)}后回收</em>}{task.assignment_expired && <em className="expired">上次认领已超时回收</em>}</footer>
+      <footer><span>截止 {formatTime(task.due_at)}</span>{!task.claimable && <em>系统按角色直派</em>}{task.viewer_mode === "collaborator" && <em>协作处理</em>}{task.assigned_to_name && <em>{task.assigned_to_name} 已认领 · {formatLease(task.lease_remaining_seconds)}后回收</em>}{task.assignment_expired && <em className="expired">上次认领已超时回收</em>}</footer>
     </div>
     <div className="personal-task-actions">
-      {task.assignment_state === "unassigned" ? <button disabled={assigning} onClick={() => void onAssign(task, "claim")}>{assigning ? "认领中…" : "认领任务"}</button> : task.assignment_state === "mine" ? <><button onClick={() => onNavigate(task.action)}>立即处理</button><button className="renew" disabled={assigning} onClick={() => void onAssign(task, "renew")}>续期</button><button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>释放</button></> : <><span>{task.assigned_to_name ?? "他人"}处理中</span>{task.can_release && <button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>{assigning ? "释放中…" : "管理员释放"}</button>}</>}
+      {!task.claimable ? <button onClick={() => onNavigate(task.action)}>{task.task_type === "control_extension" ? "前往审批" : "前往落实"}</button> : task.assignment_state === "unassigned" ? <button disabled={assigning} onClick={() => void onAssign(task, "claim")}>{assigning ? "认领中…" : "认领任务"}</button> : task.assignment_state === "mine" ? <><button onClick={() => onNavigate(task.action)}>立即处理</button><button className="renew" disabled={assigning} onClick={() => void onAssign(task, "renew")}>续期</button><button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>释放</button></> : <><span>{task.assigned_to_name ?? "他人"}处理中</span>{task.can_release && <button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>{assigning ? "释放中…" : "管理员释放"}</button>}</>}
     </div>
   </article>;
 }
 
 function TeamTaskBoardPanel({ board, canManage, supervisingId, onRelease, onRemind, onNavigate }: { board: TeamTaskBoard; canManage: boolean; supervisingId: string; onRelease: (task: TeamTask, reason: string) => Promise<void>; onRemind: (task: TeamTask, reason: string) => Promise<void>; onNavigate: (action: TaskAction) => void }) {
-  const [filter, setFilter] = useState<"all" | "unassigned" | "claimed" | "risk">("all");
+  const [filter, setFilter] = useState<"all" | "unassigned" | "claimed" | "direct" | "risk">("all");
   const [selectedId, setSelectedId] = useState("");
   const [action, setAction] = useState<"remind" | "release">("remind");
   const [reason, setReason] = useState("");
   const tasks = board.tasks.filter((task) => filter === "all"
     || (filter === "unassigned" && task.assignment_state === "unassigned")
     || (filter === "claimed" && task.assignment_state === "assigned_other")
+    || (filter === "direct" && !task.claimable)
     || (filter === "risk" && task.sla_status !== "normal"));
 
   async function submit(task: TeamTask) {
@@ -234,32 +241,33 @@ function TeamTaskBoardPanel({ board, canManage, supervisingId, onRelease, onRemi
 
   return <section className="panel team-task-board">
     <div className="ops-section-head">
-      <div><span>TEAM CONTROL TOWER</span><h2>团队任务负载与占用监控</h2></div>
+      <div><span>TEAM CONTROL TOWER</span><h2>团队任务负载、占用与角色催办</h2></div>
       <small>全局 {board.summary.total} 项 · {board.summary.claimed} 项已认领 · {board.summary.at_risk} 项时限风险</small>
     </div>
     <div className="team-task-summary">
       <span><small>任务总量</small><strong>{board.summary.total}</strong></span>
       <span><small>已认领</small><strong>{board.summary.claimed}</strong></span>
       <span className={board.summary.unassigned ? "warning" : ""}><small>待认领</small><strong>{board.summary.unassigned}</strong></span>
+      <span><small>系统直派</small><strong>{board.summary.direct}</strong></span>
       <span className={board.summary.expired ? "danger" : ""}><small>待回收过期</small><strong>{board.summary.expired}</strong></span>
     </div>
     <div className="team-load-section">
       <header><strong>可处理角色负载</strong><small>同一任务支持多角色处理时会分别计入</small></header>
-      <div className="team-role-load">{board.role_load.map((item) => <div key={item.role}><span>{teamRoleLabel(item.role)}</span><strong>{item.total}</strong><small>{item.claimed} 已认领 · {item.unassigned} 待认领 · {item.risk} 风险</small></div>)}</div>
+      <div className="team-role-load">{board.role_load.map((item) => <div key={item.role}><span>{teamRoleLabel(item.role)}</span><strong>{item.total}</strong><small>{item.claimed} 已认领 · {item.unassigned} 待认领 · {item.direct} 直派 · {item.risk} 风险</small></div>)}</div>
     </div>
     <div className="team-load-section assignees">
-      <header><strong>个人占用负载</strong><small>仅统计当前有效认领，未认领任务单独汇总</small></header>
+      <header><strong>任务分配负载</strong><small>有效认领、未认领与系统直派分别汇总</small></header>
       <div className="team-assignee-load">{board.assignee_load.map((item) => <div key={item.subject ?? "unassigned"}><span>{item.name}</span><strong>{item.total}</strong><small>{item.risk} 项时限风险</small></div>)}</div>
     </div>
     <div className="personal-task-filters">
-      {([["all", "全部"], ["unassigned", "待认领"], ["claimed", "已认领"], ["risk", "时限风险"]] as const).map(([key, label]) => <button className={filter === key ? "active" : ""} key={key} onClick={() => setFilter(key)}>{label}</button>)}
+      {([["all", "全部"], ["unassigned", "待认领"], ["claimed", "已认领"], ["direct", "系统直派"], ["risk", "时限风险"]] as const).map(([key, label]) => <button className={filter === key ? "active" : ""} key={key} onClick={() => setFilter(key)}>{label}</button>)}
     </div>
     {tasks.length ? <div className="team-task-list">{tasks.map((task) => <article className={`team-task-row ${task.sla_status}`} key={task.id}>
-      <div className="team-task-status"><span>{task.task_type === "approval" ? "审批" : "补件"}</span><i>{taskSlaLabel(task.sla_status)}</i></div>
+      <div className={`team-task-status ${task.task_type}`}><span>{taskTypeLabel(task.task_type)}</span><i>{taskSlaLabel(task.sla_status)}</i></div>
       <div className="team-task-content"><strong>{task.title}</strong><p>{task.counterparty_name} · {task.case_id ?? "未关联审批单"}</p><small>{task.owner_roles.map(teamRoleLabel).join(" / ")} · 截止 {formatTime(task.due_at)}</small></div>
-      <div className="team-task-owner">{task.assignment_state === "assigned_other" ? <><strong>{task.assigned_to_name}</strong><small>{formatLease(task.lease_remaining_seconds)}后回收</small></> : <><strong>角色公共队列</strong><small>{task.assignment_expired ? "上次占用已过期" : "等待认领"}</small></>}</div>
-      <div className="team-task-actions"><button onClick={() => onNavigate(task.action)}>定位任务</button>{canManage && task.can_force_release && <><button className="remind" onClick={() => { setSelectedId(task.id); setAction("remind"); setReason(""); }}>定向催办</button><button className="danger" onClick={() => { setSelectedId(task.id); setAction("release"); setReason(""); }}>解除占用</button></>}</div>
-      {selectedId === task.id && <div className="team-release-form"><label><span>{action === "remind" ? "定向催办原因" : "监督释放原因"}</span><input value={reason} maxLength={1000} onChange={(event) => setReason(event.target.value)} placeholder={action === "remind" ? "说明催办事项和期望处理时点，至少 5 个字…" : "说明离岗、误认领或应急接管依据，至少 5 个字…"} /></label><button onClick={() => setSelectedId("")}>取消</button><button className={action === "release" ? "danger" : "remind"} disabled={reason.trim().length < 5 || supervisingId === task.id} onClick={() => void submit(task)}>{supervisingId === task.id ? "提交中…" : action === "remind" ? "发送个人催办" : "确认释放并留痕"}</button></div>}
+      <div className="team-task-owner">{!task.claimable ? <><strong>系统按角色直派</strong><small>完成后移出 · 可受控催办</small></> : task.assignment_state === "assigned_other" ? <><strong>{task.assigned_to_name}</strong><small>{formatLease(task.lease_remaining_seconds)}后回收</small></> : <><strong>角色公共队列</strong><small>{task.assignment_expired ? "上次占用已过期" : "等待认领"}</small></>}</div>
+      <div className="team-task-actions"><button onClick={() => onNavigate(task.action)}>定位任务</button>{canManage && task.can_remind && <button className="remind" onClick={() => { setSelectedId(task.id); setAction("remind"); setReason(""); }}>{task.claimable ? "定向催办" : `催办${teamRoleLabel(task.reminder_role ?? task.owner_roles[0])}`}</button>}{canManage && task.can_force_release && <button className="danger" onClick={() => { setSelectedId(task.id); setAction("release"); setReason(""); }}>解除占用</button>}</div>
+      {selectedId === task.id && <div className="team-release-form"><label><span>{action === "remind" ? task.claimable ? "定向催办原因" : `${teamRoleLabel(task.reminder_role ?? task.owner_roles[0])}角色催办原因` : "监督释放原因"}</span><input value={reason} maxLength={1000} onChange={(event) => setReason(event.target.value)} placeholder={action === "remind" ? task.claimable ? "说明催办事项和期望处理时点，至少 5 个字…" : "说明角色催办事项和期望处理时点，至少 5 个字…" : "说明离岗、误认领或应急接管依据，至少 5 个字…"} /></label><button onClick={() => setSelectedId("")}>取消</button><button className={action === "release" ? "danger" : "remind"} disabled={reason.trim().length < 5 || supervisingId === task.id} onClick={() => void submit(task)}>{supervisingId === task.id ? "提交中…" : action === "remind" ? task.claimable ? "发送个人催办" : "发送角色催办" : "确认释放并留痕"}</button></div>}
     </article>)}</div> : <div className="notification-empty compact"><strong>当前筛选条件下没有团队任务</strong><p>任务流转后会自动进入团队负载看板。</p></div>}
   </section>;
 }
@@ -358,6 +366,8 @@ function eligibleRoles(task: DocumentCorrectionTask): DocumentCorrection["assign
   return task.status === "open" ? ["relationship_manager", "client"] : ["risk_manager", "approver"];
 }
 function correctionRoleLabel(role: DocumentCorrection["assigned_role"]): string { return ({ client: "企业客户", relationship_manager: "客户经理", risk_manager: "风控经理", approver: "授信审批人" } as const)[role]; }
+function taskBackendId(task: PersonalTask): string | null { return task.task_type === "approval" ? task.case_id : task.task_type === "correction" ? task.correction_id : task.task_type === "facility_control" ? task.condition_id ?? null : task.extension_id ?? null; }
+function taskTypeLabel(type: PersonalTask["task_type"]): string { return ({ approval: "审批", correction: "补件", facility_control: "贷后", control_extension: "延期" } as const)[type]; }
 function teamRoleLabel(role: string): string { return ({ client: "企业客户", relationship_manager: "客户经理", risk_manager: "风控经理", model_admin: "模型管理员", approver: "授信审批人", operations: "运营值班", admin: "平台管理员" } as Record<string, string>)[role] ?? role; }
 function correctionSlaLabel(status: DocumentCorrection["sla_status"]): string { return ({ normal: "时限正常", due_soon: "即将超时", overdue: "已超时", escalated: "升级催办", stopped: "已停止" } as const)[status]; }
 function taskSlaLabel(status: PersonalTask["sla_status"]): string { return ({ normal: "时限正常", due_soon: "即将超时", overdue: "已超时", escalated: "升级处置" } as const)[status]; }

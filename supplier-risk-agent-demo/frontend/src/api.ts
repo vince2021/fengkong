@@ -1,4 +1,4 @@
-import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule, TeamTaskBoard } from "./types";
+import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilityControlCondition, FacilityControlExtension, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskReview, RiskEvent, RiskScreeningPolicy, SlaScanResult, StrongRule, TeamTaskBoard } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 const TOKEN_KEY = "risk-platform.dev-token";
@@ -71,6 +71,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ expected_row_version: rowVersion, ...(templateKey ? { template_key: templateKey } : {}) }),
     }),
+  reviewRenewalRisk: (id: string, payload: { expected_row_version: number; conclusion: RenewalRiskReview["conclusion"]; review_note: string; control_measures: string[] }) =>
+    request<ApprovalCase>(`/approval-cases/${id}/renewal-risk-review`, { method: "POST", body: JSON.stringify(payload) }),
   actOnApprovalCase: (id: string, rowVersion: number, action: ApprovalAction, reason: string, requiredDocumentTypes: string[] = []) =>
     request<ApprovalCase>(`/approval-cases/${id}/actions`, {
       method: "POST",
@@ -222,6 +224,8 @@ export const api = {
     request<MonitoringIssue>(`/model-governance/issues/${id}/link-change`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, change_id: changeId }) }),
   creditFacilities: () => request<CreditFacility[]>("/credit-facilities"),
   creditFacility: (id: string) => request<CreditFacilityDetail>(`/credit-facilities/${id}`),
+  createFacilityRenewal: (id: string, payload: { expected_row_version: number; requested_limit: number; requested_term_days: number; renewal_reason: string }) =>
+    request<ApprovalCase & { idempotent: boolean }>(`/credit-facilities/${id}/renewals`, { method: "POST", body: JSON.stringify(payload) }),
   facilitySummary: () => request<FacilitySummary>("/credit-facilities/summary"),
   facilityAlerts: () => request<FacilityAlert[]>("/credit-facilities/alerts"),
   riskEvents: () => request<RiskEvent[]>("/credit-facilities/risk-events"),
@@ -229,12 +233,18 @@ export const api = {
     request<{ facility: CreditFacility; idempotent: boolean }>(`/credit-facilities/${id}/transactions`, { method: "POST", body: JSON.stringify(payload) }),
   reviewFacility: (id: string, payload: { expected_row_version: number; rating: string; next_review_days: number; conclusion: string }) =>
     request<CreditFacility>(`/credit-facilities/${id}/reviews`, { method: "POST", body: JSON.stringify(payload) }),
-  scanFacilities: () => request<{ active_facilities_scanned: number; facilities_expired: number; alerts_opened: number }>("/credit-facilities/scan", { method: "POST" }),
+  scanFacilities: () => request<{ active_facilities_scanned: number; facilities_expired: number; alerts_opened: number; control_conditions_scanned: number; control_alerts_opened: number; control_conditions_escalated: number; control_notifications_created: number }>("/credit-facilities/scan", { method: "POST" }),
   acknowledgeFacilityAlert: (id: string) => request<FacilityAlert>(`/credit-facilities/alerts/${id}/acknowledge`, { method: "POST" }),
   createRiskEvent: (id: string, payload: { external_event_id: string; event_type: string; source: string; severity: "warning" | "critical"; occurred_at: string; title: string; description: string; payload: Record<string, unknown> }) =>
     request<{ risk_event: RiskEvent; alert: FacilityAlert; idempotent: boolean }>(`/credit-facilities/${id}/risk-events`, { method: "POST", body: JSON.stringify(payload) }),
   controlFacility: (id: string, payload: { expected_row_version: number; action: "freeze" | "unfreeze" | "reduce_limit" | "close"; target_limit?: number; reason: string }) =>
     request<CreditFacility>(`/credit-facilities/${id}/controls`, { method: "POST", body: JSON.stringify(payload) }),
+  completeFacilityControlCondition: (facilityId: string, conditionId: string, payload: { expected_row_version: number; conclusion: string }) =>
+    request<FacilityControlCondition>(`/credit-facilities/${facilityId}/control-conditions/${conditionId}/complete`, { method: "POST", body: JSON.stringify(payload) }),
+  requestFacilityControlExtension: (facilityId: string, conditionId: string, payload: { expected_condition_version: number; extension_days: number; reason: string }) =>
+    request<FacilityControlExtension>(`/credit-facilities/${facilityId}/control-conditions/${conditionId}/extensions`, { method: "POST", body: JSON.stringify(payload) }),
+  reviewFacilityControlExtension: (facilityId: string, conditionId: string, extensionId: string, payload: { expected_extension_version: number; expected_condition_version: number; decision: "approve" | "reject"; comment: string }) =>
+    request<{ extension: FacilityControlExtension; condition: FacilityControlCondition }>(`/credit-facilities/${facilityId}/control-conditions/${conditionId}/extensions/${extensionId}/review`, { method: "POST", body: JSON.stringify(payload) }),
   disposeFacilityAlert: (id: string, payload: { expected_alert_version: number; expected_facility_version: number; action: "monitor" | "freeze" | "reduce_limit" | "close"; target_limit?: number; conclusion: string }) =>
     request<{ alert: FacilityAlert; facility: CreditFacility }>(`/credit-facilities/alerts/${id}/dispose`, { method: "POST", body: JSON.stringify(payload) }),
   documents: (counterpartyId?: string, caseId?: string) => {
@@ -248,6 +258,10 @@ export const api = {
     if (caseId) query.set("case_id", caseId);
     return request<DocumentChecklist>(`/documents/checklist?${query}`);
   },
+  renewalDocumentCarryover: (caseId: string, templateKey: string) =>
+    request<RenewalDocumentCarryover>(`/documents/renewal-carryover?case_id=${encodeURIComponent(caseId)}&template_key=${encodeURIComponent(templateKey)}`),
+  carryOverRenewalDocuments: (caseId: string, templateKey: string, expectedCaseRowVersion: number) =>
+    request<RenewalDocumentCarryover>("/documents/renewal-carryover", { method: "POST", body: JSON.stringify({ case_id: caseId, template_key: templateKey, expected_case_row_version: expectedCaseRowVersion }) }),
   documentPrechecks: (counterpartyId?: string, caseId?: string) => {
     const query = new URLSearchParams();
     if (counterpartyId) query.set("counterparty_id", counterpartyId);
@@ -296,7 +310,7 @@ export const api = {
   teamTasks: () => request<TeamTaskBoard>("/operations/team-tasks"),
   releaseTeamTask: (taskType: "approval" | "correction", taskId: string, expectedRowVersion: number, reason: string) =>
     request<PersonalTaskAssignment>(`/operations/team-tasks/${taskType}/${taskId}/release`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
-  remindTeamTask: (taskType: "approval" | "correction", taskId: string, expectedRowVersion: number, reason: string) =>
+  remindTeamTask: (taskType: "approval" | "correction" | "facility_control" | "control_extension", taskId: string, expectedRowVersion: number, reason: string) =>
     request<NotificationRecord>(`/operations/team-tasks/${taskType}/${taskId}/remind`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
   operationsSummary: () => request<OperationsSummary>("/operations/sla/summary"),
   runSlaScan: () => request<SlaScanResult>("/operations/sla/scan", { method: "POST" }),

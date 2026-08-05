@@ -104,6 +104,12 @@ class DocumentCaseLinkRequest(VersionedActionRequest):
     case_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
 
 
+class RenewalDocumentCarryoverRequest(BaseModel):
+    case_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    template_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=64)] = "general"
+    expected_case_row_version: int = Field(ge=1)
+
+
 class DocumentCorrectionActionRequest(VersionedActionRequest):
     action: Literal["remind", "reassign", "extend"]
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
@@ -234,6 +240,31 @@ class FacilityControlRequest(BaseModel):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=1000)]
 
 
+class FacilityControlConditionCompleteRequest(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    conclusion: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class FacilityControlExtensionCreateRequest(BaseModel):
+    expected_condition_version: int = Field(ge=1)
+    extension_days: int = Field(ge=1, le=30)
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
+
+
+class FacilityControlExtensionReviewRequest(BaseModel):
+    expected_extension_version: int = Field(ge=1)
+    expected_condition_version: int = Field(ge=1)
+    decision: Literal["approve", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class FacilityRenewalRequest(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    requested_limit: float = Field(gt=0)
+    requested_term_days: int = Field(ge=0, le=365)
+    renewal_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=1000)]
+
+
 class AlertDispositionRequest(BaseModel):
     expected_alert_version: int = Field(ge=1)
     expected_facility_version: int = Field(ge=1)
@@ -304,6 +335,13 @@ class ApprovalAdvanceRequest(BaseModel):
 class ApprovalAutomateRequest(BaseModel):
     expected_row_version: int = Field(ge=1)
     template_key: str | None = None
+
+
+class RenewalRiskReviewRequest(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    conclusion: Literal["cleared", "controls_required", "decline_recommended"]
+    review_note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    control_measures: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=300)]] = Field(default_factory=list, max_length=8)
 
 
 class ApprovalActionRequest(BaseModel):
