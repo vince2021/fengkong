@@ -1465,7 +1465,7 @@ export type NotificationRecord = {
   recipient_role: string;
   recipient_subject: string | null;
   category: string;
-  level: "due_soon" | "overdue" | "escalated" | "reminder" | "assignment" | "extension" | "task_created" | "resubmitted" | "reopened" | "completed" | "resumed" | "supervisor_reminder" | "lease_due_soon" | "lease_expired" | "policy_blocked";
+  level: "due_soon" | "overdue" | "escalated" | "reminder" | "assignment" | "extension" | "task_created" | "resubmitted" | "reopened" | "completed" | "resumed" | "supervisor_reminder" | "lease_due_soon" | "lease_expired" | "policy_blocked" | "scan_failed";
   severity: "info" | "warning" | "critical";
   title: string;
   message: string;
@@ -1567,14 +1567,19 @@ export type OperationsSummary = {
   active_cases: number;
   sla: { normal: number; due_soon: number; overdue: number; escalated: number; paused: number };
   correction_sla: { active: number; normal: number; due_soon: number; overdue: number; escalated: number };
+  post_credit_sla: { active_facilities: number; pending_controls: number; normal: number; due_soon: number; overdue: number; escalated: number; pending_extensions: number };
   unread_notifications: { total: number; info: number; warning: number; critical: number };
-  last_scan: { run_id: string; run_at: string | null; actor: string; active_cases_scanned: number; active_corrections_scanned: number; notifications_created: number; expired_assignments_released: number } | null;
+  last_scan: { run_id: string; run_at: string | null; actor: string; active_cases_scanned: number; active_corrections_scanned: number; notifications_created: number; workflow_notifications_created: number; expired_assignments_released: number; active_facilities_scanned: number; facility_alerts_opened: number; control_conditions_scanned: number; control_conditions_escalated: number; control_notifications_created: number } | null;
   stage_distribution: Array<{ stage: string; label: string; count: number }>;
 };
 
 export type SlaScanResult = {
   run_id: string;
+  run_key: string | null;
   run_at: string;
+  trigger_type: "manual" | "scheduler" | "retry";
+  status: "completed";
+  deduplicated: boolean;
   active_cases_scanned: number;
   due_soon_cases: number;
   overdue_cases: number;
@@ -1583,8 +1588,156 @@ export type SlaScanResult = {
   due_soon_corrections: number;
   overdue_corrections: number;
   escalated_corrections: number;
+  workflow_notifications_created: number;
   notifications_created: number;
   expired_assignments_released: number;
+  active_facilities_scanned: number;
+  facilities_expired: number;
+  facility_alerts_opened: number;
+  control_conditions_scanned: number;
+  control_alerts_opened: number;
+  control_conditions_escalated: number;
+  control_notifications_created: number;
+  failure_notifications_resolved: number;
+  execution_id: string;
+  execution_tracked: boolean;
+};
+
+export type SlaScanRetryResult = {
+  run_id: string;
+  run_key: string;
+  run_at: string;
+  trigger_type: "scheduler" | "retry";
+  status: "completed" | "failed" | "aborted";
+  deduplicated: boolean;
+  error_type?: string;
+  error_message?: string;
+  execution_id: string;
+  execution_tracked: boolean;
+  retry: {
+    run_key: string;
+    retry_number: number;
+    reason: string;
+    requested_at: string;
+    status: "completed" | "failed";
+    actor: string;
+  };
+};
+
+export type SlaScanExecution = {
+  execution_id: string;
+  started_at: string;
+  finished_at: string | null;
+  elapsed_seconds: number;
+  actor: string;
+  trigger_type: "manual" | "scheduler" | "retry" | "legacy";
+  run_key: string | null;
+  status: "running" | "completed" | "failed" | "aborted" | "timed_out" | "force_released" | "late_completed" | "late_failed" | "late_aborted";
+  result_run_id: string | null;
+  deduplicated: boolean;
+  error_type: string | null;
+};
+
+export type SlaScanRun = {
+  event_id: string;
+  run_id: string;
+  run_key: string | null;
+  run_at: string;
+  actor: string;
+  trigger_type: "manual" | "scheduler" | "retry" | "legacy";
+  status: "completed" | "failed";
+  error_type: string | null;
+  error_message: string | null;
+  active_cases_scanned: number;
+  active_corrections_scanned: number;
+  active_facilities_scanned: number;
+  control_conditions_scanned: number;
+  notifications_created: number;
+  workflow_notifications_created: number;
+  facility_alerts_opened: number;
+  control_alerts_opened: number;
+  alerts_opened: number;
+  escalated_cases: number;
+  escalated_corrections: number;
+  control_conditions_escalated: number;
+  escalations_triggered: number;
+  facilities_expired: number;
+  expired_assignments_released: number;
+  failure_notifications_resolved: number;
+  risk_actions_created: number;
+  notification_delta: number;
+  alert_delta: number;
+  escalation_delta: number;
+  risk_action_delta: number;
+  risk_increased: boolean;
+  recovered: boolean;
+  can_retry: boolean;
+  retry_count: number;
+  last_retry_at: string | null;
+  last_retry_actor: string | null;
+  last_retry_status: "requested" | "completed" | "failed" | null;
+  last_retry_reason: string | null;
+};
+
+export type SlaScanHistory = {
+  generated_at: string;
+  health: "healthy" | "stale" | "never" | "blocked";
+  expected_cadence_minutes: number;
+  stale_after_minutes: number;
+  execution_timeout_minutes: number;
+  execution_lease_expiry_minutes: number;
+  execution_heartbeat_interval_seconds: number;
+  execution_summary: {
+    returned_executions: number;
+    running: number;
+    timed_out: number;
+    force_released: number;
+    aborted: number;
+    failed: number;
+    last_started_at: string | null;
+  };
+  execution_lease: {
+    status: "idle" | "active" | "overdue" | "expired";
+    execution_id: string | null;
+    run_key: string | null;
+    actor: string | null;
+    trigger_type: "manual" | "scheduler" | "retry" | "legacy" | null;
+    acquired_at: string | null;
+    expires_at: string | null;
+    remaining_seconds: number;
+    warning_after_seconds: number;
+    last_heartbeat_at: string | null;
+    heartbeat_count: number;
+  };
+  executions: SlaScanExecution[];
+  scheduler_health: {
+    state: "healthy" | "stale" | "never" | "blocked";
+    last_run_at: string | null;
+    last_status: "completed" | "failed" | null;
+    recovered: boolean;
+    error_type: string | null;
+    error_message: string | null;
+    next_expected_run_at: string | null;
+    minutes_since_last_run: number | null;
+    missed_intervals: number;
+  };
+  summary: {
+    returned_runs: number;
+    scheduler_runs: number;
+    manual_runs: number;
+    retry_runs: number;
+    legacy_runs: number;
+    failed_runs: number;
+    last_run_at: string | null;
+    minutes_since_last_run: number | null;
+    missed_intervals: number;
+    short_interval_runs: number;
+    runs_with_new_risk: number;
+    total_notifications: number;
+    total_alerts: number;
+    total_escalations: number;
+  };
+  runs: SlaScanRun[];
 };
 
 export type CreditFacility = {

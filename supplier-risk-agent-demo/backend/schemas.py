@@ -129,6 +129,15 @@ class SupervisorTaskReminderRequest(VersionedActionRequest):
     reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
 
 
+class SlaScanRetryRequest(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class SlaScanLeaseReleaseRequest(BaseModel):
+    expected_execution_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
 class ModelOutcomeCreate(BaseModel):
     external_observation_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
     source: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]

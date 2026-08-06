@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from backend.database import get_db_session
 from backend.dependencies import get_document_repository
 from backend.repository import ConcurrentUpdateError, DocumentRepository
-from backend.schemas import DocumentCorrectionActionRequest, PersonalTaskAssignmentRequest, SupervisorTaskReleaseRequest, SupervisorTaskReminderRequest
+from backend.jobs.sla_scan import SlaScanExecutionConflict, SlaScanLeaseLost, SlaScanLeaseReleaseConflict, SlaScanLeaseReleaseNotFound, SlaScanRetryConflict, SlaScanRetryNotFound, force_release_scan_lease, retry_failed_sla_scan, run_manual_sla_scan
+from backend.schemas import DocumentCorrectionActionRequest, PersonalTaskAssignmentRequest, SlaScanLeaseReleaseRequest, SlaScanRetryRequest, SupervisorTaskReleaseRequest, SupervisorTaskReminderRequest
 from backend.security import Principal, require_permissions
-from backend.sla_monitor import build_operations_summary, build_personal_task_queue, build_team_task_board, run_sla_scan
+from backend.sla_monitor import build_operations_summary, build_personal_task_queue, build_team_task_board, list_sla_scan_runs
 from backend.task_assignment import TaskAssignmentConflict, TaskAssignmentForbidden, TaskAssignmentNotFound, change_task_assignment, release_task_as_supervisor, remind_task_as_supervisor
 
 
@@ -142,9 +143,63 @@ def supervisor_remind_task(
 @router.post("/sla/scan")
 def scan_sla(
     session: Session = Depends(get_db_session),
-    principal: Principal = Depends(require_permissions("sla:scan")),
+    principal: Principal = Depends(require_permissions("sla:scan", "facilities:scan")),
 ) -> dict:
-    return run_sla_scan(session, actor=principal.name)
+    try:
+        return run_manual_sla_scan(session, actor=principal.name)
+    except SlaScanExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SlaScanLeaseLost as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/sla/scans")
+def sla_scan_history(
+    limit: int = Query(default=10, ge=1, le=100),
+    session: Session = Depends(get_db_session),
+    principal: Principal = Depends(require_permissions("operations:view")),
+) -> dict:
+    return list_sla_scan_runs(session, limit=limit)
+
+
+@router.post("/sla/scans/{run_key}/retry")
+def retry_sla_scan(
+    run_key: str,
+    request: SlaScanRetryRequest,
+    session: Session = Depends(get_db_session),
+    principal: Principal = Depends(require_permissions("sla:scan", "facilities:scan")),
+) -> dict:
+    try:
+        return retry_failed_sla_scan(session, run_key, principal.name, request.reason)
+    except SlaScanRetryNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SlaScanRetryConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SlaScanExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/sla/lease/release")
+def release_sla_scan_lease(
+    request: SlaScanLeaseReleaseRequest,
+    session: Session = Depends(get_db_session),
+    principal: Principal = Depends(require_permissions("tasks:manage")),
+) -> dict:
+    try:
+        return force_release_scan_lease(
+            session,
+            request.expected_execution_id,
+            principal.name,
+            request.reason,
+        )
+    except SlaScanLeaseReleaseNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SlaScanLeaseReleaseConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/document-corrections")

@@ -11,15 +11,17 @@ import zipfile
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 import backend.database as database
 from backend.authority_policy_repository import AuthorityPolicyRepository, BUILTIN_POLICY_VERSION, DEFAULT_AUTHORITY_POLICY_CONFIG, policy_config_hash, verify_authority_policy_anchor_receipt, verify_authority_policy_evidence_package
 from backend.credit_authority import build_credit_authority
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, DocumentRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, DocumentRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord, SlaScanLeaseRecord
 from backend.dependencies import demo_repository, get_object_storage
+from backend.jobs.sla_scan import SlaScanExecutionConflict, SlaScanLeaseLost, _finish_scan_execution, _renew_scan_lease, _start_scan_execution, force_release_scan_lease, run_scheduled_sla_scan
 from backend.main import app
-from backend.repository import ModelMonitoringRepository, RatingRunRepository, clear_persistent_data, content_hash
+from backend.repository import AuditRepository, ModelMonitoringRepository, RatingRunRepository, clear_persistent_data, content_hash
+from backend.sla_monitor import _ensure_scan_write_transaction, sla_scan_scheduler_run_key
 from backend.storage import LocalObjectStorage
 from rating.scorecard import rate_counterparty
 from tests.database_support import IsolatedTestDatabase
@@ -4092,6 +4094,969 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(summary.json()["sla"]["escalated"], 1)
         self.assertEqual(summary.json()["last_scan"]["run_id"], escalated_scan.json()["run_id"])
         self.assertEqual(forbidden_summary.status_code, 403)
+
+    def test_operations_scan_unifies_workflow_and_post_credit_sla(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        approver = {"Authorization": "Bearer dev-approver"}
+        case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        now = datetime.now(timezone.utc)
+        facility_id = "facility-unified-scan-test"
+        condition_id = "condition-unified-scan-test"
+        extension_id = "extension-unified-scan-test"
+        with database.SessionLocal() as session:
+            case_record = session.get(ApprovalCaseRecord, case["case_id"])
+            case_record.stage_due_at = now + timedelta(minutes=30)
+            session.add(
+                CreditFacilityRecord(
+                    id=facility_id,
+                    case_id=case["case_id"],
+                    counterparty_id=self.counterparty["id"],
+                    counterparty_name=self.counterparty["name"],
+                    approved_limit=100000,
+                    used_limit=0,
+                    opening_balance=0,
+                    payment_term_days=30,
+                    rating="A",
+                    access_strategy="准入",
+                    monitoring_frequency="月度",
+                    status="active",
+                    effective_at=now - timedelta(days=30),
+                    expires_at=now + timedelta(days=180),
+                    next_review_at=now + timedelta(days=30),
+                )
+            )
+            session.flush()
+            session.add(
+                FacilityControlConditionRecord(
+                    id=condition_id,
+                    facility_id=facility_id,
+                    source_case_id=case["case_id"],
+                    source_review_hash="unified-scan-review-hash",
+                    sequence=1,
+                    measure="完成月度贷后风险核验并归档外部证据",
+                    owner_role="risk_manager",
+                    status="pending",
+                    due_at=now - timedelta(days=8),
+                )
+            )
+            session.flush()
+            session.add(
+                FacilityControlExtensionRecord(
+                    id=extension_id,
+                    condition_id=condition_id,
+                    facility_id=facility_id,
+                    extension_days=30,
+                    previous_due_at=now - timedelta(days=8),
+                    proposed_due_at=now + timedelta(days=22),
+                    reason="外部证据仍在正式出具流程中，申请受控延期",
+                    status="pending",
+                    requested_by="risk-demo",
+                    requested_by_name="风控经理",
+                    requested_at=now,
+                )
+            )
+            session.commit()
+
+        before = self.client.get("/api/v1/operations/sla/summary", headers=operations)
+        self.assertEqual(before.status_code, 200, before.text)
+        self.assertEqual(before.json()["post_credit_sla"]["active_facilities"], 1)
+        self.assertEqual(before.json()["post_credit_sla"]["pending_controls"], 1)
+        self.assertEqual(before.json()["post_credit_sla"]["overdue"], 1)
+        self.assertEqual(before.json()["post_credit_sla"]["pending_extensions"], 1)
+
+        first_scan = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        second_scan = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(first_scan.status_code, 200, first_scan.text)
+        self.assertEqual(first_scan.json()["active_cases_scanned"], 1)
+        self.assertEqual(first_scan.json()["due_soon_cases"], 1)
+        self.assertEqual(first_scan.json()["active_facilities_scanned"], 1)
+        self.assertEqual(first_scan.json()["control_conditions_scanned"], 1)
+        self.assertEqual(first_scan.json()["control_conditions_escalated"], 1)
+        self.assertEqual(first_scan.json()["control_notifications_created"], 1)
+        self.assertEqual(first_scan.json()["facility_alerts_opened"], 1)
+        self.assertEqual(first_scan.json()["workflow_notifications_created"], 1)
+        self.assertEqual(first_scan.json()["notifications_created"], 2)
+        self.assertEqual(second_scan.json()["notifications_created"], 0)
+        self.assertEqual(second_scan.json()["facility_alerts_opened"], 0)
+        self.assertEqual(second_scan.json()["control_conditions_escalated"], 0)
+
+        after = self.client.get("/api/v1/operations/sla/summary", headers=operations).json()
+        self.assertEqual(after["post_credit_sla"]["overdue"], 0)
+        self.assertEqual(after["post_credit_sla"]["escalated"], 1)
+        self.assertEqual(after["last_scan"]["active_facilities_scanned"], 1)
+        self.assertEqual(after["last_scan"]["control_conditions_scanned"], 1)
+        self.assertEqual(after["last_scan"]["control_conditions_escalated"], 0)
+        self.assertTrue(any(item["category"] == "facility_control" for item in self.client.get("/api/v1/notifications", headers=approver).json()))
+        scan_audit = self.client.get(
+            f"/api/v1/audit-events?aggregate_id={first_scan.json()['run_id']}",
+            headers={"Authorization": "Bearer dev-auditor"},
+        ).json()
+        self.assertEqual(scan_audit[0]["payload"]["control_notifications_created"], 1)
+        self.assertEqual(scan_audit[0]["payload"]["notifications_created"], 2)
+
+    def test_sla_scan_history_health_trends_and_permissions(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        client = {"Authorization": "Bearer dev-client"}
+        empty = self.client.get("/api/v1/operations/sla/scans", headers=operations)
+        self.assertEqual(empty.status_code, 200, empty.text)
+        self.assertEqual(empty.json()["health"], "never")
+        self.assertEqual(empty.json()["runs"], [])
+        self.assertEqual(self.client.get("/api/v1/operations/sla/scans", headers=client).status_code, 403)
+        self.assertEqual(self.client.get("/api/v1/operations/sla/scans?limit=0", headers=operations).status_code, 422)
+
+        case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        with database.SessionLocal() as session:
+            session.get(ApprovalCaseRecord, case["case_id"]).stage_due_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            session.commit()
+
+        first = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        second = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        history = self.client.get("/api/v1/operations/sla/scans?limit=10", headers=operations)
+        self.assertEqual(history.status_code, 200, history.text)
+        payload = history.json()
+        self.assertEqual(payload["health"], "healthy")
+        self.assertEqual(payload["expected_cadence_minutes"], 5)
+        self.assertEqual(payload["stale_after_minutes"], 15)
+        self.assertEqual(payload["summary"]["returned_runs"], 2)
+        self.assertEqual(payload["execution_timeout_minutes"], 10)
+        self.assertEqual(payload["execution_lease_expiry_minutes"], 30)
+        self.assertEqual(payload["execution_summary"]["returned_executions"], 2)
+        self.assertEqual(payload["execution_summary"]["running"], 0)
+        self.assertEqual(payload["execution_summary"]["timed_out"], 0)
+        self.assertEqual({item["status"] for item in payload["executions"]}, {"completed"})
+        self.assertEqual({item["trigger_type"] for item in payload["executions"]}, {"manual"})
+        self.assertEqual({item["actor"] for item in payload["executions"]}, {"运营值班"})
+        self.assertEqual(payload["summary"]["manual_runs"], 2)
+        self.assertEqual(payload["summary"]["scheduler_runs"], 0)
+        self.assertEqual(payload["scheduler_health"]["state"], "never")
+        self.assertEqual(payload["summary"]["short_interval_runs"], 1)
+        self.assertEqual(payload["summary"]["runs_with_new_risk"], 1)
+        self.assertEqual(payload["runs"][0]["run_id"], second.json()["run_id"])
+        self.assertEqual(payload["runs"][0]["notifications_created"], 0)
+        self.assertEqual(payload["runs"][0]["notification_delta"], -1)
+        self.assertFalse(payload["runs"][0]["risk_increased"])
+        self.assertEqual(payload["runs"][1]["run_id"], first.json()["run_id"])
+        self.assertEqual(payload["runs"][1]["notifications_created"], 1)
+        self.assertEqual(payload["runs"][1]["active_cases_scanned"], 1)
+
+        stale_time = datetime.now(timezone.utc) - timedelta(minutes=30)
+        with database.SessionLocal() as session:
+            records = session.scalars(
+                select(AuditEventRecord).where(AuditEventRecord.event_type == "sla_scan_completed")
+            ).all()
+            for index, record in enumerate(records):
+                record.payload = {
+                    **record.payload,
+                    "run_at": (stale_time - timedelta(minutes=index)).isoformat(),
+                }
+            session.commit()
+        stale = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(stale["health"], "stale")
+        self.assertGreaterEqual(stale["summary"]["minutes_since_last_run"], 30)
+        self.assertGreaterEqual(stale["summary"]["missed_intervals"], 5)
+
+        with database.SessionLocal() as session:
+            record = session.scalars(
+                select(AuditEventRecord).where(AuditEventRecord.event_type == "sla_scan_completed")
+            ).first()
+            record.payload = {**record.payload, "run_at": "invalid-legacy-timestamp"}
+            session.commit()
+        compatible = self.client.get("/api/v1/operations/sla/scans", headers=operations)
+        self.assertEqual(compatible.status_code, 200, compatible.text)
+        datetime.fromisoformat(compatible.json()["runs"][0]["run_at"])
+        compatible_summary = self.client.get("/api/v1/operations/sla/summary", headers=operations)
+        self.assertEqual(compatible_summary.status_code, 200, compatible_summary.text)
+        datetime.fromisoformat(compatible_summary.json()["last_scan"]["run_at"])
+
+    def test_sla_scan_execution_history_marks_running_and_timed_out(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        with database.SessionLocal() as session:
+            audit = AuditRepository(session)
+            for execution_id, started_at in (
+                ("execution-running", current - timedelta(minutes=2)),
+                ("execution-timed-out", current - timedelta(minutes=11)),
+            ):
+                audit.append_root_once(
+                    "sla_scan_execution",
+                    execution_id,
+                    "sla_scan_started",
+                    "全域 SLA 自动调度器",
+                    {
+                        "execution_id": execution_id,
+                        "started_at": started_at.isoformat(),
+                        "trigger_type": "scheduler",
+                        "run_key": f"run-key:{execution_id}",
+                        "status": "running",
+                    },
+                )
+            session.commit()
+
+        response = self.client.get("/api/v1/operations/sla/scans", headers=operations)
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["execution_summary"]["running"], 1)
+        self.assertEqual(payload["execution_summary"]["timed_out"], 1)
+        by_id = {item["execution_id"]: item for item in payload["executions"]}
+        self.assertEqual(by_id["execution-running"]["status"], "running")
+        self.assertGreaterEqual(by_id["execution-running"]["elapsed_seconds"], 120)
+        self.assertEqual(by_id["execution-timed-out"]["status"], "timed_out")
+        self.assertGreaterEqual(by_id["execution-timed-out"]["elapsed_seconds"], 660)
+        self.assertIsNone(by_id["execution-timed-out"]["finished_at"])
+
+    def test_sla_scan_lease_blocks_manual_and_skips_scheduler_overlap(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        execution_id = "active-scan-execution"
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="另一运营人员",
+                trigger_type="manual",
+                acquired_at=current - timedelta(minutes=1),
+                expires_at=current + timedelta(minutes=9),
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "另一运营人员",
+                {
+                    "execution_id": execution_id,
+                    "started_at": (current - timedelta(minutes=1)).isoformat(),
+                    "trigger_type": "manual",
+                    "run_key": None,
+                    "status": "running",
+                },
+            )
+            session.commit()
+
+        manual = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(manual.status_code, 409, manual.text)
+        self.assertIn("另一运营人员", manual.json()["detail"])
+        with database.SessionLocal() as session:
+            scheduled = run_scheduled_sla_scan(session, now=current)
+        self.assertEqual(scheduled["status"], "skipped")
+        self.assertEqual(scheduled["skip_reason"], "scan_in_progress")
+        self.assertEqual(scheduled["active_execution"]["execution_id"], execution_id)
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(history["execution_lease"]["status"], "active")
+        self.assertEqual(history["execution_lease"]["actor"], "另一运营人员")
+        self.assertGreater(history["execution_lease"]["remaining_seconds"], 0)
+        with database.SessionLocal() as session:
+            starts = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.event_type == "sla_scan_started",
+                )
+            ).all()
+            skip_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_skip",
+                    AuditEventRecord.event_type == "sla_scan_skipped",
+                )
+            ).all()
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(skip_events), 1)
+        self.assertEqual(skip_events[0].payload["active_execution"]["execution_id"], execution_id)
+
+    def test_sla_scan_heartbeat_extends_lease_and_is_observable(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        execution_id = "heartbeat-protected-execution"
+        acquired_at = current - timedelta(minutes=29)
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="长时扫描调度器",
+                trigger_type="scheduler",
+                acquired_at=acquired_at,
+                expires_at=current + timedelta(minutes=1),
+                last_heartbeat_at=acquired_at,
+                heartbeat_count=0,
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "长时扫描调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": acquired_at.isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "heartbeat-protected-run",
+                    "status": "running",
+                },
+            )
+            session.commit()
+        with database.SessionLocal() as session:
+            self.assertTrue(_renew_scan_lease(session, execution_id, now=current))
+        with database.SessionLocal() as session:
+            lease = session.get(SlaScanLeaseRecord, "global-sla-scan")
+            self.assertEqual(lease.heartbeat_count, 1)
+            self.assertEqual(lease.last_heartbeat_at.replace(tzinfo=timezone.utc), current)
+            self.assertEqual(lease.expires_at.replace(tzinfo=timezone.utc), current + timedelta(minutes=30))
+            with self.assertRaises(SlaScanExecutionConflict):
+                _start_scan_execution(session, "并发运营人员", "manual", current + timedelta(minutes=2), None)
+
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(history["execution_heartbeat_interval_seconds"], 60)
+        self.assertEqual(history["execution_lease"]["status"], "overdue")
+        self.assertEqual(history["execution_lease"]["heartbeat_count"], 1)
+        self.assertEqual(
+            datetime.fromisoformat(history["execution_lease"]["last_heartbeat_at"]),
+            current,
+        )
+        self.assertGreater(history["execution_lease"]["remaining_seconds"], 25 * 60)
+
+    def test_sqlite_scan_transaction_reuses_existing_write_transaction(self) -> None:
+        with database.SessionLocal() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            _ensure_scan_write_transaction(session)
+            self.assertTrue(session.connection().connection.driver_connection.in_transaction)
+            session.rollback()
+
+    def test_manual_sla_scan_rolls_back_business_writes_after_lease_loss(self) -> None:
+        manager = {"Authorization": "Bearer dev-manager"}
+        operations = {"Authorization": "Bearer dev-operations"}
+        case = self.client.post(
+            "/api/v1/approval-cases",
+            json={"counterparty_id": self.counterparty["id"]},
+            headers=manager,
+        ).json()
+        with database.SessionLocal() as session:
+            record = session.get(ApprovalCaseRecord, case["case_id"])
+            record.stage_due_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+            session.commit()
+
+        with patch(
+            "backend.jobs.sla_scan._ScanLeaseHeartbeat.assert_owned",
+            side_effect=[None, None, SlaScanLeaseLost("测试模拟租约被接管")],
+        ):
+            response = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("测试模拟租约被接管", response.json()["detail"])
+        with database.SessionLocal() as session:
+            sla_notifications = session.scalars(
+                select(NotificationRecord).where(
+                    NotificationRecord.case_id == case["case_id"],
+                    NotificationRecord.category == "sla",
+                )
+            ).all()
+            execution_events = session.scalars(
+                select(AuditEventRecord)
+                .where(AuditEventRecord.aggregate_type == "sla_scan_execution")
+                .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+            ).all()
+            scan_results = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan",
+                    AuditEventRecord.event_type == "sla_scan_completed",
+                )
+            ).all()
+            lease = session.get(SlaScanLeaseRecord, "global-sla-scan")
+        self.assertEqual(sla_notifications, [])
+        self.assertEqual(scan_results, [])
+        self.assertEqual(
+            {item.event_type for item in execution_events},
+            {"sla_scan_started", "sla_scan_execution_lease_lost", "sla_scan_execution_aborted"},
+        )
+        self.assertIsNone(lease.execution_id)
+
+    def test_overdue_sla_scan_lease_stays_protected_and_can_be_governed_released(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        current = datetime.now(timezone.utc)
+        execution_id = "overdue-protected-execution"
+        started_at = current - timedelta(minutes=11)
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="长时任务调度器",
+                trigger_type="scheduler",
+                acquired_at=started_at,
+                expires_at=current + timedelta(minutes=19),
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "长时任务调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": started_at.isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "overdue-protected-run",
+                    "status": "running",
+                },
+            )
+            session.commit()
+
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(history["execution_lease"]["status"], "overdue")
+        self.assertEqual(history["execution_lease"]["warning_after_seconds"], 600)
+        self.assertGreater(history["execution_lease"]["remaining_seconds"], 0)
+        self.assertEqual(history["execution_summary"]["timed_out"], 1)
+        blocked = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/operations/sla/lease/release",
+                json={"expected_execution_id": execution_id, "reason": "确认后台进程已失联，申请接管"},
+                headers=risk,
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/v1/operations/sla/lease/release",
+                json={"expected_execution_id": execution_id, "reason": "短"},
+                headers=operations,
+            ).status_code,
+            422,
+        )
+        changed = self.client.post(
+            "/api/v1/operations/sla/lease/release",
+            json={"expected_execution_id": "another-execution", "reason": "确认后台进程已失联，申请接管"},
+            headers=operations,
+        )
+        self.assertEqual(changed.status_code, 409, changed.text)
+
+        released = self.client.post(
+            "/api/v1/operations/sla/lease/release",
+            json={"expected_execution_id": execution_id, "reason": "确认后台进程已失联，申请接管"},
+            headers=operations,
+        )
+        self.assertEqual(released.status_code, 200, released.text)
+        self.assertEqual(released.json()["status"], "force_released")
+        self.assertEqual(released.json()["released_by"], "运营值班")
+        after_release = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(after_release["execution_lease"]["status"], "idle")
+        self.assertEqual(after_release["execution_summary"]["force_released"], 1)
+        self.assertEqual(
+            {item["execution_id"]: item for item in after_release["executions"]}[execution_id]["status"],
+            "force_released",
+        )
+        with database.SessionLocal() as session:
+            release_event = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == execution_id,
+                    AuditEventRecord.event_type == "sla_scan_execution_force_released",
+                )
+            ).one()
+        self.assertEqual(release_event.actor, "运营值班")
+        self.assertEqual(release_event.payload["reason"], "确认后台进程已失联，申请接管")
+        resumed = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+
+        with database.SessionLocal() as session:
+            tracked = _finish_scan_execution(
+                session,
+                {
+                    "execution_id": execution_id,
+                    "started_at": started_at.isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "overdue-protected-run",
+                    "actor": "长时任务调度器",
+                },
+                "completed",
+                {"run_id": "late-after-release", "deduplicated": False},
+            )
+        self.assertTrue(tracked)
+        final_history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(
+            {item["execution_id"]: item for item in final_history["executions"]}[execution_id]["status"],
+            "late_completed",
+        )
+
+    def test_sla_scan_lease_cannot_be_released_before_warning_threshold(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        execution_id = "fresh-protected-execution"
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="正在运行的调度器",
+                trigger_type="scheduler",
+                acquired_at=current - timedelta(minutes=2),
+                expires_at=current + timedelta(minutes=28),
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "正在运行的调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": (current - timedelta(minutes=2)).isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "fresh-protected-run",
+                    "status": "running",
+                },
+            )
+            session.commit()
+        response = self.client.post(
+            "/api/v1/operations/sla/lease/release",
+            json={"expected_execution_id": execution_id, "reason": "希望提前启动另一项扫描任务"},
+            headers=operations,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("10 分钟", response.json()["detail"])
+        with database.SessionLocal() as session:
+            self.assertEqual(session.get(SlaScanLeaseRecord, "global-sla-scan").execution_id, execution_id)
+
+    def test_terminal_scan_with_stale_lease_is_reclaimed_without_changing_result(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        execution_id = "completed-with-stale-lease"
+        started_at = current - timedelta(minutes=2)
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="已完成调度器",
+                trigger_type="scheduler",
+                acquired_at=started_at,
+                expires_at=current + timedelta(minutes=28),
+            ))
+            audit = AuditRepository(session)
+            audit.append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "已完成调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": started_at.isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "completed-stale-run",
+                    "status": "running",
+                },
+            )
+            audit.append(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_execution_completed",
+                "已完成调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": current.isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "completed-stale-run",
+                    "status": "completed",
+                    "result_run_id": "completed-stale-run",
+                    "deduplicated": False,
+                    "error_type": None,
+                },
+            )
+            session.commit()
+
+        resumed = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(resumed.status_code, 200, resumed.text)
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(
+            {item["execution_id"]: item for item in history["executions"]}[execution_id]["status"],
+            "completed",
+        )
+        with database.SessionLocal() as session:
+            old_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == execution_id,
+                )
+            ).all()
+        self.assertNotIn("sla_scan_execution_timed_out", {item.event_type for item in old_events})
+        self.assertNotIn("sla_scan_execution_force_released", {item.event_type for item in old_events})
+
+    def test_sla_scan_lease_release_rolls_back_when_audit_write_fails(self) -> None:
+        current = datetime.now(timezone.utc)
+        execution_id = "release-audit-failure"
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="失联调度器",
+                trigger_type="scheduler",
+                acquired_at=current - timedelta(minutes=11),
+                expires_at=current + timedelta(minutes=19),
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "失联调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": (current - timedelta(minutes=11)).isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "release-audit-failure-run",
+                    "status": "running",
+                },
+            )
+            session.commit()
+        with database.SessionLocal() as session:
+            with patch("backend.jobs.sla_scan.AuditRepository.append", side_effect=SQLAlchemyError("forced audit failure")):
+                with self.assertRaises(SQLAlchemyError):
+                    force_release_scan_lease(
+                        session,
+                        execution_id,
+                        "运营值班",
+                        "确认后台进程失联但审计暂不可用",
+                        now=current,
+                    )
+        with database.SessionLocal() as session:
+            self.assertEqual(session.get(SlaScanLeaseRecord, "global-sla-scan").execution_id, execution_id)
+            release_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == execution_id,
+                    AuditEventRecord.event_type == "sla_scan_execution_force_released",
+                )
+            ).all()
+        self.assertEqual(release_events, [])
+
+    def test_expired_sla_scan_lease_is_taken_over_and_audited(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        expired_execution_id = "expired-scan-execution"
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=expired_execution_id,
+                actor="已中断调度器",
+                trigger_type="scheduler",
+                acquired_at=current - timedelta(minutes=31),
+                expires_at=current - timedelta(minutes=1),
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                expired_execution_id,
+                "sla_scan_started",
+                "已中断调度器",
+                {
+                    "execution_id": expired_execution_id,
+                    "started_at": (current - timedelta(minutes=31)).isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "expired-run-key",
+                    "status": "running",
+                },
+            )
+            session.commit()
+
+        takeover = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(takeover.status_code, 200, takeover.text)
+        self.assertEqual(takeover.json()["status"], "completed")
+        self.assertNotEqual(takeover.json()["execution_id"], expired_execution_id)
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        by_id = {item["execution_id"]: item for item in history["executions"]}
+        self.assertEqual(by_id[expired_execution_id]["status"], "timed_out")
+        self.assertEqual(by_id[expired_execution_id]["error_type"], "ExecutionLeaseExpired")
+        self.assertIsNotNone(by_id[expired_execution_id]["finished_at"])
+        self.assertEqual(by_id[takeover.json()["execution_id"]]["status"], "completed")
+        self.assertEqual(history["execution_lease"]["status"], "idle")
+        with database.SessionLocal() as session:
+            lease = session.get(SlaScanLeaseRecord, "global-sla-scan")
+            timeout_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == expired_execution_id,
+                    AuditEventRecord.event_type == "sla_scan_execution_timed_out",
+                )
+            ).all()
+        self.assertIsNone(lease.execution_id)
+        self.assertEqual(len(timeout_events), 1)
+
+    def test_late_scan_completion_keeps_takeover_lease_and_timeout_evidence(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        with database.SessionLocal() as session:
+            old_execution = _start_scan_execution(
+                session,
+                "迟到调度器",
+                "scheduler",
+                current - timedelta(minutes=31),
+                "late-run-key",
+            )
+        with database.SessionLocal() as session:
+            new_execution = _start_scan_execution(
+                session,
+                "接管运营人员",
+                "manual",
+                current,
+                None,
+            )
+        with database.SessionLocal() as session:
+            tracked = _finish_scan_execution(
+                session,
+                old_execution,
+                "completed",
+                {"run_id": "late-result-run", "deduplicated": False},
+            )
+        self.assertTrue(tracked)
+        with database.SessionLocal() as session:
+            active_lease = session.get(SlaScanLeaseRecord, "global-sla-scan")
+            self.assertEqual(active_lease.execution_id, new_execution["execution_id"])
+            _finish_scan_execution(
+                session,
+                new_execution,
+                "completed",
+                {"run_id": "takeover-result-run", "deduplicated": False},
+            )
+
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        by_id = {item["execution_id"]: item for item in history["executions"]}
+        self.assertEqual(by_id[old_execution["execution_id"]]["status"], "late_completed")
+        with database.SessionLocal() as session:
+            late_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == old_execution["execution_id"],
+                )
+            ).all()
+        self.assertEqual(
+            {item.event_type for item in late_events},
+            {"sla_scan_started", "sla_scan_execution_timed_out", "sla_scan_execution_late_completed"},
+        )
+
+    def test_scheduled_sla_scan_is_bucket_idempotent_and_reports_heartbeat(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        bucket_start = current.replace(minute=(current.minute // 5) * 5, second=10, microsecond=0)
+        first_key = sla_scan_scheduler_run_key(bucket_start)
+        self.assertEqual(first_key, sla_scan_scheduler_run_key(bucket_start + timedelta(minutes=4, seconds=40)))
+        self.assertNotEqual(first_key, sla_scan_scheduler_run_key(bucket_start + timedelta(minutes=5)))
+        with database.SessionLocal() as session, self.assertRaises(ValueError):
+            run_scheduled_sla_scan(session, now=bucket_start, run_key="")
+
+        with database.SessionLocal() as session:
+            first = run_scheduled_sla_scan(session, now=bucket_start)
+        with database.SessionLocal() as session:
+            duplicate = run_scheduled_sla_scan(session, now=bucket_start + timedelta(minutes=1))
+        with database.SessionLocal() as session:
+            next_window = run_scheduled_sla_scan(session, now=bucket_start + timedelta(minutes=5))
+
+        self.assertFalse(first["deduplicated"])
+        self.assertTrue(duplicate["deduplicated"])
+        self.assertEqual(duplicate["run_id"], first["run_id"])
+        self.assertEqual(duplicate["run_at"], first["run_at"])
+        self.assertEqual(first["trigger_type"], "scheduler")
+        self.assertEqual(first["run_key"], first_key)
+        self.assertFalse(next_window["deduplicated"])
+        self.assertNotEqual(next_window["run_id"], first["run_id"])
+        with database.SessionLocal() as session:
+            scan_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan",
+                    AuditEventRecord.event_type == "sla_scan_completed",
+                )
+            ).all()
+        self.assertEqual(len(scan_events), 2)
+
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations)
+        self.assertEqual(history.status_code, 200, history.text)
+        payload = history.json()
+        self.assertEqual(payload["scheduler_health"]["state"], "healthy")
+        self.assertEqual(payload["summary"]["scheduler_runs"], 2)
+        self.assertEqual(payload["summary"]["manual_runs"], 0)
+        self.assertEqual(payload["runs"][0]["trigger_type"], "scheduler")
+        self.assertEqual(payload["runs"][0]["run_key"], next_window["run_key"])
+        self.assertIsNotNone(payload["scheduler_health"]["next_expected_run_at"])
+
+    def test_scheduled_sla_scan_failure_is_deduplicated_alerted_and_recovers(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        admin = {"Authorization": "Bearer dev-admin"}
+        current = datetime.now(timezone.utc)
+        run_at = current.replace(minute=(current.minute // 5) * 5, second=20, microsecond=0)
+        run_key = sla_scan_scheduler_run_key(run_at)
+        with patch("backend.jobs.sla_scan.run_sla_scan", side_effect=RuntimeError("postgresql://secret-password@db")):
+            with database.SessionLocal() as session:
+                failure = run_scheduled_sla_scan(session, now=run_at)
+            with database.SessionLocal() as session:
+                duplicate = run_scheduled_sla_scan(session, now=run_at + timedelta(minutes=1))
+
+        self.assertEqual(failure["status"], "failed")
+        self.assertFalse(failure["deduplicated"])
+        self.assertEqual(failure["error_type"], "RuntimeError")
+        self.assertNotIn("secret-password", failure["error_message"])
+        self.assertTrue(duplicate["deduplicated"])
+        self.assertEqual(duplicate["run_id"], run_key)
+        with database.SessionLocal() as session:
+            failure_events = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_failure",
+                    AuditEventRecord.aggregate_id == run_key,
+                    AuditEventRecord.event_type == "sla_scan_failed",
+                )
+            ).all()
+        self.assertEqual(len(failure_events), 1)
+        failure_notifications = [
+            item for item in self.client.get("/api/v1/notifications", headers=admin).json()
+            if item["category"] == "sla_scan"
+        ]
+        self.assertEqual(len(failure_notifications), 2)
+        self.assertEqual({item["recipient_role"] for item in failure_notifications}, {"operations", "admin"})
+        blocked = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(blocked["scheduler_health"]["state"], "blocked")
+        self.assertEqual(blocked["scheduler_health"]["error_type"], "RuntimeError")
+        self.assertEqual(blocked["summary"]["failed_runs"], 1)
+        self.assertEqual(blocked["runs"][0]["status"], "failed")
+        self.assertEqual(blocked["execution_summary"]["failed"], 2)
+        self.assertEqual(blocked["executions"][0]["status"], "failed")
+
+        with database.SessionLocal() as session:
+            recovered = run_scheduled_sla_scan(session, now=run_at, run_key=run_key)
+        self.assertEqual(recovered["status"], "completed")
+        self.assertFalse(recovered["deduplicated"])
+        self.assertEqual(recovered["failure_notifications_resolved"], 2)
+        healthy = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        self.assertEqual(healthy["scheduler_health"]["state"], "healthy")
+        self.assertEqual([item["status"] for item in healthy["runs"][:2]], ["completed", "failed"])
+        self.assertNotEqual(healthy["runs"][0]["event_id"], healthy["runs"][1]["event_id"])
+        resolved_notifications = [
+            item for item in self.client.get("/api/v1/notifications", headers=admin).json()
+            if item["category"] == "sla_scan"
+        ]
+        self.assertEqual({item["status"] for item in resolved_notifications}, {"resolved"})
+        self.assertEqual(
+            self.client.get("/api/v1/notifications?unread_only=true", headers=operations).json(),
+            [],
+        )
+
+    def test_failed_sla_scan_can_be_retried_with_permission_reason_and_audit(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        risk = {"Authorization": "Bearer dev-risk"}
+        current = datetime.now(timezone.utc)
+        run_at = current.replace(minute=(current.minute // 5) * 5, second=20, microsecond=0)
+        run_key = sla_scan_scheduler_run_key(run_at)
+        with patch("backend.jobs.sla_scan.run_sla_scan", side_effect=RuntimeError("initial failure")):
+            with database.SessionLocal() as session:
+                failed = run_scheduled_sla_scan(session, now=run_at)
+        self.assertEqual(failed["status"], "failed")
+
+        retry_path = f"/api/v1/operations/sla/scans/{run_key}/retry"
+        self.assertEqual(self.client.post(retry_path, json={"reason": "人工排查数据库连接后重试"}, headers=risk).status_code, 403)
+        self.assertEqual(self.client.post(retry_path, json={"reason": "短"}, headers=operations).status_code, 422)
+        self.assertEqual(
+            self.client.post("/api/v1/operations/sla/scans/missing/retry", json={"reason": "确认故障后发起人工重试"}, headers=operations).status_code,
+            404,
+        )
+
+        with patch("backend.jobs.sla_scan.run_sla_scan", side_effect=RuntimeError("retry still failing")):
+            retry_failed = self.client.post(
+                retry_path,
+                json={"reason": "数据库连接已切换，执行第一次重试"},
+                headers=operations,
+            )
+        self.assertEqual(retry_failed.status_code, 200, retry_failed.text)
+        self.assertEqual(retry_failed.json()["status"], "failed")
+        self.assertEqual(retry_failed.json()["retry"]["status"], "failed")
+        self.assertEqual(retry_failed.json()["retry"]["retry_number"], 1)
+
+        after_failed_retry = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        failure_row = next(item for item in after_failed_retry["runs"] if item["status"] == "failed")
+        self.assertTrue(failure_row["can_retry"])
+        self.assertFalse(failure_row["recovered"])
+        self.assertEqual(failure_row["retry_count"], 1)
+        self.assertEqual(failure_row["last_retry_status"], "failed")
+        self.assertEqual(failure_row["last_retry_actor"], "运营值班")
+        self.assertEqual(failure_row["last_retry_reason"], "数据库连接已切换，执行第一次重试")
+
+        retry_succeeded = self.client.post(
+            retry_path,
+            json={"reason": "依赖服务恢复，执行第二次人工重试"},
+            headers=operations,
+        )
+        self.assertEqual(retry_succeeded.status_code, 200, retry_succeeded.text)
+        self.assertEqual(retry_succeeded.json()["status"], "completed")
+        self.assertEqual(retry_succeeded.json()["trigger_type"], "retry")
+        self.assertEqual(retry_succeeded.json()["retry"]["retry_number"], 2)
+        self.assertEqual(self.client.post(retry_path, json={"reason": "重复恢复状态校验"}, headers=operations).status_code, 409)
+
+        recovered_history = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()
+        recovered_failure_row = next(item for item in recovered_history["runs"] if item["status"] == "failed")
+        self.assertTrue(recovered_failure_row["recovered"])
+        self.assertFalse(recovered_failure_row["can_retry"])
+        self.assertEqual(recovered_failure_row["retry_count"], 2)
+        self.assertEqual(recovered_failure_row["last_retry_status"], "completed")
+        self.assertEqual(recovered_history["scheduler_health"]["state"], "healthy")
+        self.assertTrue(recovered_history["scheduler_health"]["recovered"])
+        self.assertEqual(recovered_history["summary"]["retry_runs"], 1)
+
+        with database.SessionLocal() as session:
+            retry_events = session.scalars(
+                select(AuditEventRecord)
+                .where(
+                    AuditEventRecord.aggregate_type == "sla_scan_failure",
+                    AuditEventRecord.aggregate_id == run_key,
+                    AuditEventRecord.event_type.in_({
+                        "sla_scan_retry_requested",
+                        "sla_scan_retry_failed",
+                        "sla_scan_retry_completed",
+                    }),
+                )
+                .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+            ).all()
+        self.assertEqual([item.event_type for item in retry_events].count("sla_scan_retry_requested"), 2)
+        self.assertEqual([item.event_type for item in retry_events].count("sla_scan_retry_failed"), 1)
+        self.assertEqual([item.event_type for item in retry_events].count("sla_scan_retry_completed"), 1)
+        self.assertEqual({item.actor for item in retry_events}, {"运营值班"})
+
+    def test_failed_sla_scan_rejects_overlapping_retry(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        run_at = datetime.now(timezone.utc).replace(second=20, microsecond=0)
+        run_key = sla_scan_scheduler_run_key(run_at)
+        with patch("backend.jobs.sla_scan.run_sla_scan", side_effect=RuntimeError("initial failure")):
+            with database.SessionLocal() as session:
+                run_scheduled_sla_scan(session, now=run_at)
+        with database.SessionLocal() as session:
+            AuditRepository(session).append(
+                "sla_scan_failure",
+                run_key,
+                "sla_scan_retry_requested",
+                "另一运营人员",
+                {
+                    "run_key": run_key,
+                    "retry_number": 1,
+                    "reason": "正在执行数据库连接恢复后的人工重试",
+                    "requested_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            session.commit()
+
+        overlapping = self.client.post(
+            f"/api/v1/operations/sla/scans/{run_key}/retry",
+            json={"reason": "同时发起另一笔人工恢复重试"},
+            headers=operations,
+        )
+        self.assertEqual(overlapping.status_code, 409, overlapping.text)
+        self.assertIn("正在人工重试", overlapping.json()["detail"])
+        with database.SessionLocal() as session:
+            requests = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_failure",
+                    AuditEventRecord.aggregate_id == run_key,
+                    AuditEventRecord.event_type == "sla_scan_retry_requested",
+                )
+            ).all()
+        self.assertEqual(len(requests), 1)
 
     def test_personal_task_queue_role_scope_priority_and_correction_handoff(self) -> None:
         manager = {"Authorization": "Bearer dev-manager"}

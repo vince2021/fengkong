@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, SlaScanLeaseRecord
 from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
 from backend.security import APPROVAL_STAGE_ROLES
@@ -1233,6 +1233,55 @@ class AuditRepository:
         self.session.add(record)
         self.session.flush()
         return _audit_to_dict(record)
+
+    def append_root_once(self, aggregate_type: str, aggregate_id: str, event_type: str, actor: str, payload: dict) -> tuple[dict, bool]:
+        existing = self.session.scalars(
+            select(AuditEventRecord).where(
+                AuditEventRecord.aggregate_type == aggregate_type,
+                AuditEventRecord.aggregate_id == aggregate_id,
+                AuditEventRecord.event_type == event_type,
+            )
+        ).first()
+        if existing:
+            return _audit_to_dict(existing), False
+        event_id = str(uuid4())
+        event_hash = content_hash(
+            {
+                "id": event_id,
+                "aggregate_type": aggregate_type,
+                "aggregate_id": aggregate_id,
+                "event_type": event_type,
+                "actor": actor,
+                "payload": payload,
+                "previous_hash": "",
+            }
+        )
+        record = AuditEventRecord(
+            id=event_id,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            actor=actor,
+            payload=deepcopy(payload),
+            previous_hash="",
+            event_hash=event_hash,
+        )
+        try:
+            with self.session.begin_nested():
+                self.session.add(record)
+                self.session.flush()
+        except IntegrityError:
+            existing = self.session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == aggregate_type,
+                    AuditEventRecord.aggregate_id == aggregate_id,
+                    AuditEventRecord.event_type == event_type,
+                )
+            ).first()
+            if not existing:
+                raise
+            return _audit_to_dict(existing), False
+        return _audit_to_dict(record), True
 
     def list(self, aggregate_id: str | None = None) -> list[dict]:
         statement = select(AuditEventRecord).order_by(AuditEventRecord.created_at, AuditEventRecord.id)
@@ -3062,7 +3111,7 @@ class CreditFacilityRepository:
         self.session.refresh(facility)
         return {"alert": _alert_to_dict(alert), "facility": self._with_control_summary(facility)}
 
-    def scan(self, actor: str, now: datetime | None = None) -> dict:
+    def scan(self, actor: str, now: datetime | None = None, commit: bool = True) -> dict:
         scan_time = _as_utc(now or datetime.now(timezone.utc))
         facilities = self.session.scalars(select(CreditFacilityRecord).where(CreditFacilityRecord.status == "active")).all()
         opened = 0
@@ -3154,7 +3203,10 @@ class CreditFacilityRepository:
             "control_notifications_created": condition_notifications_created,
         }
         self.audit.append("post_credit_scan", str(uuid4()), "post_credit_scan_completed", actor, scan_result)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return scan_result
 
     def list_alerts(self, counterparty_id: str | None = None, facility_id: str | None = None) -> list[dict]:
@@ -3357,6 +3409,7 @@ class CreditFacilityRepository:
 
 
 def clear_persistent_data(session: Session) -> None:
+    session.execute(delete(SlaScanLeaseRecord))
     session.execute(delete(AuditEventRecord))
     session.execute(delete(ModelGovernanceNotificationRecord))
     session.execute(delete(ModelMonitoringScheduleRecord))

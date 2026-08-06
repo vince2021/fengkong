@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select
@@ -16,9 +17,10 @@ from backend.db_models import (
     FacilityControlConditionRecord,
     FacilityControlExtensionRecord,
     NotificationRecord,
+    SlaScanLeaseRecord,
 )
 from backend.document_correction_sla import ACTIVE_CORRECTION_STATUSES, correction_sla_snapshot
-from backend.repository import AuditRepository, NotificationRepository
+from backend.repository import AuditRepository, CreditFacilityRepository, NotificationRepository
 from backend.security import APPROVAL_STAGE_ROLES
 from backend.task_lease import assignment_expiry, assignment_is_active, assignment_is_expired, clear_assignment, lease_remaining_seconds
 from rating.approval_workflow import STAGE_SLA_HOURS, stage_label
@@ -28,10 +30,40 @@ ACTIVE_STATUSES = {"处理中", "待补件"}
 SLA_SCANNABLE_STATUSES = {"处理中"}
 ESCALATION_AFTER_SECONDS = 4 * 3600
 ASSIGNMENT_LEASE_WARNING_SECONDS = 30 * 60
+SLA_SCAN_EXPECTED_CADENCE_MINUTES = 5
+SLA_SCAN_STALE_AFTER_MINUTES = 15
+SLA_SCAN_EXECUTION_TIMEOUT_MINUTES = 10
+SLA_SCAN_LEASE_HARD_EXPIRY_MINUTES = 30
+SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS = 60
+SLA_SCAN_GUARD_BATCH_SIZE = 25
+SLA_SCAN_LEASE_KEY = "global-sla-scan"
 
 
-def run_sla_scan(session: Session, now: datetime | None = None, actor: str = "sla-monitor") -> dict:
+def run_sla_scan(
+    session: Session,
+    now: datetime | None = None,
+    actor: str = "sla-monitor",
+    run_key: str | None = None,
+    trigger_type: str = "manual",
+    lease_guard: Callable[[bool], None] | None = None,
+) -> dict:
     scan_time = _as_utc(now or datetime.now(timezone.utc))
+    if trigger_type not in {"manual", "scheduler", "retry"}:
+        raise ValueError("SLA 扫描触发类型必须为 manual、scheduler 或 retry")
+    if trigger_type in {"scheduler", "retry"}:
+        if trigger_type == "retry" and run_key is None:
+            raise ValueError("人工重试必须指定原调度任务键")
+        scan_run_id = sla_scan_scheduler_run_key(scan_time) if run_key is None else run_key
+        if not 1 <= len(scan_run_id) <= 128:
+            raise ValueError("SLA 扫描任务键长度必须为 1—128 个字符")
+        existing = _find_sla_scan_run(session, scan_run_id)
+        if existing:
+            return _deduplicated_scan_result(existing)
+    else:
+        if run_key is not None:
+            raise ValueError("人工 SLA 扫描不能指定调度任务键")
+        scan_run_id = str(uuid4())
+    _ensure_scan_write_transaction(session)
     cases = session.scalars(
         select(ApprovalCaseRecord).where(
             ApprovalCaseRecord.status.in_(SLA_SCANNABLE_STATUSES),
@@ -44,6 +76,8 @@ def run_sla_scan(session: Session, now: datetime | None = None, actor: str = "sl
             DocumentCorrectionRecord.sla_due_at.is_not(None),
         )
     ).all()
+    if lease_guard:
+        lease_guard(False)
     notifications = NotificationRepository(session)
     audit = AuditRepository(session)
     level_counts: Counter[str] = Counter()
@@ -58,8 +92,12 @@ def run_sla_scan(session: Session, now: datetime | None = None, actor: str = "sl
         actor,
     )
     created_count += expired_notifications_created
+    if lease_guard:
+        lease_guard(False)
 
-    for case in cases:
+    for index, case in enumerate(cases):
+        if lease_guard and index and index % SLA_SCAN_GUARD_BATCH_SIZE == 0:
+            lease_guard(False)
         level = _sla_level(case, scan_time)
         if not level:
             continue
@@ -80,7 +118,11 @@ def run_sla_scan(session: Session, now: datetime | None = None, actor: str = "sl
                 {"stage": case.current_stage, "sla_level": level, "recipient_roles": created_for_case, "stage_due_at": _as_utc(case.stage_due_at).isoformat()},
             )
 
-    for correction in corrections:
+    if lease_guard:
+        lease_guard(False)
+    for index, correction in enumerate(corrections):
+        if lease_guard and index and index % SLA_SCAN_GUARD_BATCH_SIZE == 0:
+            lease_guard(False)
         snapshot = correction_sla_snapshot(correction.status, correction.sla_due_at, scan_time)
         level = snapshot["sla_status"]
         if level == "normal":
@@ -110,9 +152,21 @@ def run_sla_scan(session: Session, now: datetime | None = None, actor: str = "sl
                 },
             )
 
+    if lease_guard:
+        lease_guard(False)
+    post_credit_scan = CreditFacilityRepository(session).scan(actor, now=scan_time, commit=False)
+    failure_notifications_resolved = (
+        _resolve_scan_failure_notifications(session, audit, actor, scan_time, scan_run_id)
+        if trigger_type in {"scheduler", "retry"}
+        else 0
+    )
     result = {
-        "run_id": str(uuid4()),
+        "run_id": scan_run_id,
+        "run_key": scan_run_id if trigger_type == "scheduler" else None,
         "run_at": scan_time.isoformat(),
+        "trigger_type": trigger_type,
+        "status": "completed",
+        "deduplicated": False,
         "active_cases_scanned": len(cases),
         "due_soon_cases": level_counts["due_soon"],
         "overdue_cases": level_counts["overdue"],
@@ -121,12 +175,543 @@ def run_sla_scan(session: Session, now: datetime | None = None, actor: str = "sl
         "due_soon_corrections": correction_level_counts["due_soon"],
         "overdue_corrections": correction_level_counts["overdue"],
         "escalated_corrections": correction_level_counts["escalated"],
-        "notifications_created": created_count,
+        "workflow_notifications_created": created_count,
+        "notifications_created": created_count + post_credit_scan["control_notifications_created"],
         "expired_assignments_released": expired_assignments_released,
+        "active_facilities_scanned": post_credit_scan["active_facilities_scanned"],
+        "facilities_expired": post_credit_scan["facilities_expired"],
+        "facility_alerts_opened": post_credit_scan["alerts_opened"],
+        "control_conditions_scanned": post_credit_scan["control_conditions_scanned"],
+        "control_alerts_opened": post_credit_scan["control_alerts_opened"],
+        "control_conditions_escalated": post_credit_scan["control_conditions_escalated"],
+        "control_notifications_created": post_credit_scan["control_notifications_created"],
+        "failure_notifications_resolved": failure_notifications_resolved,
     }
-    audit.append("sla_scan", result["run_id"], "sla_scan_completed", actor, result)
+    if lease_guard:
+        lease_guard(True)
+    audit_event, created = audit.append_root_once("sla_scan", result["run_id"], "sla_scan_completed", actor, result)
+    if not created:
+        session.rollback()
+        return _deduplicated_scan_result_from_payload(audit_event["payload"])
     session.commit()
     return result
+
+
+def _ensure_scan_write_transaction(session: Session) -> None:
+    if session.get_bind().dialect.name == "sqlite":
+        connection = session.connection()
+        driver_connection = getattr(connection.connection, "driver_connection", None)
+        if not getattr(driver_connection, "in_transaction", False):
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def sla_scan_scheduler_run_key(
+    value: datetime | None = None,
+) -> str:
+    current = _as_utc(value or datetime.now(timezone.utc))
+    bucket_seconds = SLA_SCAN_EXPECTED_CADENCE_MINUTES * 60
+    timestamp = int(current.timestamp())
+    bucket = datetime.fromtimestamp(timestamp - timestamp % bucket_seconds, tz=timezone.utc)
+    return f"sla-scheduler:{bucket.strftime('%Y%m%dT%H%MZ')}:{SLA_SCAN_EXPECTED_CADENCE_MINUTES}m"
+
+
+def _find_sla_scan_run(session: Session, run_id: str) -> AuditEventRecord | None:
+    return session.scalars(
+        select(AuditEventRecord).where(
+            AuditEventRecord.aggregate_type == "sla_scan",
+            AuditEventRecord.aggregate_id == run_id,
+            AuditEventRecord.event_type == "sla_scan_completed",
+        )
+    ).first()
+
+
+def _deduplicated_scan_result(record: AuditEventRecord) -> dict:
+    return _deduplicated_scan_result_from_payload(record.payload or {})
+
+
+def _deduplicated_scan_result_from_payload(payload: dict) -> dict:
+    result = dict(payload)
+    result["deduplicated"] = True
+    return result
+
+
+def _resolve_scan_failure_notifications(
+    session: Session,
+    audit: AuditRepository,
+    actor: str,
+    resolved_at: datetime,
+    recovery_run_id: str,
+) -> int:
+    records = session.scalars(
+        select(NotificationRecord).where(
+            NotificationRecord.category == "sla_scan",
+            NotificationRecord.level == "scan_failed",
+            NotificationRecord.status != "resolved",
+        )
+    ).all()
+    for record in records:
+        record.status = "resolved"
+        record.read_at = record.read_at or resolved_at
+        audit.append(
+            "notification",
+            record.id,
+            "sla_scan_failure_notification_auto_resolved",
+            actor,
+            {
+                "recovery_run_id": recovery_run_id,
+                "resolved_at": resolved_at.isoformat(),
+            },
+        )
+    return len(records)
+
+
+def list_sla_scan_runs(session: Session, limit: int = 20, now: datetime | None = None) -> dict:
+    generated_at = _as_utc(now or datetime.now(timezone.utc))
+    execution_history = _list_sla_scan_executions(session, generated_at, limit)
+    execution_lease = _sla_scan_lease_snapshot(session, generated_at)
+    records = session.scalars(
+        select(AuditEventRecord)
+        .where(
+            or_(
+                and_(
+                    AuditEventRecord.aggregate_type == "sla_scan",
+                    AuditEventRecord.event_type == "sla_scan_completed",
+                ),
+                and_(
+                    AuditEventRecord.aggregate_type == "sla_scan_failure",
+                    AuditEventRecord.event_type == "sla_scan_failed",
+                ),
+            )
+        )
+        .order_by(
+            AuditEventRecord.payload["run_at"].as_string().desc(),
+            (AuditEventRecord.event_type == "sla_scan_completed").desc(),
+            AuditEventRecord.created_at.desc(),
+            AuditEventRecord.id.desc(),
+        )
+        .limit(limit + 1)
+    ).all()
+    latest_scheduler_record = session.scalars(
+        select(AuditEventRecord)
+        .where(
+            or_(
+                and_(
+                    AuditEventRecord.aggregate_type == "sla_scan",
+                    AuditEventRecord.event_type == "sla_scan_completed",
+                ),
+                and_(
+                    AuditEventRecord.aggregate_type == "sla_scan_failure",
+                    AuditEventRecord.event_type == "sla_scan_failed",
+                ),
+            ),
+            AuditEventRecord.payload["trigger_type"].as_string() == "scheduler",
+        )
+        .order_by(
+            AuditEventRecord.payload["run_at"].as_string().desc(),
+            (AuditEventRecord.event_type == "sla_scan_completed").desc(),
+            AuditEventRecord.created_at.desc(),
+            AuditEventRecord.id.desc(),
+        )
+        .limit(1)
+    ).first()
+    normalized = [_sla_scan_event_to_dict(record) for record in records]
+    _attach_sla_scan_retry_history(session, normalized)
+    runs = normalized[:limit]
+    for index, run in enumerate(runs):
+        previous = next(
+            (item for item in normalized[index + 1:] if item["status"] == "completed"),
+            None,
+        )
+        if run["status"] == "failed":
+            previous = None
+        run["notification_delta"] = _scan_metric_delta(run, previous, "notifications_created")
+        run["alert_delta"] = _scan_metric_delta(run, previous, "alerts_opened")
+        run["escalation_delta"] = _scan_metric_delta(run, previous, "escalations_triggered")
+        run["risk_action_delta"] = _scan_metric_delta(run, previous, "risk_actions_created")
+        run["risk_increased"] = previous is not None and run["risk_action_delta"] > 0
+
+    latest_at = _parse_scan_time(runs[0]["run_at"]) if runs else None
+    minutes_since_last_run = (
+        max(0, int((generated_at - latest_at).total_seconds() // 60))
+        if latest_at
+        else None
+    )
+    health = (
+        "never"
+        if latest_at is None
+        else "blocked"
+        if runs[0]["status"] == "failed"
+        else "healthy"
+        if minutes_since_last_run <= SLA_SCAN_STALE_AFTER_MINUTES
+        else "stale"
+    )
+    short_interval_runs = sum(
+        1
+        for current, previous in zip(runs, runs[1:])
+        if _scan_interval_minutes(current, previous) < SLA_SCAN_EXPECTED_CADENCE_MINUTES
+    )
+    missed_intervals = (
+        max(0, minutes_since_last_run // SLA_SCAN_EXPECTED_CADENCE_MINUTES - 1)
+        if minutes_since_last_run is not None
+        else 0
+    )
+    scheduler_runs = [item for item in runs if item["trigger_type"] == "scheduler"]
+    latest_scheduler_run = _sla_scan_event_to_dict(latest_scheduler_record) if latest_scheduler_record else None
+    if latest_scheduler_run:
+        _attach_sla_scan_retry_history(session, [latest_scheduler_run])
+    latest_scheduler_at = _parse_scan_time(latest_scheduler_run["run_at"]) if latest_scheduler_run else None
+    scheduler_minutes_since_last_run = (
+        max(0, int((generated_at - latest_scheduler_at).total_seconds() // 60))
+        if latest_scheduler_at
+        else None
+    )
+    scheduler_health = (
+        "never"
+        if latest_scheduler_at is None
+        else "blocked"
+        if latest_scheduler_run["status"] == "failed" and not latest_scheduler_run["recovered"]
+        else "healthy"
+        if scheduler_minutes_since_last_run <= SLA_SCAN_STALE_AFTER_MINUTES
+        else "stale"
+    )
+    scheduler_missed_intervals = (
+        max(0, scheduler_minutes_since_last_run // SLA_SCAN_EXPECTED_CADENCE_MINUTES - 1)
+        if scheduler_minutes_since_last_run is not None
+        else 0
+    )
+    return {
+        "generated_at": generated_at.isoformat(),
+        "health": health,
+        "expected_cadence_minutes": SLA_SCAN_EXPECTED_CADENCE_MINUTES,
+        "stale_after_minutes": SLA_SCAN_STALE_AFTER_MINUTES,
+        "execution_timeout_minutes": SLA_SCAN_EXECUTION_TIMEOUT_MINUTES,
+        "execution_lease_expiry_minutes": SLA_SCAN_LEASE_HARD_EXPIRY_MINUTES,
+        "execution_heartbeat_interval_seconds": SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS,
+        "execution_summary": execution_history["summary"],
+        "execution_lease": execution_lease,
+        "executions": execution_history["executions"],
+        "scheduler_health": {
+            "state": scheduler_health,
+            "last_run_at": latest_scheduler_run["run_at"] if latest_scheduler_run else None,
+            "last_status": ("completed" if latest_scheduler_run and latest_scheduler_run["recovered"] else latest_scheduler_run["status"]) if latest_scheduler_run else None,
+            "recovered": latest_scheduler_run["recovered"] if latest_scheduler_run else False,
+            "error_type": latest_scheduler_run["error_type"] if latest_scheduler_run else None,
+            "error_message": latest_scheduler_run["error_message"] if latest_scheduler_run else None,
+            "next_expected_run_at": (
+                (latest_scheduler_at + timedelta(minutes=SLA_SCAN_EXPECTED_CADENCE_MINUTES)).isoformat()
+                if latest_scheduler_at
+                else None
+            ),
+            "minutes_since_last_run": scheduler_minutes_since_last_run,
+            "missed_intervals": scheduler_missed_intervals,
+        },
+        "summary": {
+            "returned_runs": len(runs),
+            "scheduler_runs": len(scheduler_runs),
+            "manual_runs": sum(item["trigger_type"] == "manual" for item in runs),
+            "retry_runs": sum(item["trigger_type"] == "retry" for item in runs),
+            "legacy_runs": sum(item["trigger_type"] == "legacy" for item in runs),
+            "failed_runs": sum(item["status"] == "failed" for item in runs),
+            "last_run_at": runs[0]["run_at"] if runs else None,
+            "minutes_since_last_run": minutes_since_last_run,
+            "missed_intervals": missed_intervals,
+            "short_interval_runs": short_interval_runs,
+            "runs_with_new_risk": sum(item["risk_actions_created"] > 0 for item in runs),
+            "total_notifications": sum(item["notifications_created"] for item in runs),
+            "total_alerts": sum(item["alerts_opened"] for item in runs),
+            "total_escalations": sum(item["escalations_triggered"] for item in runs),
+        },
+        "runs": runs,
+    }
+
+
+def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: int) -> dict:
+    starts = session.scalars(
+        select(AuditEventRecord)
+        .where(
+            AuditEventRecord.aggregate_type == "sla_scan_execution",
+            AuditEventRecord.event_type == "sla_scan_started",
+        )
+        .order_by(
+            AuditEventRecord.payload["started_at"].as_string().desc(),
+            AuditEventRecord.created_at.desc(),
+            AuditEventRecord.id.desc(),
+        )
+        .limit(limit)
+    ).all()
+    execution_ids = [record.aggregate_id for record in starts]
+    terminal_events = session.scalars(
+        select(AuditEventRecord)
+        .where(
+            AuditEventRecord.aggregate_type == "sla_scan_execution",
+            AuditEventRecord.aggregate_id.in_(execution_ids),
+            AuditEventRecord.event_type.in_({
+                "sla_scan_execution_completed",
+                "sla_scan_execution_failed",
+                "sla_scan_execution_timed_out",
+                "sla_scan_execution_force_released",
+                "sla_scan_execution_aborted",
+                "sla_scan_execution_late_aborted",
+                "sla_scan_execution_late_completed",
+                "sla_scan_execution_late_failed",
+            }),
+        )
+        .order_by(
+            AuditEventRecord.payload["finished_at"].as_string(),
+            AuditEventRecord.created_at,
+            AuditEventRecord.id,
+        )
+    ).all() if execution_ids else []
+    terminal_by_execution = {record.aggregate_id: record for record in terminal_events}
+    executions: list[dict] = []
+    for start in starts:
+        start_payload = start.payload or {}
+        terminal = terminal_by_execution.get(start.aggregate_id)
+        terminal_payload = terminal.payload or {} if terminal else {}
+        started_at = _parse_scan_time(start_payload.get("started_at")) or _as_utc(start.created_at)
+        finished_at = _parse_scan_time(terminal_payload.get("finished_at")) if terminal else None
+        elapsed_seconds = max(0, int(((finished_at or generated_at) - started_at).total_seconds()))
+        status = (
+            "completed"
+            if terminal and terminal.event_type == "sla_scan_execution_completed"
+            else "late_completed"
+            if terminal and terminal.event_type == "sla_scan_execution_late_completed"
+            else "failed"
+            if terminal and terminal.event_type == "sla_scan_execution_failed"
+            else "late_failed"
+            if terminal and terminal.event_type == "sla_scan_execution_late_failed"
+            else "force_released"
+            if terminal and terminal.event_type == "sla_scan_execution_force_released"
+            else "aborted"
+            if terminal and terminal.event_type == "sla_scan_execution_aborted"
+            else "late_aborted"
+            if terminal and terminal.event_type == "sla_scan_execution_late_aborted"
+            else "timed_out"
+            if terminal
+            else "timed_out"
+            if elapsed_seconds >= SLA_SCAN_EXECUTION_TIMEOUT_MINUTES * 60
+            else "running"
+        )
+        trigger_type = start_payload.get("trigger_type")
+        if trigger_type not in {"manual", "scheduler", "retry"}:
+            trigger_type = "legacy"
+        executions.append({
+            "execution_id": start.aggregate_id,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat() if finished_at else None,
+            "elapsed_seconds": elapsed_seconds,
+            "actor": start.actor,
+            "trigger_type": trigger_type,
+            "run_key": start_payload.get("run_key") if isinstance(start_payload.get("run_key"), str) else None,
+            "status": status,
+            "result_run_id": terminal_payload.get("result_run_id") if isinstance(terminal_payload.get("result_run_id"), str) else None,
+            "deduplicated": bool(terminal_payload.get("deduplicated")),
+            "error_type": terminal_payload.get("error_type") if isinstance(terminal_payload.get("error_type"), str) else None,
+        })
+    return {
+        "summary": {
+            "returned_executions": len(executions),
+            "running": sum(item["status"] == "running" for item in executions),
+            "timed_out": sum(item["status"] == "timed_out" for item in executions),
+            "force_released": sum(item["status"] == "force_released" for item in executions),
+            "aborted": sum(item["status"] in {"aborted", "late_aborted"} for item in executions),
+            "failed": sum(item["status"] in {"failed", "late_failed"} for item in executions),
+            "last_started_at": executions[0]["started_at"] if executions else None,
+        },
+        "executions": executions,
+    }
+
+
+def _sla_scan_lease_snapshot(session: Session, generated_at: datetime) -> dict:
+    lease = session.get(SlaScanLeaseRecord, SLA_SCAN_LEASE_KEY)
+    if lease is None or lease.execution_id is None:
+        return {
+            "status": "idle",
+            "execution_id": None,
+            "run_key": None,
+            "actor": None,
+            "trigger_type": None,
+            "acquired_at": None,
+            "expires_at": None,
+            "remaining_seconds": 0,
+            "warning_after_seconds": SLA_SCAN_EXECUTION_TIMEOUT_MINUTES * 60,
+            "last_heartbeat_at": None,
+            "heartbeat_count": 0,
+        }
+    acquired_at = _as_utc(lease.acquired_at) if lease.acquired_at else None
+    expires_at = _as_utc(lease.expires_at) if lease.expires_at else None
+    remaining_seconds = max(0, int((expires_at - generated_at).total_seconds())) if expires_at else 0
+    elapsed_seconds = max(0, int((generated_at - acquired_at).total_seconds())) if acquired_at else 0
+    status = (
+        "expired"
+        if expires_at is not None and expires_at <= generated_at
+        else "overdue"
+        if elapsed_seconds >= SLA_SCAN_EXECUTION_TIMEOUT_MINUTES * 60
+        else "active"
+    )
+    return {
+        "status": status,
+        "execution_id": lease.execution_id,
+        "run_key": lease.run_key,
+        "actor": lease.actor,
+        "trigger_type": lease.trigger_type if lease.trigger_type in {"manual", "scheduler", "retry"} else "legacy",
+        "acquired_at": acquired_at.isoformat() if acquired_at else None,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "remaining_seconds": remaining_seconds,
+        "warning_after_seconds": SLA_SCAN_EXECUTION_TIMEOUT_MINUTES * 60,
+        "last_heartbeat_at": _as_utc(lease.last_heartbeat_at).isoformat() if lease.last_heartbeat_at else None,
+        "heartbeat_count": lease.heartbeat_count or 0,
+    }
+
+
+def _sla_scan_event_to_dict(record: AuditEventRecord) -> dict:
+    payload = record.payload or {}
+    payload_run_id = payload.get("run_id")
+    run_id = payload_run_id if isinstance(payload_run_id, str) and payload_run_id else record.aggregate_id
+    parsed_run_at = _parse_scan_time(payload.get("run_at"))
+    run_at = parsed_run_at.isoformat() if parsed_run_at else _as_utc(record.created_at).isoformat()
+    trigger_type = payload.get("trigger_type")
+    if trigger_type not in {"manual", "scheduler", "retry"}:
+        trigger_type = "legacy"
+    payload_run_key = payload.get("run_key")
+    run_key = payload_run_key if isinstance(payload_run_key, str) and payload_run_key else None
+    status = "failed" if record.event_type == "sla_scan_failed" else "completed"
+    error_type = payload.get("error_type") if isinstance(payload.get("error_type"), str) else None
+    error_message = payload.get("error_message") if isinstance(payload.get("error_message"), str) else None
+    notifications_created = _scan_count(payload, "notifications_created")
+    alerts_opened = _scan_count(payload, "facility_alerts_opened") + _scan_count(payload, "control_alerts_opened")
+    escalations_triggered = (
+        _scan_count(payload, "escalated_cases")
+        + _scan_count(payload, "escalated_corrections")
+        + _scan_count(payload, "control_conditions_escalated")
+    )
+    return {
+        "event_id": record.id,
+        "run_id": run_id,
+        "run_at": run_at,
+        "actor": record.actor,
+        "trigger_type": trigger_type,
+        "run_key": run_key,
+        "status": status,
+        "error_type": error_type,
+        "error_message": error_message,
+        "active_cases_scanned": _scan_count(payload, "active_cases_scanned"),
+        "active_corrections_scanned": _scan_count(payload, "active_corrections_scanned"),
+        "active_facilities_scanned": _scan_count(payload, "active_facilities_scanned"),
+        "control_conditions_scanned": _scan_count(payload, "control_conditions_scanned"),
+        "notifications_created": notifications_created,
+        "workflow_notifications_created": _scan_count(payload, "workflow_notifications_created", notifications_created),
+        "control_notifications_created": _scan_count(payload, "control_notifications_created"),
+        "facility_alerts_opened": _scan_count(payload, "facility_alerts_opened"),
+        "control_alerts_opened": _scan_count(payload, "control_alerts_opened"),
+        "alerts_opened": alerts_opened,
+        "escalated_cases": _scan_count(payload, "escalated_cases"),
+        "escalated_corrections": _scan_count(payload, "escalated_corrections"),
+        "control_conditions_escalated": _scan_count(payload, "control_conditions_escalated"),
+        "escalations_triggered": escalations_triggered,
+        "facilities_expired": _scan_count(payload, "facilities_expired"),
+        "expired_assignments_released": _scan_count(payload, "expired_assignments_released"),
+        "failure_notifications_resolved": _scan_count(payload, "failure_notifications_resolved"),
+        "risk_actions_created": notifications_created + alerts_opened + escalations_triggered,
+        "recovered": False,
+        "can_retry": False,
+        "retry_count": 0,
+        "last_retry_at": None,
+        "last_retry_actor": None,
+        "last_retry_status": None,
+        "last_retry_reason": None,
+    }
+
+
+def _attach_sla_scan_retry_history(session: Session, runs: list[dict]) -> None:
+    failed_run_ids = {item["run_id"] for item in runs if item["status"] == "failed"}
+    if not failed_run_ids:
+        return
+    completed_ids = set(
+        session.scalars(
+            select(AuditEventRecord.aggregate_id).where(
+                AuditEventRecord.aggregate_type == "sla_scan",
+                AuditEventRecord.aggregate_id.in_(failed_run_ids),
+                AuditEventRecord.event_type == "sla_scan_completed",
+            )
+        ).all()
+    )
+    retry_events = session.scalars(
+        select(AuditEventRecord)
+        .where(
+            AuditEventRecord.aggregate_type == "sla_scan_failure",
+            AuditEventRecord.aggregate_id.in_(failed_run_ids),
+            AuditEventRecord.event_type.in_({
+                "sla_scan_retry_requested",
+                "sla_scan_retry_completed",
+                "sla_scan_retry_failed",
+            }),
+        )
+        .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+    ).all()
+    retries_by_run: dict[str, list[AuditEventRecord]] = {}
+    for event in retry_events:
+        retries_by_run.setdefault(event.aggregate_id, []).append(event)
+    for run in runs:
+        if run["status"] != "failed":
+            continue
+        events = retries_by_run.get(run["run_id"], [])
+        requests = [event for event in events if event.event_type == "sla_scan_retry_requested"]
+        outcomes = [event for event in events if event.event_type in {"sla_scan_retry_completed", "sla_scan_retry_failed"}]
+        latest_request = max(requests, key=_sla_retry_number) if requests else None
+        latest_retry_number = _sla_retry_number(latest_request) if latest_request else 0
+        latest_retry_outcomes = [event for event in outcomes if _sla_retry_number(event) == latest_retry_number]
+        latest_outcome = latest_retry_outcomes[-1] if latest_retry_outcomes else None
+        recovered = run["run_id"] in completed_ids
+        run.update({
+            "recovered": recovered,
+            "can_retry": not recovered,
+            "retry_count": len(requests),
+            "last_retry_at": (
+                (latest_outcome.payload or {}).get("finished_at")
+                if latest_outcome
+                else (latest_request.payload or {}).get("requested_at") if latest_request else None
+            ),
+            "last_retry_actor": (latest_request.actor if latest_request else None),
+            "last_retry_status": (
+                "completed" if latest_outcome and latest_outcome.event_type == "sla_scan_retry_completed"
+                else "failed" if latest_outcome
+                else "requested" if latest_request
+                else None
+            ),
+            "last_retry_reason": (latest_request.payload or {}).get("reason") if latest_request else None,
+        })
+
+
+def _sla_retry_number(event: AuditEventRecord) -> int:
+    value = (event.payload or {}).get("retry_number")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _scan_count(payload: dict, key: str, default: int = 0) -> int:
+    value = payload.get(key, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else default
+
+
+def _scan_metric_delta(current: dict, previous: dict | None, key: str) -> int:
+    return current[key] - previous[key] if previous else 0
+
+
+def _scan_interval_minutes(current: dict, previous: dict) -> float:
+    current_at = _parse_scan_time(current["run_at"])
+    previous_at = _parse_scan_time(previous["run_at"])
+    if not current_at or not previous_at:
+        return SLA_SCAN_EXPECTED_CADENCE_MINUTES
+    return max(0, (current_at - previous_at).total_seconds() / 60)
+
+
+def _parse_scan_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _release_expired_assignments(
@@ -279,6 +864,29 @@ def build_operations_summary(
     corrections = session.scalars(
         select(DocumentCorrectionRecord).where(DocumentCorrectionRecord.status.in_(ACTIVE_CORRECTION_STATUSES))
     ).all()
+    facility_statement = select(CreditFacilityRecord)
+    condition_statement = (
+        select(FacilityControlConditionRecord)
+        .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlConditionRecord.facility_id)
+        .where(FacilityControlConditionRecord.status == "pending")
+    )
+    extension_statement = (
+        select(FacilityControlExtensionRecord)
+        .select_from(FacilityControlExtensionRecord)
+        .join(FacilityControlConditionRecord, FacilityControlConditionRecord.id == FacilityControlExtensionRecord.condition_id)
+        .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlExtensionRecord.facility_id)
+        .where(
+            FacilityControlExtensionRecord.status == "pending",
+            FacilityControlConditionRecord.status == "pending",
+        )
+    )
+    if counterparty_id:
+        facility_statement = facility_statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
+        condition_statement = condition_statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
+        extension_statement = extension_statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
+    facilities = session.scalars(facility_statement).all()
+    control_conditions = session.scalars(condition_statement).all()
+    pending_extensions = session.scalars(extension_statement).all()
     sla_counts: Counter[str] = Counter()
     stage_counts: Counter[str] = Counter()
     for case in active_cases:
@@ -292,6 +900,10 @@ def build_operations_summary(
     for correction in corrections:
         snapshot = correction_sla_snapshot(correction.status, correction.sla_due_at, scan_time)
         correction_sla_counts[snapshot["sla_status"]] += 1
+    control_sla_counts: Counter[str] = Counter()
+    for condition in control_conditions:
+        level, _ = _facility_control_sla(condition, scan_time)
+        control_sla_counts[level] += 1
     unread_statement = select(NotificationRecord).where(NotificationRecord.status == "unread")
     if recipient_roles is not None:
         broadcast_scope = and_(
@@ -309,10 +921,14 @@ def build_operations_summary(
     severity_counts = Counter(item.severity for item in unread)
     last_scan = session.scalars(
         select(AuditEventRecord)
-        .where(AuditEventRecord.event_type == "sla_scan_completed")
+        .where(
+            AuditEventRecord.aggregate_type == "sla_scan",
+            AuditEventRecord.event_type == "sla_scan_completed",
+        )
         .order_by(AuditEventRecord.payload["run_at"].as_string().desc())
         .limit(1)
     ).first()
+    last_scan_payload = _sla_scan_event_to_dict(last_scan) if last_scan else None
     return {
         "generated_at": scan_time.isoformat(),
         "total_cases": len(cases),
@@ -331,25 +947,22 @@ def build_operations_summary(
             "overdue": correction_sla_counts["overdue"],
             "escalated": correction_sla_counts["escalated"],
         },
+        "post_credit_sla": {
+            "active_facilities": sum(item.status == "active" for item in facilities),
+            "pending_controls": len(control_conditions),
+            "normal": control_sla_counts["normal"],
+            "due_soon": control_sla_counts["due_soon"],
+            "overdue": control_sla_counts["overdue"],
+            "escalated": control_sla_counts["escalated"],
+            "pending_extensions": len(pending_extensions),
+        },
         "unread_notifications": {
             "total": len(unread),
             "info": severity_counts["info"],
             "warning": severity_counts["warning"],
             "critical": severity_counts["critical"],
         },
-        "last_scan": (
-            {
-                "run_id": last_scan.aggregate_id,
-                "run_at": last_scan.payload.get("run_at"),
-                "actor": last_scan.actor,
-                "active_cases_scanned": last_scan.payload.get("active_cases_scanned", 0),
-                "active_corrections_scanned": last_scan.payload.get("active_corrections_scanned", 0),
-                "notifications_created": last_scan.payload.get("notifications_created", 0),
-                "expired_assignments_released": last_scan.payload.get("expired_assignments_released", 0),
-            }
-            if last_scan
-            else None
-        ),
+        "last_scan": last_scan_payload,
         "stage_distribution": [
             {"stage": stage, "label": stage_label(stage), "count": count}
             for stage, count in sorted(stage_counts.items(), key=lambda item: (-item[1], item[0]))
