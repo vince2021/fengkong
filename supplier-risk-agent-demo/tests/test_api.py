@@ -4207,6 +4207,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(empty.status_code, 200, empty.text)
         self.assertEqual(empty.json()["health"], "never")
         self.assertEqual(empty.json()["runs"], [])
+        self.assertEqual(empty.json()["execution_lease"]["heartbeat_health"]["state"], "idle")
         self.assertEqual(self.client.get("/api/v1/operations/sla/scans", headers=client).status_code, 403)
         self.assertEqual(self.client.get("/api/v1/operations/sla/scans?limit=0", headers=operations).status_code, 422)
 
@@ -4238,6 +4239,16 @@ class ApiTest(unittest.TestCase):
         self.assertEqual({item["status"] for item in payload["executions"]}, {"completed"})
         self.assertEqual({item["trigger_type"] for item in payload["executions"]}, {"manual"})
         self.assertEqual({item["actor"] for item in payload["executions"]}, {"运营值班"})
+        self.assertEqual({item["event_count"] for item in payload["executions"]}, {2})
+        self.assertEqual({item["terminal_actor"] for item in payload["executions"]}, {"运营值班"})
+        self.assertEqual(payload["execution_summary"]["evidence_verified"], 2)
+        self.assertEqual(payload["execution_summary"]["evidence_broken"], 0)
+        self.assertEqual(payload["execution_summary"]["evidence_events_checked"], 4)
+        self.assertTrue(all(item["evidence_integrity"]["state"] == "verified" for item in payload["executions"]))
+        self.assertTrue(all(item["evidence_integrity"]["chain_complete"] for item in payload["executions"]))
+        self.assertTrue(all(item["evidence_integrity"]["hashes_valid"] for item in payload["executions"]))
+        self.assertTrue(all(item["evidence_events"][0]["event_type"] == "sla_scan_started" for item in payload["executions"]))
+        self.assertTrue(all(all(event["hash_valid"] and event["link_valid"] for event in item["evidence_events"]) for item in payload["executions"]))
         self.assertEqual(payload["summary"]["manual_runs"], 2)
         self.assertEqual(payload["summary"]["scheduler_runs"], 0)
         self.assertEqual(payload["scheduler_health"]["state"], "never")
@@ -4423,6 +4434,108 @@ class ApiTest(unittest.TestCase):
         )
         self.assertGreater(history["execution_lease"]["remaining_seconds"], 25 * 60)
 
+    def test_sla_scan_heartbeat_health_distinguishes_healthy_delayed_and_lost(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        current = datetime.now(timezone.utc)
+        execution_id = "heartbeat-health-execution"
+        with database.SessionLocal() as session:
+            session.add(SlaScanLeaseRecord(
+                lease_key="global-sla-scan",
+                execution_id=execution_id,
+                actor="心跳健康调度器",
+                trigger_type="scheduler",
+                acquired_at=current - timedelta(minutes=6),
+                expires_at=current + timedelta(minutes=24),
+                last_heartbeat_at=current - timedelta(seconds=30),
+                heartbeat_count=5,
+            ))
+            AuditRepository(session).append_root_once(
+                "sla_scan_execution",
+                execution_id,
+                "sla_scan_started",
+                "心跳健康调度器",
+                {
+                    "execution_id": execution_id,
+                    "started_at": (current - timedelta(minutes=6)).isoformat(),
+                    "trigger_type": "scheduler",
+                    "run_key": "heartbeat-health-run",
+                    "status": "running",
+                },
+            )
+            session.commit()
+
+        healthy = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()["execution_lease"]
+        self.assertEqual(healthy["heartbeat_health"]["state"], "healthy")
+        self.assertEqual(healthy["heartbeat_health"]["delayed_after_seconds"], 120)
+        self.assertEqual(healthy["heartbeat_health"]["lost_after_seconds"], 300)
+        with database.SessionLocal() as session:
+            session.get(SlaScanLeaseRecord, "global-sla-scan").last_heartbeat_at = current - timedelta(minutes=3)
+            session.commit()
+        delayed = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()["execution_lease"]
+        self.assertEqual(delayed["heartbeat_health"]["state"], "delayed")
+        self.assertGreaterEqual(delayed["heartbeat_health"]["missed_heartbeats"], 3)
+        with database.SessionLocal() as session:
+            session.get(SlaScanLeaseRecord, "global-sla-scan").last_heartbeat_at = current - timedelta(minutes=6)
+            session.commit()
+        lost = self.client.get("/api/v1/operations/sla/scans", headers=operations).json()["execution_lease"]
+        self.assertEqual(lost["heartbeat_health"]["state"], "lost")
+        self.assertGreaterEqual(lost["heartbeat_health"]["missed_heartbeats"], 6)
+
+    def test_sla_scan_execution_evidence_detects_hash_tamper_and_broken_link(self) -> None:
+        operations = {"Authorization": "Bearer dev-operations"}
+        hash_tampered = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        broken_link = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        cyclic_root = self.client.post("/api/v1/operations/sla/scan", headers=operations)
+        self.assertEqual(hash_tampered.status_code, 200, hash_tampered.text)
+        self.assertEqual(broken_link.status_code, 200, broken_link.text)
+        self.assertEqual(cyclic_root.status_code, 200, cyclic_root.text)
+        with database.SessionLocal() as session:
+            hash_terminal = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == hash_tampered.json()["execution_id"],
+                    AuditEventRecord.event_type == "sla_scan_execution_completed",
+                )
+            ).one()
+            hash_terminal.payload = {**hash_terminal.payload, "tampered": True}
+            link_terminal = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == broken_link.json()["execution_id"],
+                    AuditEventRecord.event_type == "sla_scan_execution_completed",
+                )
+            ).one()
+            link_terminal.previous_hash = "broken-parent-hash"
+            cyclic_start = session.scalars(
+                select(AuditEventRecord).where(
+                    AuditEventRecord.aggregate_type == "sla_scan_execution",
+                    AuditEventRecord.aggregate_id == cyclic_root.json()["execution_id"],
+                    AuditEventRecord.event_type == "sla_scan_started",
+                )
+            ).one()
+            cyclic_start.event_hash = ""
+            session.commit()
+
+        history = self.client.get("/api/v1/operations/sla/scans", headers=operations)
+        self.assertEqual(history.status_code, 200, history.text)
+        payload = history.json()
+        by_execution = {item["execution_id"]: item for item in payload["executions"]}
+        hash_evidence = by_execution[hash_tampered.json()["execution_id"]]
+        link_evidence = by_execution[broken_link.json()["execution_id"]]
+        cyclic_evidence = by_execution[cyclic_root.json()["execution_id"]]
+        self.assertEqual(payload["execution_summary"]["evidence_broken"], 3)
+        self.assertEqual(hash_evidence["evidence_integrity"]["issue_type"], "hash_mismatch")
+        self.assertTrue(hash_evidence["evidence_integrity"]["chain_complete"])
+        self.assertFalse(hash_evidence["evidence_integrity"]["hashes_valid"])
+        self.assertFalse(hash_evidence["evidence_events"][1]["hash_valid"])
+        self.assertTrue(hash_evidence["evidence_events"][1]["link_valid"])
+        self.assertEqual(link_evidence["evidence_integrity"]["issue_type"], "broken_link")
+        self.assertFalse(link_evidence["evidence_integrity"]["chain_complete"])
+        self.assertFalse(link_evidence["evidence_events"][1]["link_valid"])
+        self.assertEqual(cyclic_evidence["evidence_integrity"]["issue_type"], "broken_link")
+        self.assertFalse(cyclic_evidence["evidence_integrity"]["chain_complete"])
+        self.assertFalse(cyclic_evidence["evidence_integrity"]["hashes_valid"])
+
     def test_sqlite_scan_transaction_reuses_existing_write_transaction(self) -> None:
         with database.SessionLocal() as session:
             session.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -4551,6 +4664,19 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(
             {item["execution_id"]: item for item in after_release["executions"]}[execution_id]["status"],
             "force_released",
+        )
+        released_execution = {item["execution_id"]: item for item in after_release["executions"]}[execution_id]
+        self.assertEqual(released_execution["released_by"], "运营值班")
+        self.assertEqual(released_execution["termination_reason"], "确认后台进程已失联，申请接管")
+        self.assertEqual(
+            [item["event_type"] for item in released_execution["evidence_events"]],
+            ["sla_scan_started", "sla_scan_execution_force_released"],
+        )
+        self.assertTrue(all(len(item["event_hash"]) == 64 for item in released_execution["evidence_events"]))
+        self.assertEqual(released_execution["evidence_events"][0]["previous_hash"], "")
+        self.assertEqual(
+            released_execution["evidence_events"][1]["previous_hash"],
+            released_execution["evidence_events"][0]["event_hash"],
         )
         with database.SessionLocal() as session:
             release_event = session.scalars(

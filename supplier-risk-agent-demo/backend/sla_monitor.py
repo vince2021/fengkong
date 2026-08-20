@@ -20,7 +20,7 @@ from backend.db_models import (
     SlaScanLeaseRecord,
 )
 from backend.document_correction_sla import ACTIVE_CORRECTION_STATUSES, correction_sla_snapshot
-from backend.repository import AuditRepository, CreditFacilityRepository, NotificationRepository
+from backend.repository import AuditRepository, CreditFacilityRepository, NotificationRepository, content_hash
 from backend.security import APPROVAL_STAGE_ROLES
 from backend.task_lease import assignment_expiry, assignment_is_active, assignment_is_expired, clear_assignment, lease_remaining_seconds
 from rating.approval_workflow import STAGE_SLA_HOURS, stage_label
@@ -35,6 +35,8 @@ SLA_SCAN_STALE_AFTER_MINUTES = 15
 SLA_SCAN_EXECUTION_TIMEOUT_MINUTES = 10
 SLA_SCAN_LEASE_HARD_EXPIRY_MINUTES = 30
 SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS = 60
+SLA_SCAN_HEARTBEAT_DELAYED_AFTER_SECONDS = SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS * 2
+SLA_SCAN_HEARTBEAT_LOST_AFTER_SECONDS = SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS * 5
 SLA_SCAN_GUARD_BATCH_SIZE = 25
 SLA_SCAN_LEASE_KEY = "global-sla-scan"
 
@@ -463,6 +465,17 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
         )
     ).all() if execution_ids else []
     terminal_by_execution = {record.aggregate_id: record for record in terminal_events}
+    execution_events = session.scalars(
+        select(AuditEventRecord)
+        .where(
+            AuditEventRecord.aggregate_type == "sla_scan_execution",
+            AuditEventRecord.aggregate_id.in_(execution_ids),
+        )
+        .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+    ).all() if execution_ids else []
+    events_by_execution: dict[str, list[AuditEventRecord]] = {}
+    for event in execution_events:
+        events_by_execution.setdefault(event.aggregate_id, []).append(event)
     executions: list[dict] = []
     for start in starts:
         start_payload = start.payload or {}
@@ -495,6 +508,28 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
         trigger_type = start_payload.get("trigger_type")
         if trigger_type not in {"manual", "scheduler", "retry"}:
             trigger_type = "legacy"
+        evidence_events, evidence_integrity = _inspect_scan_execution_evidence(
+            events_by_execution.get(start.aggregate_id, [])
+        )
+        force_release = next(
+            (event for event in evidence_events if event.event_type == "sla_scan_execution_force_released"),
+            None,
+        )
+        lease_lost = next(
+            (event for event in evidence_events if event.event_type == "sla_scan_execution_lease_lost"),
+            None,
+        )
+        force_payload = force_release.payload or {} if force_release else {}
+        lost_payload = lease_lost.payload or {} if lease_lost else {}
+        termination_reason = (
+            force_payload.get("reason")
+            if isinstance(force_payload.get("reason"), str)
+            else lost_payload.get("message")
+            if isinstance(lost_payload.get("message"), str)
+            else terminal_payload.get("error_type")
+            if isinstance(terminal_payload.get("error_type"), str)
+            else None
+        )
         executions.append({
             "execution_id": start.aggregate_id,
             "started_at": started_at.isoformat(),
@@ -507,6 +542,20 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
             "result_run_id": terminal_payload.get("result_run_id") if isinstance(terminal_payload.get("result_run_id"), str) else None,
             "deduplicated": bool(terminal_payload.get("deduplicated")),
             "error_type": terminal_payload.get("error_type") if isinstance(terminal_payload.get("error_type"), str) else None,
+            "terminal_actor": terminal.actor if terminal else None,
+            "termination_reason": termination_reason,
+            "released_by": force_payload.get("released_by") if isinstance(force_payload.get("released_by"), str) else None,
+            "lease_lost_at": lost_payload.get("detected_at") if isinstance(lost_payload.get("detected_at"), str) else None,
+            "event_count": len(evidence_events),
+            "evidence_integrity": evidence_integrity,
+            "evidence_events": [
+                _scan_execution_evidence_event(
+                    event,
+                    hash_valid=_scan_execution_event_hash_valid(event),
+                    link_valid=event.previous_hash == (evidence_events[index - 1].event_hash if index else ""),
+                )
+                for index, event in enumerate(evidence_events)
+            ],
         })
     return {
         "summary": {
@@ -516,6 +565,9 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
             "force_released": sum(item["status"] == "force_released" for item in executions),
             "aborted": sum(item["status"] in {"aborted", "late_aborted"} for item in executions),
             "failed": sum(item["status"] in {"failed", "late_failed"} for item in executions),
+            "evidence_verified": sum(item["evidence_integrity"]["state"] == "verified" for item in executions),
+            "evidence_broken": sum(item["evidence_integrity"]["state"] == "broken" for item in executions),
+            "evidence_events_checked": sum(item["evidence_integrity"]["checked_event_count"] for item in executions),
             "last_started_at": executions[0]["started_at"] if executions else None,
         },
         "executions": executions,
@@ -537,11 +589,30 @@ def _sla_scan_lease_snapshot(session: Session, generated_at: datetime) -> dict:
             "warning_after_seconds": SLA_SCAN_EXECUTION_TIMEOUT_MINUTES * 60,
             "last_heartbeat_at": None,
             "heartbeat_count": 0,
+            "heartbeat_health": {
+                "state": "idle",
+                "age_seconds": None,
+                "missed_heartbeats": 0,
+                "next_expected_at": None,
+                "delayed_after_seconds": SLA_SCAN_HEARTBEAT_DELAYED_AFTER_SECONDS,
+                "lost_after_seconds": SLA_SCAN_HEARTBEAT_LOST_AFTER_SECONDS,
+            },
         }
     acquired_at = _as_utc(lease.acquired_at) if lease.acquired_at else None
     expires_at = _as_utc(lease.expires_at) if lease.expires_at else None
     remaining_seconds = max(0, int((expires_at - generated_at).total_seconds())) if expires_at else 0
     elapsed_seconds = max(0, int((generated_at - acquired_at).total_seconds())) if acquired_at else 0
+    last_heartbeat_at = _as_utc(lease.last_heartbeat_at) if lease.last_heartbeat_at else acquired_at
+    heartbeat_age_seconds = max(0, int((generated_at - last_heartbeat_at).total_seconds())) if last_heartbeat_at else None
+    heartbeat_state = (
+        "lost"
+        if expires_at is not None and expires_at <= generated_at
+        else "lost"
+        if heartbeat_age_seconds is None or heartbeat_age_seconds > SLA_SCAN_HEARTBEAT_LOST_AFTER_SECONDS
+        else "delayed"
+        if heartbeat_age_seconds > SLA_SCAN_HEARTBEAT_DELAYED_AFTER_SECONDS
+        else "healthy"
+    )
     status = (
         "expired"
         if expires_at is not None and expires_at <= generated_at
@@ -559,9 +630,101 @@ def _sla_scan_lease_snapshot(session: Session, generated_at: datetime) -> dict:
         "expires_at": expires_at.isoformat() if expires_at else None,
         "remaining_seconds": remaining_seconds,
         "warning_after_seconds": SLA_SCAN_EXECUTION_TIMEOUT_MINUTES * 60,
-        "last_heartbeat_at": _as_utc(lease.last_heartbeat_at).isoformat() if lease.last_heartbeat_at else None,
+        "last_heartbeat_at": last_heartbeat_at.isoformat() if last_heartbeat_at else None,
         "heartbeat_count": lease.heartbeat_count or 0,
+        "heartbeat_health": {
+            "state": heartbeat_state,
+            "age_seconds": heartbeat_age_seconds,
+            "missed_heartbeats": heartbeat_age_seconds // SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS if heartbeat_age_seconds is not None else 0,
+            "next_expected_at": (last_heartbeat_at + timedelta(seconds=SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS)).isoformat() if last_heartbeat_at else None,
+            "delayed_after_seconds": SLA_SCAN_HEARTBEAT_DELAYED_AFTER_SECONDS,
+            "lost_after_seconds": SLA_SCAN_HEARTBEAT_LOST_AFTER_SECONDS,
+        },
     }
+
+
+def _scan_execution_evidence_event(record: AuditEventRecord, *, hash_valid: bool, link_valid: bool) -> dict:
+    payload = record.payload or {}
+    occurred_at = next(
+        (
+            parsed.isoformat()
+            for key in ("finished_at", "detected_at", "started_at")
+            if (parsed := _parse_scan_time(payload.get(key))) is not None
+        ),
+        _as_utc(record.created_at).isoformat(),
+    )
+    return {
+        "event_type": record.event_type,
+        "actor": record.actor,
+        "occurred_at": occurred_at,
+        "reason": payload.get("reason") if isinstance(payload.get("reason"), str) else payload.get("message") if isinstance(payload.get("message"), str) else None,
+        "error_type": payload.get("error_type") if isinstance(payload.get("error_type"), str) else None,
+        "event_hash": record.event_hash,
+        "previous_hash": record.previous_hash,
+        "hash_valid": hash_valid,
+        "link_valid": link_valid,
+    }
+
+
+def _inspect_scan_execution_evidence(events: list[AuditEventRecord]) -> tuple[list[AuditEventRecord], dict]:
+    by_previous: dict[str, list[AuditEventRecord]] = {}
+    for event in events:
+        by_previous.setdefault(event.previous_hash, []).append(event)
+    ordered: list[AuditEventRecord] = []
+    visited_ids: set[str] = set()
+    current_hash = ""
+    while len(by_previous.get(current_hash, [])) == 1:
+        event = by_previous[current_hash][0]
+        if event.id in visited_ids:
+            break
+        ordered.append(event)
+        visited_ids.add(event.id)
+        current_hash = event.event_hash
+    ordered_ids = {event.id for event in ordered}
+    remaining = sorted(
+        (event for event in events if event.id not in ordered_ids),
+        key=lambda event: (_as_utc(event.created_at), event.id),
+    )
+    display_events = [*ordered, *remaining]
+    root_count = len(by_previous.get("", []))
+    chain_complete = len(ordered) == len(events)
+    invalid_hash_count = sum(not _scan_execution_event_hash_valid(event) for event in events)
+    issue_type: str | None = None
+    message = "截至本次读取，事件内容哈希与父级指针连续，证据链校验通过。"
+    if root_count == 0:
+        issue_type = "missing_root"
+        message = "未找到根事件，证据链无法从起点还原。"
+    elif root_count > 1:
+        issue_type = "multiple_roots"
+        message = "检测到多个根事件，证据链存在分叉。"
+    elif not chain_complete:
+        issue_type = "broken_link"
+        message = "父级哈希不连续或存在分叉，部分事件无法串联。"
+    elif invalid_hash_count:
+        issue_type = "hash_mismatch"
+        message = f"检测到 {invalid_hash_count} 个事件内容哈希不匹配，请核对数据变更。"
+    return display_events, {
+        "state": "broken" if issue_type else "verified",
+        "chain_complete": chain_complete,
+        "hashes_valid": invalid_hash_count == 0,
+        "checked_event_count": len(events),
+        "invalid_hash_count": invalid_hash_count,
+        "issue_type": issue_type,
+        "message": message,
+        "terminal_hash": current_hash if chain_complete else None,
+    }
+
+
+def _scan_execution_event_hash_valid(record: AuditEventRecord) -> bool:
+    return record.event_hash == content_hash({
+        "id": record.id,
+        "aggregate_type": record.aggregate_type,
+        "aggregate_id": record.aggregate_id,
+        "event_type": record.event_type,
+        "actor": record.actor,
+        "payload": record.payload,
+        "previous_hash": record.previous_hash,
+    })
 
 
 def _sla_scan_event_to_dict(record: AuditEventRecord) -> dict:

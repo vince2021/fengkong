@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import type { DocumentCorrection, DocumentCorrectionTask, NotificationRecord, OperationsSummary, PersonalTask, PersonalTaskQueue, SlaScanHistory, SlaScanRun, TaskAction, TeamTask, TeamTaskBoard } from "./types";
+import type { DocumentCorrection, DocumentCorrectionTask, NotificationRecord, OperationsSummary, PersonalTask, PersonalTaskQueue, SlaScanExecution, SlaScanHistory, SlaScanRun, TaskAction, TeamTask, TeamTaskBoard } from "./types";
 
 type Notice = { kind: "error" | "success"; text: string };
 
@@ -361,6 +361,7 @@ function ScanGovernancePanel({ history, canRetry, canReleaseLease, scanBusy, ret
       <div className={`scan-health-badge ${schedulerState}`}><i /> <span><strong>{healthLabel}</strong><small>{healthDetail}</small></span></div>
     </div>
     <ScanExecutionStatus history={history} canReleaseLease={canReleaseLease} releasingLease={releasingLease} onReleaseLease={onReleaseLease} />
+    <ScanExecutionLedger executions={history.executions} summary={history.execution_summary} />
     <div className="scan-governance-summary">
       <span className={["stale", "blocked"].includes(schedulerState) ? "danger" : schedulerState === "never" ? "warning" : ""}><small>{schedulerState === "blocked" ? "失败运行" : "自动漏跑周期"}</small><strong>{schedulerState === "blocked" ? history.summary.failed_runs : schedulerState === "never" ? "—" : history.scheduler_health.missed_intervals}</strong><em>{schedulerState === "blocked" ? "失败已记录并向运营及管理员告警" : `超过 ${history.stale_after_minutes} 分钟判定心跳超期`}</em></span>
       <span className={history.summary.short_interval_runs ? "warning" : ""}><small>扫描运行来源</small><strong>{history.summary.scheduler_runs}<i> 自动</i></strong><em>{history.summary.manual_runs} 次人工 · {history.summary.retry_runs} 次重试 · {history.summary.failed_runs} 次失败</em></span>
@@ -383,9 +384,14 @@ function ScanExecutionStatus({ history, canReleaseLease, releasingLease, onRelea
   const lease = history.execution_lease;
   const leaseActive = lease.status === "active";
   const leaseOverdue = lease.status === "overdue";
-  const state = leaseOverdue ? "timed-out" : leaseActive || active ? "running" : timedOut || lease.status === "expired" ? "timed-out" : latest?.status === "failed" || latest?.status === "late_failed" || latest?.status === "aborted" || latest?.status === "late_aborted" ? "failed" : "idle";
-  const title = leaseOverdue ? "扫描超时预警，租约仍受保护" : leaseActive || active ? "全域扫描正在执行" : timedOut || lease.status === "expired" ? "存在执行超时未回报" : latest ? "当前无扫描执行中" : "尚无执行轨迹";
-  const detail = leaseOverdue
+  const heartbeatState = lease.heartbeat_health.state;
+  const state = heartbeatState === "lost" ? "heartbeat-lost" : heartbeatState === "delayed" ? "heartbeat-delayed" : leaseOverdue ? "timed-out" : leaseActive || active ? "running" : timedOut || lease.status === "expired" ? "timed-out" : latest?.status === "failed" || latest?.status === "late_failed" || latest?.status === "aborted" || latest?.status === "late_aborted" ? "failed" : "idle";
+  const title = heartbeatState === "lost" ? "扫描心跳失联，租约仍在保护期" : heartbeatState === "delayed" ? "扫描心跳延迟，请关注运行进程" : leaseOverdue ? "扫描超时预警，租约仍受保护" : leaseActive || active ? "全域扫描正在执行" : timedOut || lease.status === "expired" ? "存在执行超时未回报" : latest ? "当前无扫描执行中" : "尚无执行轨迹";
+  const detail = heartbeatState === "lost"
+    ? `最近心跳 ${formatTime(lease.last_heartbeat_at)}，已漏过 ${lease.heartbeat_health.missed_heartbeats} 个周期；请核对进程，达到预警时限后可受控释放`
+    : heartbeatState === "delayed"
+    ? `最近心跳 ${formatTime(lease.last_heartbeat_at)}，延迟 ${formatDuration(lease.heartbeat_health.age_seconds ?? 0)}；当前执行仍持有租约`
+    : leaseOverdue
     ? `${scanTriggerLabel(lease.trigger_type ?? "legacy")}由 ${lease.actor ?? "处理人"} 于 ${formatTime(lease.acquired_at)} 发起；已超过 ${history.execution_timeout_minutes} 分钟预警线，最近心跳 ${formatTime(lease.last_heartbeat_at)}，保护剩余 ${formatDuration(lease.remaining_seconds)}`
     : leaseActive
     ? `${scanTriggerLabel(lease.trigger_type ?? "legacy")}由 ${lease.actor ?? "处理人"} 于 ${formatTime(lease.acquired_at)} 发起，最近心跳 ${formatTime(lease.last_heartbeat_at)}，保护剩余 ${formatDuration(lease.remaining_seconds)}`
@@ -412,6 +418,19 @@ function ScanExecutionStatus({ history, canReleaseLease, releasingLease, onRelea
     </div>
     {showRelease && leaseOverdue && <div className="scan-lease-release-form"><div><strong>受控释放长时扫描</strong><span>系统每 {history.execution_heartbeat_interval_seconds} 秒续租一次。请先核对最近心跳与后台进程；释放后旧进程会在下一检查点停止写入并留下失锁证据。</span></div><label><span>释放原因</span><input autoFocus value={releaseReason} maxLength={1000} onChange={(event) => setReleaseReason(event.target.value)} placeholder="说明心跳、进程核验和接管依据，至少 5 个字…" /></label><button disabled={releasingLease} onClick={() => setShowRelease(false)}>取消</button><button className="danger" disabled={releasingLease || releaseReason.trim().length < 5} onClick={() => void submitRelease()}>{releasingLease ? "释放中…" : "确认释放并留痕"}</button></div>}
   </div>;
+}
+
+function ScanExecutionLedger({ executions, summary }: { executions: SlaScanHistory["executions"]; summary: SlaScanHistory["execution_summary"] }) {
+  const [filter, setFilter] = useState<"all" | "running" | "abnormal">("all");
+  const abnormalStatuses = new Set(["failed", "late_failed", "aborted", "late_aborted", "timed_out", "force_released"]);
+  const rows = executions.filter((item) => filter === "all" ? true : filter === "running" ? item.status === "running" : abnormalStatuses.has(item.status) || item.evidence_integrity.state === "broken");
+  return <section className="scan-execution-ledger">
+    <header><div><span>EXECUTION LEDGER</span><strong>扫描执行与审计证据</strong><small>逐次核对来源、耗时、结束原因及哈希链事件</small></div><aside className={summary.evidence_broken ? "broken" : "verified"}><strong>{summary.evidence_broken ? `${summary.evidence_broken} 条证据异常` : "证据链完整"}</strong><small>已校验 {summary.evidence_events_checked} 个事件</small></aside><nav aria-label="执行台账筛选"><button className={filter === "all" ? "active" : ""} aria-pressed={filter === "all"} onClick={() => setFilter("all")}>全部 {executions.length}</button><button className={filter === "running" ? "active" : ""} aria-pressed={filter === "running"} onClick={() => setFilter("running")}>执行中</button><button className={filter === "abnormal" ? "active" : ""} aria-pressed={filter === "abnormal"} onClick={() => setFilter("abnormal")}>异常证据</button></nav></header>
+    {rows.length ? <div className="scan-execution-ledger-list">{rows.map((item) => <details className={`scan-execution-ledger-row ${item.status}`} key={item.execution_id}>
+      <summary><span className={`scan-execution-result ${item.status}`}>{scanExecutionStatusLabel(item.status)}</span><span><strong>{scanTriggerLabel(item.trigger_type)}</strong><small>{item.actor}</small></span><span><strong>{formatTime(item.started_at)}</strong><small>{item.finished_at ? `结束 ${formatTime(item.finished_at)}` : `已运行 ${formatDuration(item.elapsed_seconds)}`}</small></span><span><strong>{formatDuration(item.elapsed_seconds)}</strong><small>{item.event_count} 个审计事件</small></span><span className={`scan-evidence-integrity ${item.evidence_integrity.state}`}><strong>{item.evidence_integrity.state === "verified" ? "证据完整" : "证据异常"}</strong><small>{item.evidence_integrity.checked_event_count} 项校验</small></span><code title={item.execution_id}>{item.execution_id.slice(0, 12)}</code><i>⌄</i></summary>
+      <div className={`scan-execution-evidence ${item.evidence_integrity.state}`}><div className="scan-execution-conclusion"><span><small>结束结论</small><strong>{scanExecutionResultLabel(item.status)}</strong></span><span><small>终态处理人</small><strong>{item.released_by ?? item.terminal_actor ?? "—"}</strong></span><span><small>结果运行号</small><strong>{item.result_run_id?.slice(0, 18) ?? "—"}</strong></span><span className={item.evidence_integrity.state}><small>证据完整性</small><strong>{item.evidence_integrity.state === "verified" ? "校验通过" : scanEvidenceIssueLabel(item.evidence_integrity.issue_type)}</strong></span><p>{item.evidence_integrity.message} {item.termination_reason ?? (item.status === "completed" ? "扫描正常完成，业务结果与执行轨迹已闭合。" : item.status === "running" ? "当前仍在运行，等待终态事件。" : "未记录额外结束说明。")}</p></div><ol>{item.evidence_events.map((event, index) => <li className={!event.hash_valid || !event.link_valid ? "invalid" : ""} key={`${index}-${event.event_hash}`}><i>{index + 1}</i><div><strong>{scanExecutionEventLabel(event.event_type)}</strong><span>{event.actor} · {formatTime(event.occurred_at)}</span>{(event.reason || event.error_type) && <small>{event.reason ?? event.error_type}</small>}{(!event.hash_valid || !event.link_valid) && <em>{!event.link_valid ? "父级哈希不连续" : "事件内容哈希不匹配"}</em>}</div><code title={event.event_hash}>{event.event_hash.slice(0, 12)}</code></li>)}</ol></div>
+    </details>)}</div> : <div className="notification-empty compact"><strong>当前筛选条件下没有执行记录</strong><p>切换“全部”可查看最近执行轨迹。</p></div>}
+  </section>;
 }
 
 function ScanRunRow({ run, canRetry, scanBusy, retrying, onRetry }: { run: SlaScanRun; canRetry: boolean; scanBusy: boolean; retrying: boolean; onRetry: (runKey: string, reason: string) => Promise<boolean> }) {
@@ -445,6 +464,9 @@ function TrendValue({ label, value }: { label: string; value: number }) {
 function scanTriggerLabel(value: SlaScanRun["trigger_type"]): string { return value === "scheduler" ? "自动调度" : value === "manual" ? "人工运行" : value === "retry" ? "人工恢复" : "历史记录"; }
 function retryStatusLabel(value: SlaScanRun["last_retry_status"]): string { return value === "completed" ? "恢复成功" : value === "failed" ? "仍然失败" : value === "requested" ? "已受理" : "暂无结果"; }
 function scanExecutionResultLabel(value: SlaScanHistory["executions"][number]["status"]): string { return value === "completed" ? "已完成" : value === "late_completed" ? "释放后返回完成" : value === "late_failed" ? "释放后返回失败" : value === "late_aborted" ? "释放后失锁中止" : value === "aborted" ? "失锁中止" : value === "force_released" ? "已人工释放" : value === "failed" ? "执行失败" : value === "timed_out" ? "超时未回报" : "正在执行"; }
+function scanExecutionStatusLabel(value: SlaScanHistory["executions"][number]["status"]): string { return value === "completed" ? "完成" : value === "running" ? "运行中" : value === "timed_out" ? "超时预警" : value === "force_released" ? "人工释放" : value === "aborted" || value === "late_aborted" ? "失锁中止" : value === "late_completed" ? "迟到完成" : "执行失败"; }
+function scanExecutionEventLabel(value: string): string { const labels: Record<string, string> = { sla_scan_started: "获取租约并启动", sla_scan_execution_completed: "执行完成", sla_scan_execution_failed: "执行失败", sla_scan_execution_timed_out: "租约硬过期", sla_scan_execution_force_released: "运营受控释放", sla_scan_execution_terminal_lease_released: "终态残留租约清理", sla_scan_execution_lease_lost: "检测到租约失效", sla_scan_execution_aborted: "失锁中止", sla_scan_execution_late_aborted: "释放后中止", sla_scan_execution_late_completed: "迟到完成", sla_scan_execution_late_failed: "迟到失败" }; return labels[value] ?? value; }
+function scanEvidenceIssueLabel(value: SlaScanExecution["evidence_integrity"]["issue_type"]): string { return value === "missing_root" ? "缺少根事件" : value === "multiple_roots" ? "存在多个根事件" : value === "broken_link" ? "证据链断裂" : value === "hash_mismatch" ? "内容哈希异常" : "校验异常"; }
 function formatDuration(seconds: number): string { const minutes = Math.floor(seconds / 60); const remainder = seconds % 60; return minutes > 0 ? `${minutes} 分 ${remainder} 秒` : `${remainder} 秒`; }
 
 function StageDistribution({ rows }: { rows: OperationsSummary["stage_distribution"] }) {

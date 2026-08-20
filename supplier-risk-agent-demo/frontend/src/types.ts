@@ -1636,6 +1636,32 @@ export type SlaScanExecution = {
   result_run_id: string | null;
   deduplicated: boolean;
   error_type: string | null;
+  terminal_actor: string | null;
+  termination_reason: string | null;
+  released_by: string | null;
+  lease_lost_at: string | null;
+  event_count: number;
+  evidence_integrity: {
+    state: "verified" | "broken";
+    chain_complete: boolean;
+    hashes_valid: boolean;
+    checked_event_count: number;
+    invalid_hash_count: number;
+    issue_type: "missing_root" | "multiple_roots" | "broken_link" | "hash_mismatch" | null;
+    message: string;
+    terminal_hash: string | null;
+  };
+  evidence_events: Array<{
+    event_type: string;
+    actor: string;
+    occurred_at: string;
+    reason: string | null;
+    error_type: string | null;
+    event_hash: string;
+    previous_hash: string;
+    hash_valid: boolean;
+    link_valid: boolean;
+  }>;
 };
 
 export type SlaScanRun = {
@@ -1694,6 +1720,9 @@ export type SlaScanHistory = {
     force_released: number;
     aborted: number;
     failed: number;
+    evidence_verified: number;
+    evidence_broken: number;
+    evidence_events_checked: number;
     last_started_at: string | null;
   };
   execution_lease: {
@@ -1708,6 +1737,14 @@ export type SlaScanHistory = {
     warning_after_seconds: number;
     last_heartbeat_at: string | null;
     heartbeat_count: number;
+    heartbeat_health: {
+      state: "idle" | "healthy" | "delayed" | "lost";
+      age_seconds: number | null;
+      missed_heartbeats: number;
+      next_expected_at: string | null;
+      delayed_after_seconds: number;
+      lost_after_seconds: number;
+    };
   };
   executions: SlaScanExecution[];
   scheduler_health: {
