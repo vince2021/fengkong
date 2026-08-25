@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 from rating.enterprise_indicator_pool import evaluate_indicator_pool
+from rating.indicator_evaluator import evaluate_indicator_pool_v2
 
 
 DEFAULT_RISK_SCREENING_POLICY = {
@@ -88,7 +89,9 @@ def apply_risk_screening_policy(counterparty: dict, config: dict, result: dict) 
     if not result.get("ok"):
         return result
 
-    screening = evaluate_indicator_pool(counterparty, config)
+    screening = evaluate_indicator_pool_v2(counterparty, config)
+    if screening is None:
+        screening = evaluate_indicator_pool(counterparty, config)
     policy = get_risk_screening_policy(config)
     metrics = {
         "normalized_score": screening["normalized_score"],

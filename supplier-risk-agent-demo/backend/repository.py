@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, SlaScanLeaseRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, SlaScanLeaseRecord
 from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
 from backend.security import APPROVAL_STAGE_ROLES
@@ -554,14 +554,22 @@ class _ModelGovernanceRepositoryBase:
         return _materialize_model_runtime_defaults(base)
 
     def list_changes(self, template_key: str | None = None) -> list[dict]:
-        statement = select(ModelChangeRecord).order_by(ModelChangeRecord.created_at.desc(), ModelChangeRecord.id.desc())
+        statement = (
+            select(ModelChangeRecord)
+            .where(ModelChangeRecord.entity_type == "model")
+            .order_by(ModelChangeRecord.created_at.desc(), ModelChangeRecord.id.desc())
+        )
         if template_key:
             statement = statement.where(ModelChangeRecord.template_key == template_key)
         return [_model_change_to_dict(record) for record in self.session.scalars(statement).all()]
 
     def get_change(self, change_id: str) -> dict | None:
         record = self.session.get(ModelChangeRecord, change_id)
-        return _model_change_to_dict(record) if record else None
+        return (
+            _model_change_to_dict(record)
+            if record and record.entity_type == "model"
+            else None
+        )
 
     def create_change(self, payload: dict, actor_subject: str, actor_name: str) -> dict:
         record = ModelChangeRecord(
@@ -575,6 +583,7 @@ class _ModelGovernanceRepositoryBase:
             change_reason=payload["change_reason"],
             created_by=actor_subject,
             created_by_name=actor_name,
+            entity_type="model",
         )
         self.session.add(record)
         try:
@@ -939,7 +948,7 @@ class ModelMonitoringRepository:
     def link_issue_change(self, issue_id: str, expected_row_version: int, change_id: str, actor: str) -> dict:
         issue = self._get_versioned_issue(issue_id, expected_row_version)
         change = self.session.get(ModelChangeRecord, change_id)
-        if not change:
+        if not change or change.entity_type != "model":
             raise LookupError("模型变更单不存在")
         if change.template_key != issue.template_key:
             raise ValueError("监控问题与模型变更单模板不一致")
@@ -1054,7 +1063,7 @@ class ModelMonitoringRepository:
 class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
     def update_change(self, change_id: str, expected_row_version: int, payload: dict, actor_subject: str, actor_name: str, allow_admin: bool = False) -> dict:
         record = self.session.get(ModelChangeRecord, change_id)
-        if not record:
+        if not record or record.entity_type != "model":
             raise LookupError("模型变更单不存在")
         if record.row_version != expected_row_version:
             raise ConcurrentUpdateError(f"模型变更单版本已变化，当前版本为 {record.row_version}")
@@ -1070,7 +1079,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
 
     def submit_change(self, change_id: str, expected_row_version: int, actor_subject: str, actor_name: str, allow_admin: bool = False) -> dict:
         record = self.session.get(ModelChangeRecord, change_id)
-        if not record:
+        if not record or record.entity_type != "model":
             raise LookupError("模型变更单不存在")
         if record.row_version != expected_row_version:
             raise ConcurrentUpdateError(f"模型变更单版本已变化，当前版本为 {record.row_version}")
@@ -1091,7 +1100,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
 
     def review_change(self, change_id: str, expected_row_version: int, decision: str, comment: str, reviewer_subject: str, reviewer_name: str, demo_repository: DemoRepository) -> dict:
         record = self.session.get(ModelChangeRecord, change_id)
-        if not record:
+        if not record or record.entity_type != "model":
             raise LookupError("模型变更单不存在")
         if record.row_version != expected_row_version:
             raise ConcurrentUpdateError(f"模型变更单版本已变化，当前版本为 {record.row_version}")
@@ -4103,3 +4112,106 @@ def _order_hash_chain(events: list[dict]) -> list[dict]:
         ordered.append(event)
         current_hash = event["event_hash"]
     return ordered if len(ordered) == len(events) else events
+
+
+class IndicatorDefinitionRepository:
+    """Publish versioned indicator definitions with governance evidence."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.audit = AuditRepository(session)
+
+    def publish_indicator(
+        self,
+        definition: dict,
+        actor: str,
+        actor_name: str,
+    ) -> IndicatorDefinition:
+        code = str(definition.get("code") or "").strip()
+        if not code:
+            raise ValueError("指标编码不能为空")
+
+        latest = self.session.scalars(
+            select(IndicatorDefinition)
+            .where(IndicatorDefinition.code == code)
+            .order_by(IndicatorDefinition.version.desc())
+        ).first()
+        new_version = latest.version + 1 if latest else 1
+        now = datetime.now(timezone.utc)
+        config_hash = content_hash(definition)
+
+        active_records = self.session.scalars(
+            select(IndicatorDefinition).where(
+                IndicatorDefinition.code == code,
+                IndicatorDefinition.is_active.is_(True),
+            )
+        ).all()
+        for active in active_records:
+            active.is_active = False
+            active.updated_at = now
+
+        indicator = IndicatorDefinition(
+            id=str(uuid4()),
+            code=code,
+            name=definition["name"],
+            category=definition["category"],
+            layer=definition["layer"],
+            data_type=definition["data_type"],
+            field_path=definition.get("field_path"),
+            expression=definition.get("expression"),
+            dependencies=deepcopy(definition.get("dependencies")),
+            scoring_json=deepcopy(definition["scoring_json"]),
+            max_score=definition.get("max_score", 3.0),
+            default_weight=definition.get("default_weight", 1.0),
+            source_references=deepcopy(definition.get("source_references")),
+            seed_source=definition.get("seed_source"),
+            version=new_version,
+            status="published",
+            is_active=True,
+            row_version=1,
+            created_at=now,
+            created_by=actor,
+        )
+        change = ModelChangeRecord(
+            id=str(uuid4()),
+            template_key=code,
+            base_version=str(latest.version) if latest else "0",
+            candidate_version=str(new_version),
+            status="published",
+            entity_type="indicator",
+            config_json=deepcopy(definition),
+            validation_json={"valid": True, "config_hash": config_hash},
+            impact_json={},
+            change_reason=f"publish indicator {code} v{new_version}",
+            created_by=actor,
+            created_by_name=actor_name,
+            submitted_at=now,
+            published_at=now,
+        )
+
+        try:
+            if active_records:
+                self.session.flush()
+            self.session.add_all([indicator, change])
+            self.session.flush()
+            self.audit.append(
+                "indicator_definition",
+                indicator.id,
+                "indicator_published",
+                actor_name,
+                {
+                    "code": code,
+                    "version": new_version,
+                    "change_id": change.id,
+                    "config_hash": config_hash,
+                },
+            )
+            self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError(
+                "指标定义发布发生并发冲突，请刷新后重试"
+            ) from exc
+
+        self.session.refresh(indicator)
+        return indicator
