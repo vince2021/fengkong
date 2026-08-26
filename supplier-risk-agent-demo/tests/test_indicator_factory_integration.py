@@ -232,9 +232,13 @@ class TestDualTrackRiskScreening(unittest.TestCase):
             draft, actor="admin", actor_name="管理员"
         )
 
+        config = self._config()
+        config["indicator_selection"] = [
+            {"indicator_id": "DUAL_TEST", "weight": 1, "enabled": True}
+        ]
         result = apply_risk_screening_policy(
             {"id": "x", "enterprise_risk": {"DUAL_TEST": False}},
-            self._config(),
+            config,
             self._base_result(),
         )
 
@@ -244,6 +248,32 @@ class TestDualTrackRiskScreening(unittest.TestCase):
         self.assertEqual(screening["details"][0]["indicator_id"], "DUAL_TEST")
         self.assertEqual(screening["details"][0]["score"], 3.0)
         self.assertEqual(result["risk_screening_policy"]["metrics"]["normalized_score"], 100.0)
+
+    def test_unbound_active_indicator_does_not_change_model_result(self):
+        draft = TestIndicatorGovernance._draft("UNBOUND_TEST")
+        draft["data_type"] = "boolean"
+        draft["scoring_json"] = {
+            "type": "boolean_hit",
+            "bands": [
+                {"operator": "==", "value": False, "score": 3},
+                {"operator": "==", "value": True, "score": 1},
+            ],
+            "missing_score": 2,
+        }
+        IndicatorDefinitionRepository(self.session).publish_indicator(
+            draft, actor="admin", actor_name="管理员"
+        )
+
+        result = apply_risk_screening_policy(
+            {"id": "x", "enterprise_risk": {"UNBOUND_TEST": True}},
+            self._config(),
+            self._base_result(),
+        )
+
+        self.assertNotEqual(
+            result["enterprise_risk_screening"]["pool_version"],
+            "indicator-factory-v2",
+        )
 
 
 class TestSeedPoolJson(unittest.TestCase):

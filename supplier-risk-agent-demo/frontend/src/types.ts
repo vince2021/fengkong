@@ -1029,6 +1029,294 @@ export type PortfolioRatingBatch = {
 
 export type ModelSummary = { key: string; name: string; version: string };
 
+export type RuleCondition = {
+  expression: string;
+  operator: "bool" | "==" | "!=" | ">" | ">=" | "<" | "<=";
+  value?: unknown;
+  label: string;
+};
+
+export type RuleAction = {
+  type: "rating_override" | "access_strategy" | "risk_segment_override" | "limit_multiplier_cap" | "payment_term_days_cap" | "review_required" | "score_adjustment" | "severity";
+  value: unknown;
+};
+
+export type RuleDefinition = {
+  id: string;
+  code: string;
+  name: string;
+  rule_type: "strong_rule" | "risk_screening" | "admission";
+  category: string | null;
+  enabled: boolean;
+  conditions_json: RuleCondition[];
+  condition_relation: "all" | "any";
+  actions_json: RuleAction[];
+  priority: number;
+  version: number;
+  status: string;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  created_by: string | null;
+};
+
+export type RuleSetDefinition = {
+  id: string;
+  code: string;
+  name: string;
+  rule_codes: string[];
+  evaluation_strategy: "first_hit" | "all_hits" | "most_restrictive";
+  version: number;
+  status: string;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  created_by: string | null;
+};
+
+export type PipelineStage = {
+  stage_type: "scoring" | "strong_rules" | "risk_screening" | "strategy_mapping" | "admission";
+  rule_set_code?: string;
+};
+
+export type DecisionPipelineDefinition = {
+  id: string;
+  code: string;
+  name: string;
+  stages_json: PipelineStage[];
+  version: number;
+  status: string;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  created_by: string | null;
+};
+
+export type RuleTestResult = {
+  triggered: boolean;
+  details: Array<Record<string, unknown>>;
+};
+
+export type PipelineSimulationResult = {
+  result: Record<string, unknown>;
+  trace: {
+    pipeline_code?: string;
+    pipeline_version?: number;
+    stages?: Array<{ index: number; stage_type: PipelineStage["stage_type"]; rule_set_code?: string | null; output: Record<string, unknown> }>;
+  };
+};
+
+export type RuleCenterAssetType = "rule" | "rule_set" | "pipeline";
+
+export type RuleCenterGovernanceChange = {
+  id: string;
+  asset_type: RuleCenterAssetType;
+  code: string;
+  template_key: string;
+  base_version: string;
+  candidate_version: string;
+  status: "draft" | "pending_review" | "scheduled" | "published" | "rejected" | "activation_failed" | "package_draft" | "package_pending_review";
+  config: Record<string, unknown>;
+  validation: { valid: boolean; config_hash: string };
+  impact: Record<string, unknown>;
+  change_reason: string;
+  created_by: string;
+  created_by_name: string;
+  submitted_at: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
+  published_at: string | null;
+  effective_at: string | null;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+  restore_source: { code: string; version: number; definition_id: string } | null;
+};
+
+export type RuleCenterVersionHistory = {
+  id: string;
+  asset_type: RuleCenterAssetType;
+  code: string;
+  version: number;
+  status: string;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string | null;
+  config: Record<string, unknown>;
+};
+
+export type RuleCenterActivationResult = {
+  as_of: string;
+  due_count: number;
+  published_count: number;
+  failed_count: number;
+  results: Array<{ change_id: string; status: "published" | "failed"; error: string | null }>;
+};
+
+export type RuleCenterPackageImpact = {
+  member_count: number;
+  create_count: number;
+  update_count: number;
+  asset_counts: Record<RuleCenterAssetType, number>;
+  package_dependency_count: number;
+  active_dependency_count: number;
+  downstream_assets: { rule_sets: string[]; pipelines: string[] };
+};
+
+export type RuleCenterPackagePreview = {
+  config_hash: string;
+  members: Array<{
+    change_id: string;
+    asset_type: RuleCenterAssetType;
+    code: string;
+    base_version: string;
+    candidate_version: string;
+    config_hash: string;
+    change_type: "create" | "update";
+  }>;
+  dependency_snapshot: Record<string, unknown>;
+  impact: RuleCenterPackageImpact;
+  release_gate: { passed: boolean; errors: string[]; summary: string };
+};
+
+export type RuleCenterReleasePackage = {
+  id: string;
+  name: string;
+  change_reason: string;
+  status: "draft" | "pending_review" | "published" | "rejected";
+  config_hash: string;
+  dependency_snapshot: Record<string, unknown>;
+  impact: RuleCenterPackageImpact;
+  members: Array<{
+    id: string;
+    change_id: string;
+    asset_type: RuleCenterAssetType;
+    code: string;
+    candidate_version: string;
+    sequence: number;
+  }>;
+  latest_replay: RuleCenterReplayRun | null;
+  created_by: string;
+  created_by_name: string;
+  submitted_at: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
+  published_at: string | null;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type RuleCenterReplayRun = {
+  id: string;
+  package_id: string;
+  package_config_hash: string;
+  dataset_snapshot_id: string;
+  dataset_snapshot_hash: string;
+  model_key: string;
+  model_version: string;
+  pipeline_code: string;
+  sample_source: string;
+  sample_count: number;
+  status: "completed";
+  thresholds: {
+    sample_limit: number;
+    min_sample_count: number;
+    max_decision_change_rate: number;
+    max_execution_failure_rate: number;
+  };
+  metrics: {
+    sample_count: number;
+    failure_count: number;
+    failure_rate: number;
+    rating_change_count: number;
+    rating_change_rate: number;
+    decision_change_count: number;
+    decision_change_rate: number;
+    tightened_count: number;
+    loosened_count: number;
+    average_score_delta: number | null;
+    baseline_rule_hits: Array<{ code: string; hit_count: number; hit_rate: number }>;
+    candidate_rule_hits: Array<{ code: string; hit_count: number; hit_rate: number }>;
+    rating_migration_matrix: Record<string, Record<string, number>>;
+    admission_migration_matrix: Record<string, Record<string, number>>;
+  };
+  details: Array<Record<string, unknown>>;
+  gate: { passed: boolean; errors: string[]; warnings: string[]; summary: string };
+  evidence_hash: string;
+  created_by: string;
+  created_by_name: string;
+  created_at: string | null;
+};
+
+export type RuleCenterReplaySnapshot = {
+  id: string;
+  dataset_id: string;
+  version: number;
+  source_name: string;
+  schema_version: string;
+  as_of_date: string;
+  evidence_reference: string;
+  data_classification: "deidentified" | "synthetic";
+  field_mapping: Record<string, string>;
+  label_field: string | null;
+  observed_at_field: string | null;
+  sample_count: number;
+  coverage: {
+    overall_field_coverage_rate: number;
+    field_coverage: Array<{ path: string; present_count: number; coverage_rate: number }>;
+    required_fields: Array<{ path: string; present_count: number; coverage_rate: number }>;
+    label_coverage_rate: number;
+    label_distribution: Record<string, number>;
+    observed_at_coverage_rate: number;
+    deidentification: { passed: boolean; scanned_field_count: number; sensitive_fields: string[]; data_classification: string };
+    time_travel_check: { passed: boolean; future_observation_count: number };
+  };
+  source_hash: string;
+  content_hash: string;
+  created_by: string;
+  created_by_name: string;
+  created_at: string | null;
+};
+
+export type RuleCenterReplayDataset = {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  status: "active";
+  latest_snapshot: RuleCenterReplaySnapshot | null;
+  created_by: string;
+  created_by_name: string;
+  created_at: string | null;
+};
+
+export type RuleCenterReplayComparisonSide = {
+  failure_count: number; failure_rate: number;
+  score_mean: number | null; score_min: number | null; score_max: number | null; score_median: number | null;
+  rating_distribution: Record<string, number>; admission_distribution: Record<string, number>; score_distribution: Record<string, number>;
+  ks: number | null; confusion_matrix: { tp: number; fp: number; tn: number; fn: number } | null;
+};
+
+export type RuleCenterReplayComparison = {
+  id: string; dataset_snapshot_id: string; dataset_snapshot_hash: string;
+  champion_model_key: string; champion_model_version: string; challenger_model_key: string; challenger_model_version: string;
+  champion_pipeline_code: string; champion_pipeline_version: number | null; challenger_pipeline_code: string; challenger_pipeline_version: number | null;
+  segment_field: string; evidence_level: "labeled" | "unlabeled";
+  config: { sample_limit: number; max_execution_failure_rate: number; positive_labels: string[]; positive_admissions: string[] };
+  metrics: {
+    sample_count: number; labeled_sample_count: number; champion: RuleCenterReplayComparisonSide; challenger: RuleCenterReplayComparisonSide;
+    average_score_delta: number | null; rating_change_rate: number; admission_change_rate: number; psi: number;
+    segments: Array<{ segment: string; sample_count: number; champion_score_mean: number | null; challenger_score_mean: number | null; average_score_delta: number | null; rating_change_rate: number; admission_change_rate: number }>;
+    warning: string | null;
+  };
+  evidence_hash: string; created_by_name: string; created_at: string | null;
+};
+
 export type EditableIndicator = { path: string; label: string; unit: string; value_scale?: "whole" | "fraction"; step: number; min: number; max: number; source?: "enterprise_risk_pool" };
 
 export type EnterpriseRiskIndicator = {

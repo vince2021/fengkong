@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 import backend.database as database
 from backend.db_models import IndicatorDefinition
+from rating.enterprise_indicator_pool import get_model_indicator_selection
 from rating.expression_engine import (
     ExpressionSecurityError,
     ExpressionSyntaxError,
@@ -263,12 +264,19 @@ def evaluate_indicator_pool_v2(
         return None
 
     configured_selection = config.get("indicator_selection")
+    if (
+        not (isinstance(configured_selection, list) and configured_selection)
+        and config.get("scorecard_type")
+    ):
+        configured_selection = get_model_indicator_selection(config)
     if isinstance(configured_selection, list) and configured_selection:
         selected_weights = {
             str(item.get("indicator_id")): float(item.get("weight", 1))
             for item in configured_selection
             if isinstance(item, dict) and item.get("enabled", True)
         }
+        if not selected_weights:
+            return None
         if selected_weights:
             by_code = {indicator.code: indicator for indicator in indicators}
             if any(code not in by_code for code in selected_weights):

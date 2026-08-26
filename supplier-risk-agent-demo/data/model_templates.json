@@ -2,6 +2,7 @@
   "templates": {
     "general": {
       "version": "MCR-20260711-001",
+      "decision_pipeline_code": "PIPELINE-GENERAL",
       "name": "通用客商信用评级模型",
       "industry_template": "general",
       "status": "active",
@@ -208,6 +209,7 @@
     "corporate_credit_v2": {
       "extends": "general",
       "version": "CORP-20260714-001",
+      "decision_pipeline_code": "PIPELINE-CORPORATE",
       "name": "材料增强型工商企业信用模型",
       "scorecard_type": "corporate_credit_v2",
       "change_reason": "融合工商企业评级、标普业务财务矩阵、投资风险模型及信控会议纪要，新增分层运算、缺失完整度与交易策略",
@@ -428,6 +430,7 @@
     },
     "tech_enterprise_basic": {
       "version": "TECH-BASE-20260711-001",
+      "decision_pipeline_code": "PIPELINE-TECH",
       "name": "科创企业基本评价模型",
       "industry_template": "tech_enterprise_basic",
       "scorecard_type": "tech_enterprise_basic",

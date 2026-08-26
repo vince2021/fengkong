@@ -455,3 +455,219 @@ class AuthorityPolicyActivationRetry(AuthorityPolicyActivationIncidentAction):
 
 class ApiError(BaseModel):
     detail: str
+
+
+# --- Rule Center Schemas ---
+
+RuleCenterCode = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+]
+
+
+class RuleConditionItem(BaseModel):
+    expression: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
+    ]
+    operator: Literal["bool", "==", "!=", ">", ">=", "<", "<="] = "bool"
+    value: Any = None
+    label: Annotated[
+        str, StringConstraints(strip_whitespace=True, max_length=256)
+    ] = ""
+
+
+class RuleActionItem(BaseModel):
+    type: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    ]
+    value: Any
+
+
+class RuleCreate(BaseModel):
+    code: RuleCenterCode
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ]
+    rule_type: Literal["strong_rule", "risk_screening", "admission"] = "strong_rule"
+    category: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    ] | None = None
+    enabled: bool = True
+    conditions_json: list[RuleConditionItem] = Field(
+        default_factory=list, min_length=1, max_length=100
+    )
+    condition_relation: Literal["all", "any"] = "all"
+    actions_json: list[RuleActionItem] = Field(
+        default_factory=list, min_length=1, max_length=100
+    )
+    priority: int = Field(default=999, ge=0, le=1_000_000)
+
+
+class RuleUpdate(BaseModel):
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ] | None = None
+    rule_type: Literal["strong_rule", "risk_screening", "admission"] | None = None
+    category: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    ] | None = None
+    enabled: bool | None = None
+    conditions_json: list[RuleConditionItem] | None = Field(
+        default=None, min_length=1, max_length=100
+    )
+    condition_relation: Literal["all", "any"] | None = None
+    actions_json: list[RuleActionItem] | None = Field(
+        default=None, min_length=1, max_length=100
+    )
+    priority: int | None = Field(default=None, ge=0, le=1_000_000)
+
+
+class RuleSetCreate(BaseModel):
+    code: RuleCenterCode
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ]
+    rule_codes: list[RuleCenterCode] = Field(min_length=1, max_length=500)
+    evaluation_strategy: Literal[
+        "first_hit", "all_hits", "most_restrictive"
+    ] = "most_restrictive"
+
+
+class PipelineStageItem(BaseModel):
+    stage_type: Literal[
+        "scoring",
+        "strong_rules",
+        "risk_screening",
+        "strategy_mapping",
+        "admission",
+    ]
+    rule_set_code: RuleCenterCode | None = None
+
+
+class PipelineCreate(BaseModel):
+    code: RuleCenterCode
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ]
+    stages_json: list[PipelineStageItem] = Field(min_length=1, max_length=50)
+
+
+class RuleTestRequest(BaseModel):
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineSimulateRequest(BaseModel):
+    counterparty: dict[str, Any] = Field(min_length=1)
+    config: dict[str, Any] = Field(min_length=1)
+
+
+class RuleCenterChangeCreate(BaseModel):
+    asset_type: Literal["rule", "rule_set", "pipeline"]
+    definition: dict[str, Any]
+    change_reason: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)
+    ]
+
+
+class RuleCenterChangeUpdate(VersionedActionRequest):
+    definition: dict[str, Any]
+    change_reason: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)
+    ]
+
+
+class RuleCenterChangeReview(VersionedActionRequest):
+    decision: Literal["publish", "reject"]
+    comment: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)
+    ]
+    effective_at: datetime | None = None
+
+
+class RuleCenterActivationScan(BaseModel):
+    as_of: datetime | None = None
+
+
+class RuleCenterRestoreDraft(BaseModel):
+    asset_type: Literal["rule", "rule_set", "pipeline"]
+    code: RuleCenterCode
+    version: int = Field(ge=1)
+    change_reason: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)
+    ]
+
+
+class RuleCenterPackagePreview(BaseModel):
+    change_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class RuleCenterPackageCreate(RuleCenterPackagePreview):
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ]
+    change_reason: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)
+    ]
+
+
+class RuleCenterPackageReview(VersionedActionRequest):
+    decision: Literal["publish", "reject"]
+    comment: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)
+    ]
+
+
+class RuleCenterReplayDatasetCreate(BaseModel):
+    code: RuleCenterCode
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ]
+    description: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)
+    ]
+
+
+class RuleCenterReplaySnapshotImport(BaseModel):
+    source_name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)
+    ]
+    schema_version: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    ] = "1.0"
+    as_of_date: date
+    evidence_reference: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=3, max_length=2000)
+    ]
+    data_classification: Literal["deidentified", "synthetic"]
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+    label_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)] | None = None
+    observed_at_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)] | None = None
+    records: list[dict[str, Any]] = Field(min_length=1, max_length=5000)
+
+
+class RuleCenterReplayCreate(BaseModel):
+    dataset_snapshot_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)
+    ]
+    model_key: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+    ]
+    pipeline_code: RuleCenterCode | None = None
+    sample_limit: int = Field(default=100, ge=1, le=500)
+    min_sample_count: int = Field(default=10, ge=1, le=500)
+    max_decision_change_rate: float = Field(default=0.5, ge=0, le=1)
+    max_execution_failure_rate: float = Field(default=0, ge=0, le=1)
+
+
+class RuleCenterReplayComparisonCreate(BaseModel):
+    dataset_snapshot_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)
+    ]
+    champion_model_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    challenger_model_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    champion_pipeline_code: RuleCenterCode | None = None
+    challenger_pipeline_code: RuleCenterCode | None = None
+    segment_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)] = "counterparty_type"
+    positive_labels: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["bad", "default", "reject"], min_length=1, max_length=20)
+    positive_admissions: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["reject"], min_length=1, max_length=20)
+    sample_limit: int = Field(default=500, ge=1, le=500)
+    max_execution_failure_rate: float = Field(default=0, ge=0, le=1)

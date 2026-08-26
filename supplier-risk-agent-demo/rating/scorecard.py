@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
+from sqlalchemy.exc import SQLAlchemyError
+
 from rating.explanations import make_deduction, split_explanations
 from rating.models import TAX_CREDIT_SCORES, VALID_REGISTRATION_STATUSES
 from rating.strategies import apply_strategy_mapping, get_mapping_for_score
@@ -44,6 +48,20 @@ def map_rating(total_score: float, strategy_mapping: list[dict]) -> str:
 
 
 def rate_counterparty(counterparty: dict, config: dict) -> dict:
+    pipeline_code = str(config.get("decision_pipeline_code") or "").strip()
+    if pipeline_code:
+        from rating.decision_pipeline import run_decision_pipeline
+
+        pipeline_context = {"counterparty": counterparty, "config": config}
+        try:
+            pipeline_result = run_decision_pipeline(
+                pipeline_code, pipeline_context
+            )
+        except SQLAlchemyError:
+            pipeline_result = None
+        if pipeline_result is not None:
+            return _decorate_pipeline_result(pipeline_result, pipeline_context)
+
     if config.get("scorecard_type") == "corporate_credit_v2":
         from rating.corporate_credit_scorecard import rate_corporate_credit
 
@@ -103,6 +121,108 @@ def rate_counterparty(counterparty: dict, config: dict) -> dict:
     from rating.risk_screening_policy import apply_risk_screening_policy
 
     return apply_risk_screening_policy(counterparty, config, result)
+
+
+def _decorate_pipeline_result(result: dict, context: dict) -> dict:
+    decorated = deepcopy(result)
+    trace = deepcopy(context.get("pipeline_trace") or {})
+    decorated["decision_pipeline_trace"] = trace
+
+    strong_hits = []
+    risk_hits = []
+    risk_before = None
+    risk_after = None
+    previous_result = None
+    for stage in trace.get("stages", []):
+        output = stage.get("output") or {}
+        stage_result = output.get("result")
+        if stage.get("stage_type") == "strong_rules":
+            strong_hits.extend(
+                _legacy_rule_hit(hit)
+                for hit in output.get("triggered_rules", [])
+            )
+        elif stage.get("stage_type") == "risk_screening":
+            risk_hits.extend(
+                _risk_policy_hit(hit)
+                for hit in output.get("triggered_rules", [])
+            )
+            risk_before = _strategy_snapshot(previous_result or {})
+            risk_after = _strategy_snapshot(stage_result or {})
+        if isinstance(stage_result, dict):
+            previous_result = stage_result
+
+    decorated["strong_rule_hits"] = strong_hits
+    screening = deepcopy(context.get("indicator_screening"))
+    if isinstance(screening, dict):
+        decorated["enterprise_risk_screening"] = screening
+        decorated["risk_screening_policy"] = {
+            "enabled": True,
+            "aggregation": "most_restrictive",
+            "metrics": {
+                key: screening.get(key)
+                for key in (
+                    "normalized_score",
+                    "completeness",
+                    "critical_indicator_count",
+                    "missing_count",
+                )
+            },
+            "hits": risk_hits,
+            "before": risk_before or {},
+            "after": risk_after or {},
+            "changed": bool(risk_before != risk_after),
+        }
+    return decorated
+
+
+def _legacy_rule_hit(hit: dict) -> dict:
+    conditions = deepcopy(hit.get("conditions") or [])
+    return {
+        "hit": True,
+        "rule_id": hit.get("code", ""),
+        "rule_name": hit.get("name", ""),
+        "relation": hit.get("condition_relation", "all"),
+        "matched_conditions": [
+            item for item in conditions if item.get("matched")
+        ],
+        "all_conditions": conditions,
+        "action": _action_mapping(hit.get("actions") or []),
+    }
+
+
+def _risk_policy_hit(hit: dict) -> dict:
+    conditions = hit.get("conditions") or []
+    condition = conditions[0] if conditions else {}
+    return {
+        "id": hit.get("code", ""),
+        "name": hit.get("name", ""),
+        "expression": condition.get("expression", ""),
+        "actual": condition.get("actual_value"),
+        "action": _action_mapping(hit.get("actions") or []),
+    }
+
+
+def _action_mapping(actions: list[dict]) -> dict:
+    return {
+        str(action.get("type")): deepcopy(action.get("value"))
+        for action in actions
+        if action.get("type")
+    }
+
+
+def _strategy_snapshot(result: dict) -> dict:
+    return {
+        key: deepcopy(result.get(key))
+        for key in (
+            "rating",
+            "risk_segment",
+            "access_strategy",
+            "suggested_limit",
+            "suggested_payment_term_days",
+            "monitoring_frequency",
+            "review_required",
+        )
+    }
 
 
 def rate_counterparties(counterparties: list[dict], config: dict) -> list[dict]:

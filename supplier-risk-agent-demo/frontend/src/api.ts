@@ -1,4 +1,5 @@
-import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilityControlCondition, FacilityControlExtension, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskReview, RiskEvent, RiskScreeningPolicy, SlaScanHistory, SlaScanResult, SlaScanRetryResult, StrongRule, TeamTaskBoard } from "./types";
+import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionPipelineDefinition, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilityControlCondition, FacilityControlExtension, FacilitySummary, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PipelineSimulationResult, PipelineStage, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskReview, RiskEvent, RiskScreeningPolicy, RuleAction, RuleCenterActivationResult, RuleCenterAssetType, RuleCenterGovernanceChange, RuleCenterPackagePreview, RuleCenterReleasePackage, RuleCenterReplayDataset, RuleCenterReplayRun, RuleCenterReplaySnapshot, RuleCenterVersionHistory, RuleCondition, RuleDefinition, RuleSetDefinition, RuleTestResult, SlaScanHistory, SlaScanResult, SlaScanRetryResult, StrongRule, TeamTaskBoard } from "./types";
+import type { RuleCenterReplayComparison } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 const TOKEN_KEY = "risk-platform.dev-token";
@@ -161,6 +162,57 @@ export const api = {
     request<PortfolioRatingBatch>("/ratings/batches", { method: "POST", body: JSON.stringify(payload) }),
   models: () => request<ModelSummary[]>("/models"),
   model: (templateKey: string) => request<ModelDetail>(`/models/${templateKey}`),
+  ruleDefinitions: () => request<RuleDefinition[]>("/rule-center/rules"),
+  createRuleDefinition: (payload: { code: string; name: string; rule_type: RuleDefinition["rule_type"]; category?: string | null; enabled: boolean; conditions_json: RuleCondition[]; condition_relation: "all" | "any"; actions_json: RuleAction[]; priority: number }) =>
+    request<RuleDefinition>("/rule-center/rules", { method: "POST", body: JSON.stringify(payload) }),
+  testRuleDefinition: (code: string, context: Record<string, unknown>) =>
+    request<RuleTestResult>(`/rule-center/rules/${encodeURIComponent(code)}/test`, { method: "POST", body: JSON.stringify({ context }) }),
+  ruleSetDefinitions: () => request<RuleSetDefinition[]>("/rule-center/rule-sets"),
+  createRuleSetDefinition: (payload: { code: string; name: string; rule_codes: string[]; evaluation_strategy: RuleSetDefinition["evaluation_strategy"] }) =>
+    request<RuleSetDefinition>("/rule-center/rule-sets", { method: "POST", body: JSON.stringify(payload) }),
+  decisionPipelines: () => request<DecisionPipelineDefinition[]>("/rule-center/pipelines"),
+  createDecisionPipeline: (payload: { code: string; name: string; stages_json: PipelineStage[] }) =>
+    request<DecisionPipelineDefinition>("/rule-center/pipelines", { method: "POST", body: JSON.stringify(payload) }),
+  simulateDecisionPipeline: (code: string, counterparty: Record<string, unknown>, config: Record<string, unknown>) =>
+    request<PipelineSimulationResult>(`/rule-center/pipelines/${encodeURIComponent(code)}/simulate`, { method: "POST", body: JSON.stringify({ counterparty, config }) }),
+  ruleCenterGovernanceChanges: (assetType?: RuleCenterAssetType, code?: string) => {
+    const query = new URLSearchParams();
+    if (assetType) query.set("asset_type", assetType);
+    if (code) query.set("code", code);
+    return request<RuleCenterGovernanceChange[]>(`/rule-center/governance/changes${query.size ? `?${query}` : ""}`);
+  },
+  createRuleCenterGovernanceChange: (payload: { asset_type: RuleCenterAssetType; definition: Record<string, unknown>; change_reason: string }) =>
+    request<RuleCenterGovernanceChange>("/rule-center/governance/changes", { method: "POST", body: JSON.stringify(payload) }),
+  updateRuleCenterGovernanceChange: (id: string, payload: { expected_row_version: number; definition: Record<string, unknown>; change_reason: string }) =>
+    request<RuleCenterGovernanceChange>(`/rule-center/governance/changes/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  submitRuleCenterGovernanceChange: (id: string, rowVersion: number) =>
+    request<RuleCenterGovernanceChange>(`/rule-center/governance/changes/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
+  reviewRuleCenterGovernanceChange: (id: string, rowVersion: number, decision: "publish" | "reject", comment: string, effectiveAt?: string) =>
+    request<RuleCenterGovernanceChange>(`/rule-center/governance/changes/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment, effective_at: effectiveAt || null }) }),
+  activateDueRuleCenterChanges: (asOf = new Date().toISOString()) =>
+    request<RuleCenterActivationResult>("/rule-center/governance/activation-scan", { method: "POST", body: JSON.stringify({ as_of: asOf }) }),
+  ruleCenterVersionHistory: (assetType: RuleCenterAssetType, code: string) =>
+    request<RuleCenterVersionHistory[]>(`/rule-center/governance/history?asset_type=${encodeURIComponent(assetType)}&code=${encodeURIComponent(code)}`),
+  createRuleCenterRestoreDraft: (payload: { asset_type: RuleCenterAssetType; code: string; version: number; change_reason: string }) =>
+    request<RuleCenterGovernanceChange>("/rule-center/governance/restore-drafts", { method: "POST", body: JSON.stringify(payload) }),
+  previewRuleCenterReleasePackage: (changeIds: string[]) =>
+    request<RuleCenterPackagePreview>("/rule-center/governance/packages/impact", { method: "POST", body: JSON.stringify({ change_ids: changeIds }) }),
+  ruleCenterReleasePackages: () => request<RuleCenterReleasePackage[]>("/rule-center/governance/packages"),
+  createRuleCenterReleasePackage: (payload: { name: string; change_reason: string; change_ids: string[] }) =>
+    request<RuleCenterReleasePackage>("/rule-center/governance/packages", { method: "POST", body: JSON.stringify(payload) }),
+  submitRuleCenterReleasePackage: (id: string, rowVersion: number) =>
+    request<RuleCenterReleasePackage>(`/rule-center/governance/packages/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
+  reviewRuleCenterReleasePackage: (id: string, rowVersion: number, decision: "publish" | "reject", comment: string) =>
+    request<RuleCenterReleasePackage>(`/rule-center/governance/packages/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  ruleCenterPackageReplays: (id: string) => request<RuleCenterReplayRun[]>(`/rule-center/governance/packages/${id}/replays`),
+  ruleCenterReplayDatasets: () => request<RuleCenterReplayDataset[]>("/rule-center/governance/replay-datasets"),
+  createRuleCenterReplayDataset: (payload: { code: string; name: string; description: string }) => request<RuleCenterReplayDataset>("/rule-center/governance/replay-datasets", { method: "POST", body: JSON.stringify(payload) }),
+  ruleCenterReplaySnapshots: () => request<RuleCenterReplaySnapshot[]>("/rule-center/governance/replay-datasets/snapshots"),
+  importRuleCenterReplaySnapshot: (datasetId: string, payload: { source_name: string; schema_version: string; as_of_date: string; evidence_reference: string; data_classification: "deidentified" | "synthetic"; field_mapping: Record<string, string>; label_field?: string; observed_at_field?: string; records: Array<Record<string, unknown>> }) => request<RuleCenterReplaySnapshot>(`/rule-center/governance/replay-datasets/${datasetId}/snapshots`, { method: "POST", body: JSON.stringify(payload) }),
+  ruleCenterReplayComparisons: () => request<RuleCenterReplayComparison[]>("/rule-center/governance/replay-comparisons"),
+  runRuleCenterReplayComparison: (payload: { dataset_snapshot_id: string; champion_model_key: string; challenger_model_key: string; champion_pipeline_code?: string; challenger_pipeline_code?: string; segment_field: string; positive_labels: string[]; positive_admissions: string[]; sample_limit: number; max_execution_failure_rate: number }) => request<RuleCenterReplayComparison>("/rule-center/governance/replay-comparisons", { method: "POST", body: JSON.stringify(payload) }),
+  runRuleCenterPackageReplay: (id: string, payload: { dataset_snapshot_id: string; model_key: string; pipeline_code?: string; sample_limit: number; min_sample_count: number; max_decision_change_rate: number; max_execution_failure_rate: number }) =>
+    request<RuleCenterReplayRun>(`/rule-center/governance/packages/${id}/replays`, { method: "POST", body: JSON.stringify(payload) }),
   indicatorPool: () => request<IndicatorPoolResponse>("/indicator-pool"),
   indicatorObservations: (counterpartyId: string, indicatorId?: string) => request<EnterpriseIndicatorObservation[]>(`/indicator-observations?counterparty_id=${encodeURIComponent(counterpartyId)}${indicatorId ? `&indicator_id=${encodeURIComponent(indicatorId)}` : ""}`),
   createIndicatorObservation: (payload: { counterparty_id: string; indicator_id: string; values: Record<string, number | boolean>; evidence_reference: string; evidence_document_id?: string; as_of_date: string }) =>

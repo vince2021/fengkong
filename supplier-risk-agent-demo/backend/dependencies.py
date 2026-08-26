@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from backend.authority_policy_repository import AuthorityPolicyRepository
 from backend.database import get_db_session
-from backend.repository import ApprovalCaseRepository, AuditRepository, CreditFacilityRepository, CreditReportRepository, DecisionGovernanceRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, ModelMonitoringRepository, NotificationRepository, PortfolioRatingBatchRepository, RatingRunRepository
+from backend.repository import ApprovalCaseRepository, AuditRepository, CreditFacilityRepository, CreditReportRepository, DecisionGovernanceRepository, DecisionPipelineRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, ModelMonitoringRepository, NotificationRepository, PortfolioRatingBatchRepository, RatingRunRepository, RuleCenterGovernanceRepository, RuleCenterReleasePackageRepository, RuleCenterReplayComparisonRepository, RuleCenterReplayDatasetRepository, RuleDefinitionRepository, RuleSetDefinitionRepository
 from backend.storage import ObjectStorage, build_object_storage
 
 
@@ -75,3 +75,45 @@ def get_enterprise_indicator_observation_repository(session: Session = Depends(g
 
 def get_object_storage() -> ObjectStorage:
     return object_storage
+
+
+def get_rule_definition_repository(
+    session: Session = Depends(get_db_session),
+) -> RuleDefinitionRepository:
+    return RuleDefinitionRepository(session)
+
+
+def get_rule_set_definition_repository(
+    session: Session = Depends(get_db_session),
+) -> RuleSetDefinitionRepository:
+    return RuleSetDefinitionRepository(session)
+
+
+def get_decision_pipeline_repository(
+    session: Session = Depends(get_db_session),
+) -> DecisionPipelineRepository:
+    return DecisionPipelineRepository(session)
+
+
+def get_rule_center_governance_repository(
+    session: Session = Depends(get_db_session),
+) -> RuleCenterGovernanceRepository:
+    return RuleCenterGovernanceRepository(session)
+
+
+def get_rule_center_release_package_repository(
+    session: Session = Depends(get_db_session),
+) -> RuleCenterReleasePackageRepository:
+    return RuleCenterReleasePackageRepository(session)
+
+
+def get_rule_center_replay_dataset_repository(
+    session: Session = Depends(get_db_session),
+) -> RuleCenterReplayDatasetRepository:
+    return RuleCenterReplayDatasetRepository(session)
+
+
+def get_rule_center_replay_comparison_repository(
+    session: Session = Depends(get_db_session),
+) -> RuleCenterReplayComparisonRepository:
+    return RuleCenterReplayComparisonRepository(session)

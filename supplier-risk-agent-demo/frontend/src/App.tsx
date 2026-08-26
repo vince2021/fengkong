@@ -2,12 +2,13 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type FormEve
 import { api, devIdentities, getToken, setToken } from "./api";
 import AuthorityPolicyCenter from "./AuthorityPolicyCenter";
 import ModelLab from "./ModelLab";
+import RuleCenter from "./RuleCenter";
 import type { ApprovalAction, ApprovalCase, Counterparty, CreditAuthority, CreditFacility, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskBaseline, RenewalRiskReview, TaskAction } from "./types";
 
 const PostCreditCenter = lazy(() => import("./PostCreditCenter"));
 const OperationsCenter = lazy(() => import("./OperationsCenter"));
 
-type PageKey = "overview" | "counterparties" | "approvals" | "models" | "documents" | "operations" | "facilities";
+type PageKey = "overview" | "counterparties" | "approvals" | "models" | "rules" | "documents" | "operations" | "facilities";
 type ApprovalQueueFilter = "all" | "active" | "mine" | "urgent" | "supplement" | "completed";
 
 const navItems: Array<{ key: PageKey; label: string; caption: string; icon: string }> = [
@@ -15,6 +16,7 @@ const navItems: Array<{ key: PageKey; label: string; caption: string; icon: stri
   { key: "counterparties", label: "客商中心", caption: "客户与供应商画像", icon: "◎" },
   { key: "approvals", label: "授信审批", caption: "八阶段工作流", icon: "◇" },
   { key: "models", label: "模型实验室", caption: "运算链与影响模拟", icon: "⌬" },
+  { key: "rules", label: "决策规则", caption: "规则与管线编排", icon: "≋" },
   { key: "documents", label: "资料中心", caption: "可信资料与归档", icon: "▤" },
   { key: "operations", label: "运营监控", caption: "SLA 与催办通知", icon: "◉" },
   { key: "facilities", label: "贷后管理", caption: "额度台账与风险预警", icon: "▥" },
@@ -25,6 +27,7 @@ const pageMeta: Record<PageKey, { eyebrow: string; description: string; zones: s
   counterparties: { eyebrow: "COUNTERPARTY WORKSPACE", description: "从组合筛查进入单户画像，核对原始资料、治理数据和模型结果。", zones: ["组合评级", "企业画像", "原始数据", "数据治理"], actionHint: "筛选企业后查看完整风险证据" },
   approvals: { eyebrow: "CREDIT WORKFLOW", description: "按申请队列、当前责任人和资料门禁推动八阶段审批，所有决策均保留审计轨迹。", zones: ["申请队列", "流程指引", "当前办理", "决策与授权"], actionHint: "主按钮推动当前环节，异常操作独立标识" },
   models: { eyebrow: "MODEL WORKSPACE", description: "从结果概览向下追溯运算链、风险指标、决策规则与模型发布治理。", zones: ["结果概览", "评分与模拟", "风险指标", "决策规则", "治理发布"], actionHint: "先看结果，再逐层解释与配置" },
+  rules: { eyebrow: "DECISION ORCHESTRATION", description: "集中配置规则、规则集与决策管线，通过测试、模拟和独立复核控制生产生效。", zones: ["规则资产", "规则集", "管线编排", "变更治理"], actionHint: "配置先保存为治理草稿，由独立复核人批准后生效" },
   documents: { eyebrow: "DOCUMENT WORKSPACE", description: "区分资料承接、当期更新、独立核验、退补任务与可信归档，逐项消除流程阻断。", zones: ["资料承接", "逐项核验", "退补追踪", "可信归档"], actionHint: "绿色已满足，黄色待处理，红色为缺口" },
   operations: { eyebrow: "OPERATIONS WORKSPACE", description: "统一处理个人任务、SLA 风险、补件队列和通知催办，避免责任与时限失焦。", zones: ["任务队列", "SLA 风险", "补件运营", "通知催办"], actionHint: "优先处理超时与升级任务" },
   facilities: { eyebrow: "POST-CREDIT WORKSPACE", description: "从任务雷达定位高风险授信，再完成额度、复评、风险事件、续授信和控制处置。", zones: ["任务雷达", "授信台账", "业务操作", "风险处置"], actionHint: "风险操作使用红色边界并要求明确依据" },
@@ -209,6 +212,7 @@ function App() {
             {page === "counterparties" && <CounterpartyCenter rows={counterparties} canRate={Boolean(can("ratings:run"))} canViewDataGovernance={Boolean(can("data_governance:view"))} canImportData={Boolean(can("data_governance:import"))} canResolveData={Boolean(can("data_governance:resolve"))} canReviewData={Boolean(can("data_governance:review"))} onResult={(text) => setNotice({ kind: "success", text })} onError={(text) => setNotice({ kind: "error", text })} />}
             {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewDocuments={Boolean(can("documents:view"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewFacilities={Boolean(can("facilities:view"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} canViewAuthorityPolicy={Boolean(can("authority_policy:view"))} canManageAuthorityPolicy={Boolean(can("authority_policy:manage"))} canReviewAuthorityPolicy={Boolean(can("authority_policy:review"))} canAnchorAuthorityPolicy={Boolean(can("authority_policy:anchor"))} canRevokeAuthorityPolicyAnchor={Boolean(can("authority_policy:anchor_revoke"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onOpenFacilities={(caseId) => { setFacilityFocus({ caseId }); setPage("facilities"); }} onSwitchIdentity={switchIdentity} onNotice={setNotice} />}
             {page === "models" && <ModelLab counterparties={counterparties} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} onNotice={setNotice} />}
+            {page === "rules" && <RuleCenter counterparties={counterparties} currentSubject={principal?.subject ?? ""} canView={Boolean(can("models:view"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} onNotice={setNotice} />}
             {page === "documents" && <DocumentCenter rows={documents} counterparties={counterparties} cases={cases} principal={principal} focus={documentFocus} canUpload={Boolean(can("documents:upload"))} canReview={Boolean(can("documents:review"))} onSwitchToReviewer={() => switchIdentity("dev-risk")} onRefresh={async () => setDocuments(await api.documents())} onNotice={setNotice} />}
             {page === "operations" && <Suspense fallback={<LoadingState />}><OperationsCenter canViewTasks={Boolean(can("approvals:view"))} canViewOperations={Boolean(can("operations:view"))} canManageTasks={Boolean(can("tasks:manage"))} canViewNotifications={Boolean(can("notifications:view"))} canScan={Boolean(can("sla:scan"))} canActCorrections={Boolean(can("corrections:act"))} onNavigate={openNotificationTarget} onNotice={setNotice} /></Suspense>}
             {page === "facilities" && <Suspense fallback={<LoadingState />}><PostCreditCenter key={principal?.subject ?? "anonymous"} focusCaseId={facilityFocus?.caseId} focusFacilityId={facilityFocus?.facilityId} focusConditionId={facilityFocus?.conditionId} canView={Boolean(can("facilities:view"))} canTransact={Boolean(can("facilities:transact"))} canReview={Boolean(can("facilities:review"))} canApproveControlExtensions={Boolean(principal?.roles.some((role) => ["approver", "admin"].includes(role)))} canScan={Boolean(can("facilities:scan"))} canActAlerts={Boolean(can("facility_alerts:act"))} canCreateRiskEvents={Boolean(can("risk_events:create"))} canControl={Boolean(can("facilities:control"))} canCreateRenewal={Boolean(can("approvals:create"))} onOpenApproval={async (caseId) => { await refreshCases(caseId); setPage("approvals"); }} onNotice={setNotice} /></Suspense>}

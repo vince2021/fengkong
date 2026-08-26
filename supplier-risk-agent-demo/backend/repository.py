@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from uuid import uuid4
@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, SlaScanLeaseRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionPipelineDefinition, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, RuleCenterReleasePackage, RuleCenterReleasePackageMember, RuleCenterReplayComparisonRun, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot, RuleCenterReplayRun, RuleDefinition, RuleSetDefinition, SlaScanLeaseRecord
 from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
 from backend.security import APPROVAL_STAGE_ROLES
@@ -3917,6 +3917,7 @@ def _model_change_to_dict(record: ModelChangeRecord) -> dict:
         "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
         "review_comment": record.review_comment,
         "published_at": record.published_at.isoformat() if record.published_at else None,
+        "effective_at": record.effective_at.isoformat() if record.effective_at else None,
         "row_version": record.row_version,
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
@@ -4215,3 +4216,2190 @@ class IndicatorDefinitionRepository:
 
         self.session.refresh(indicator)
         return indicator
+
+
+class _VersionedRuleCenterRepository:
+    model = None
+    entity_type = ""
+    aggregate_type = ""
+    event_type = ""
+    entity_label = "定义"
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.audit = AuditRepository(session)
+
+    def _publish(
+        self,
+        definition: dict,
+        actor: str,
+        actor_name: str,
+        governance_change: ModelChangeRecord | None = None,
+        commit: bool = True,
+    ):
+        code = str(definition.get("code") or "").strip()
+        if not code:
+            raise ValueError(f"{self.entity_label}编码不能为空")
+
+        self._validate(definition)
+        latest = self.session.scalars(
+            select(self.model)
+            .where(self.model.code == code)
+            .order_by(self.model.version.desc())
+        ).first()
+        if governance_change is not None:
+            try:
+                new_version = int(governance_change.candidate_version)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("治理候选版本必须是正整数") from exc
+            if new_version <= (latest.version if latest else 0):
+                raise ConcurrentUpdateError(
+                    f"{self.entity_label}生效版本已变化，请基于最新版本重新创建草稿"
+                )
+        else:
+            candidate_versions = self.session.scalars(
+                select(ModelChangeRecord.candidate_version).where(
+                    ModelChangeRecord.entity_type == self.entity_type,
+                    ModelChangeRecord.template_key == code,
+                )
+            ).all()
+            numeric_versions = [
+                int(value) for value in candidate_versions if str(value).isdigit()
+            ]
+            new_version = max(
+                [latest.version if latest else 0, *numeric_versions]
+            ) + 1
+        now = datetime.now(timezone.utc)
+        config_hash = content_hash(definition)
+        active_records = self.session.scalars(
+            select(self.model).where(
+                self.model.code == code,
+                self.model.is_active.is_(True),
+            )
+        ).all()
+        for active in active_records:
+            active.is_active = False
+            active.updated_at = now
+
+        published = self._build_definition(
+            definition, code, new_version, now, actor
+        )
+        change = governance_change or ModelChangeRecord(
+            id=str(uuid4()),
+            template_key=code,
+            base_version=str(latest.version) if latest else "0",
+            candidate_version=str(new_version),
+            status="published",
+            entity_type=self.entity_type,
+            config_json=deepcopy(definition),
+            validation_json={"valid": True, "config_hash": config_hash},
+            impact_json={},
+            change_reason=f"publish {self.entity_type} {code} v{new_version}",
+            created_by=actor,
+            created_by_name=actor_name,
+            submitted_at=now,
+            published_at=now,
+        )
+        if governance_change is not None:
+            change.status = "published"
+            change.published_at = now
+            change.effective_at = change.effective_at or now
+        try:
+            if active_records:
+                self.session.flush()
+            self.session.add_all([published, change])
+            self.session.flush()
+            self.audit.append(
+                self.aggregate_type,
+                published.id,
+                self.event_type,
+                actor_name,
+                {
+                    "code": code,
+                    "version": new_version,
+                    "change_id": change.id,
+                    "config_hash": config_hash,
+                },
+            )
+            if governance_change is not None:
+                self.audit.append(
+                    "rule_center_change",
+                    change.id,
+                    f"{self.entity_type}_change_activated",
+                    actor_name,
+                    {
+                        "code": code,
+                        "version": new_version,
+                        "definition_id": published.id,
+                        "config_hash": config_hash,
+                    },
+                )
+            if commit:
+                self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError(
+                f"{self.entity_label}发布发生并发冲突，请刷新后重试"
+            ) from exc
+
+        if commit:
+            self.session.refresh(published)
+        return published
+
+    def _validate(self, definition: dict) -> None:
+        return None
+
+    def _build_definition(
+        self,
+        definition: dict,
+        code: str,
+        version: int,
+        now: datetime,
+        actor: str,
+    ):
+        raise NotImplementedError
+
+
+class RuleDefinitionRepository(_VersionedRuleCenterRepository):
+    """Publish versioned rule definitions with governance evidence."""
+
+    model = RuleDefinition
+    entity_type = "rule"
+    aggregate_type = "rule_definition"
+    event_type = "rule_published"
+    entity_label = "规则"
+
+    def publish_rule(
+        self, definition: dict, actor: str, actor_name: str
+    ) -> RuleDefinition:
+        return self._publish(definition, actor, actor_name)
+
+    def publish_governed_rule(
+        self,
+        definition: dict,
+        change: ModelChangeRecord,
+        actor: str,
+        actor_name: str,
+    ) -> RuleDefinition:
+        return self._publish(definition, actor, actor_name, change)
+
+    def _build_definition(self, definition, code, version, now, actor):
+        return RuleDefinition(
+            id=str(uuid4()),
+            code=code,
+            name=definition["name"],
+            rule_type=definition.get("rule_type", "strong_rule"),
+            category=definition.get("category"),
+            enabled=definition.get("enabled", True),
+            conditions_json=deepcopy(definition.get("conditions_json", [])),
+            condition_relation=definition.get("condition_relation", "all"),
+            actions_json=deepcopy(definition.get("actions_json", [])),
+            priority=definition.get("priority", 999),
+            version=version,
+            status="published",
+            is_active=True,
+            row_version=1,
+            created_at=now,
+            created_by=actor,
+        )
+
+
+class RuleSetDefinitionRepository(_VersionedRuleCenterRepository):
+    """Publish rule sets only when every referenced rule is deployable."""
+
+    model = RuleSetDefinition
+    entity_type = "rule_set"
+    aggregate_type = "rule_set_definition"
+    event_type = "rule_set_published"
+    entity_label = "规则集"
+
+    def publish_rule_set(
+        self, definition: dict, actor: str, actor_name: str
+    ) -> RuleSetDefinition:
+        return self._publish(definition, actor, actor_name)
+
+    def publish_governed_rule_set(
+        self,
+        definition: dict,
+        change: ModelChangeRecord,
+        actor: str,
+        actor_name: str,
+    ) -> RuleSetDefinition:
+        return self._publish(definition, actor, actor_name, change)
+
+    def _validate(self, definition: dict) -> None:
+        rule_codes = definition.get("rule_codes")
+        if not isinstance(rule_codes, list) or not rule_codes:
+            raise ValueError("规则集至少需要引用一条规则")
+        normalized = [str(code).strip() for code in rule_codes]
+        if any(not code for code in normalized):
+            raise ValueError("规则集不能包含空规则引用")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("规则集不能重复引用同一规则")
+        available = set(
+            self.session.scalars(
+                select(RuleDefinition.code).where(
+                    RuleDefinition.code.in_(normalized),
+                    RuleDefinition.status == "published",
+                    RuleDefinition.is_active.is_(True),
+                )
+            ).all()
+        )
+        missing = [code for code in normalized if code not in available]
+        if missing:
+            raise ValueError(f"规则集引用了未发布或未激活的规则: {', '.join(missing)}")
+
+    def _build_definition(self, definition, code, version, now, actor):
+        return RuleSetDefinition(
+            id=str(uuid4()),
+            code=code,
+            name=definition["name"],
+            rule_codes=[str(item).strip() for item in definition["rule_codes"]],
+            evaluation_strategy=definition.get(
+                "evaluation_strategy", "most_restrictive"
+            ),
+            version=version,
+            status="published",
+            is_active=True,
+            row_version=1,
+            created_at=now,
+            created_by=actor,
+        )
+
+
+class DecisionPipelineRepository(_VersionedRuleCenterRepository):
+    """Publish validated decision pipelines with resolved rule-set dependencies."""
+
+    model = DecisionPipelineDefinition
+    entity_type = "pipeline"
+    aggregate_type = "pipeline_definition"
+    event_type = "pipeline_published"
+    entity_label = "决策管线"
+    supported_stage_types = {
+        "scoring",
+        "strong_rules",
+        "risk_screening",
+        "strategy_mapping",
+        "admission",
+    }
+
+    def publish_pipeline(
+        self, definition: dict, actor: str, actor_name: str
+    ) -> DecisionPipelineDefinition:
+        return self._publish(definition, actor, actor_name)
+
+    def publish_governed_pipeline(
+        self,
+        definition: dict,
+        change: ModelChangeRecord,
+        actor: str,
+        actor_name: str,
+    ) -> DecisionPipelineDefinition:
+        return self._publish(definition, actor, actor_name, change)
+
+    def _validate(self, definition: dict) -> None:
+        stages = definition.get("stages_json")
+        if not isinstance(stages, list) or not stages:
+            raise ValueError("决策管线至少需要一个阶段")
+        if not isinstance(stages[0], dict) or stages[0].get("stage_type") != "scoring":
+            raise ValueError("决策管线必须以 scoring 阶段开始")
+
+        references = []
+        for stage in stages:
+            if not isinstance(stage, dict):
+                raise ValueError("决策管线阶段必须是对象")
+            stage_type = str(stage.get("stage_type") or "").strip()
+            if stage_type not in self.supported_stage_types:
+                raise ValueError(f"不支持的决策管线阶段: {stage_type or '<empty>'}")
+            if "rule_set_code" in stage:
+                rule_set_code = str(stage.get("rule_set_code") or "").strip()
+                if not rule_set_code:
+                    raise ValueError("决策管线不能包含空规则集引用")
+                references.append(rule_set_code)
+
+        if len(references) != len(set(references)):
+            raise ValueError("决策管线不能重复引用同一规则集")
+        if references:
+            available = set(
+                self.session.scalars(
+                    select(RuleSetDefinition.code).where(
+                        RuleSetDefinition.code.in_(references),
+                        RuleSetDefinition.status == "published",
+                        RuleSetDefinition.is_active.is_(True),
+                    )
+                ).all()
+            )
+            missing = [code for code in references if code not in available]
+            if missing:
+                raise ValueError(
+                    "决策管线引用了未发布或未激活的规则集: "
+                    + ", ".join(missing)
+                )
+
+    def _build_definition(self, definition, code, version, now, actor):
+        return DecisionPipelineDefinition(
+            id=str(uuid4()),
+            code=code,
+            name=definition["name"],
+            stages_json=deepcopy(definition["stages_json"]),
+            version=version,
+            status="published",
+            is_active=True,
+            row_version=1,
+            created_at=now,
+            created_by=actor,
+        )
+
+
+class RuleCenterGovernanceRepository:
+    """Manage maker-checker candidates without exposing drafts to runtime loaders."""
+
+    _models = {
+        "rule": RuleDefinition,
+        "rule_set": RuleSetDefinition,
+        "pipeline": DecisionPipelineDefinition,
+    }
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.audit = AuditRepository(session)
+
+    def list_changes(
+        self, asset_type: str | None = None, code: str | None = None
+    ) -> list[dict]:
+        statement = select(ModelChangeRecord).where(
+            ModelChangeRecord.entity_type.in_(tuple(self._models))
+        )
+        if asset_type:
+            self._ensure_asset_type(asset_type)
+            statement = statement.where(ModelChangeRecord.entity_type == asset_type)
+        if code:
+            statement = statement.where(ModelChangeRecord.template_key == code)
+        rows = self.session.scalars(
+            statement.order_by(
+                ModelChangeRecord.created_at.desc(), ModelChangeRecord.id.desc()
+            )
+        ).all()
+        return [self._change_to_dict(row) for row in rows]
+
+    def get_change(self, change_id: str) -> dict | None:
+        record = self.session.get(ModelChangeRecord, change_id)
+        return (
+            self._change_to_dict(record)
+            if record and record.entity_type in self._models
+            else None
+        )
+
+    def create_draft(
+        self,
+        asset_type: str,
+        definition: dict,
+        change_reason: str,
+        actor_subject: str,
+        actor_name: str,
+        restore_source: dict | None = None,
+    ) -> dict:
+        self._validate_governed_definition(asset_type, definition)
+        code = str(definition.get("code") or "").strip()
+        if not code:
+            raise ValueError("治理资产编码不能为空")
+        active = self._active_definition(asset_type, code)
+        candidate_version = self._next_candidate_version(asset_type, code)
+        config_hash = content_hash(definition)
+        record = ModelChangeRecord(
+            id=str(uuid4()),
+            template_key=code,
+            base_version=str(active.version) if active else "0",
+            candidate_version=str(candidate_version),
+            status="draft",
+            entity_type=asset_type,
+            config_json=deepcopy(definition),
+            validation_json={"valid": True, "config_hash": config_hash},
+            impact_json={"restore_source": deepcopy(restore_source)} if restore_source else {},
+            change_reason=change_reason,
+            created_by=actor_subject,
+            created_by_name=actor_name,
+        )
+        self.session.add(record)
+        return self._commit_change(
+            record,
+            f"{asset_type}_change_created",
+            actor_name,
+            {
+                "code": code,
+                "base_version": record.base_version,
+                "candidate_version": record.candidate_version,
+                "config_hash": config_hash,
+                "restore_source": restore_source,
+            },
+        )
+
+    def update_draft(
+        self,
+        change_id: str,
+        expected_row_version: int,
+        definition: dict,
+        change_reason: str,
+        actor_subject: str,
+        actor_name: str,
+        allow_admin: bool = False,
+    ) -> dict:
+        record = self._versioned_change(change_id, expected_row_version)
+        if record.status != "draft":
+            raise ValueError("只有草稿状态可以修改")
+        if record.created_by != actor_subject and not allow_admin:
+            raise PermissionError("只有草稿创建人可以修改")
+        if str(definition.get("code") or "").strip() != record.template_key:
+            raise ValueError("治理草稿不能修改资产编码")
+        self._validate_governed_definition(record.entity_type, definition)
+        record.config_json = deepcopy(definition)
+        record.validation_json = {
+            "valid": True,
+            "config_hash": content_hash(definition),
+        }
+        record.change_reason = change_reason
+        return self._commit_change(
+            record,
+            f"{record.entity_type}_change_updated",
+            actor_name,
+            {"config_hash": record.validation_json["config_hash"]},
+        )
+
+    def submit(
+        self,
+        change_id: str,
+        expected_row_version: int,
+        actor_subject: str,
+        actor_name: str,
+        allow_admin: bool = False,
+    ) -> dict:
+        record = self._versioned_change(change_id, expected_row_version)
+        if record.status != "draft":
+            raise ValueError("只有草稿状态可以提交审核")
+        if record.created_by != actor_subject and not allow_admin:
+            raise PermissionError("只有草稿创建人可以提交审核")
+        if not record.validation_json.get("valid"):
+            raise ValueError("治理配置校验未通过")
+        self._assert_current_base(record)
+        record.status = "pending_review"
+        record.submitted_at = datetime.now(timezone.utc)
+        return self._commit_change(
+            record,
+            f"{record.entity_type}_change_submitted",
+            actor_name,
+            {"candidate_version": record.candidate_version},
+        )
+
+    def review(
+        self,
+        change_id: str,
+        expected_row_version: int,
+        decision: str,
+        comment: str,
+        reviewer_subject: str,
+        reviewer_name: str,
+        effective_at: datetime | None = None,
+    ) -> dict:
+        record = self._versioned_change(change_id, expected_row_version)
+        if record.status != "pending_review":
+            raise ValueError("只有待审核状态可以执行复核")
+        if record.created_by == reviewer_subject:
+            raise PermissionError("配置创建人与复核人必须分离")
+        now = datetime.now(timezone.utc)
+        record.reviewed_by = reviewer_subject
+        record.reviewed_by_name = reviewer_name
+        record.reviewed_at = now
+        record.review_comment = comment
+        if decision == "reject":
+            record.status = "rejected"
+            return self._commit_change(
+                record,
+                f"{record.entity_type}_change_rejected",
+                reviewer_name,
+                {"comment": comment},
+            )
+
+        activation_time = _as_utc(effective_at) if effective_at else now
+        if activation_time > now:
+            record.status = "scheduled"
+            record.effective_at = activation_time
+            return self._commit_change(
+                record,
+                f"{record.entity_type}_change_scheduled",
+                reviewer_name,
+                {"comment": comment, "effective_at": activation_time.isoformat()},
+            )
+        self._assert_current_base(record)
+        self._publish_change(record, reviewer_subject, reviewer_name)
+        return self._change_to_dict(record)
+
+    def activate_due(
+        self,
+        as_of: datetime,
+        actor_subject: str,
+        actor_name: str,
+    ) -> dict:
+        activation_time = _as_utc(as_of)
+        rows = list(
+            self.session.scalars(
+                select(ModelChangeRecord)
+                .where(
+                    ModelChangeRecord.entity_type.in_(tuple(self._models)),
+                    ModelChangeRecord.status == "scheduled",
+                    ModelChangeRecord.effective_at <= activation_time,
+                )
+                .order_by(ModelChangeRecord.effective_at, ModelChangeRecord.id)
+            ).all()
+        )
+        results = []
+        for row in rows:
+            change_id = row.id
+            try:
+                self._assert_current_base(row)
+                self._publish_change(row, actor_subject, actor_name)
+                results.append({"change_id": change_id, "status": "published", "error": None})
+            except (ConcurrentUpdateError, ValueError) as exc:
+                self.session.rollback()
+                stale = self.session.get(ModelChangeRecord, change_id)
+                if stale and stale.status == "scheduled":
+                    stale.status = "activation_failed"
+                    stale.review_comment = f"{stale.review_comment or ''}\n激活失败：{exc}".strip()
+                    self._commit_change(
+                        stale,
+                        f"{stale.entity_type}_change_activation_failed",
+                        actor_name,
+                        {"error": str(exc)},
+                    )
+                results.append({"change_id": change_id, "status": "failed", "error": str(exc)})
+        return {
+            "as_of": activation_time.isoformat(),
+            "due_count": len(rows),
+            "published_count": sum(item["status"] == "published" for item in results),
+            "failed_count": sum(item["status"] == "failed" for item in results),
+            "results": results,
+        }
+
+    def list_history(self, asset_type: str, code: str) -> list[dict]:
+        model = self._model(asset_type)
+        rows = self.session.scalars(
+            select(model).where(model.code == code).order_by(model.version.desc())
+        ).all()
+        return [self._definition_to_dict(asset_type, row) for row in rows]
+
+    def create_restore_draft(
+        self,
+        asset_type: str,
+        code: str,
+        version: int,
+        change_reason: str,
+        actor_subject: str,
+        actor_name: str,
+    ) -> dict:
+        model = self._model(asset_type)
+        source = self.session.scalars(
+            select(model).where(model.code == code, model.version == version)
+        ).first()
+        if source is None:
+            raise LookupError("待恢复的历史版本不存在")
+        if source.is_active:
+            raise ValueError("目标版本已经是当前生效版本")
+        return self.create_draft(
+            asset_type,
+            self._definition_config(asset_type, source),
+            change_reason,
+            actor_subject,
+            actor_name,
+            {"code": code, "version": version, "definition_id": source.id},
+        )
+
+    def _publish_change(
+        self, record: ModelChangeRecord, actor_subject: str, actor_name: str
+    ) -> None:
+        definition = deepcopy(record.config_json)
+        repository = self._repository(record.entity_type)
+        if record.entity_type == "rule":
+            repository.publish_governed_rule(definition, record, actor_subject, actor_name)
+        elif record.entity_type == "rule_set":
+            repository.publish_governed_rule_set(definition, record, actor_subject, actor_name)
+        else:
+            repository.publish_governed_pipeline(definition, record, actor_subject, actor_name)
+
+    def _assert_current_base(self, record: ModelChangeRecord) -> None:
+        active = self._active_definition(record.entity_type, record.template_key)
+        if str(active.version if active else 0) != record.base_version:
+            raise ConcurrentUpdateError("生效版本已变化，请基于最新版本重新创建草稿")
+
+    def _active_definition(self, asset_type: str, code: str):
+        model = self._model(asset_type)
+        return self.session.scalars(
+            select(model).where(model.code == code, model.is_active.is_(True))
+        ).first()
+
+    def _next_candidate_version(self, asset_type: str, code: str) -> int:
+        model = self._model(asset_type)
+        definition_versions = list(
+            self.session.scalars(select(model.version).where(model.code == code)).all()
+        )
+        candidate_versions = list(
+            self.session.scalars(
+                select(ModelChangeRecord.candidate_version).where(
+                    ModelChangeRecord.entity_type == asset_type,
+                    ModelChangeRecord.template_key == code,
+                )
+            ).all()
+        )
+        numeric = [int(value) for value in candidate_versions if str(value).isdigit()]
+        return max([0, *definition_versions, *numeric]) + 1
+
+    def _versioned_change(
+        self, change_id: str, expected_row_version: int
+    ) -> ModelChangeRecord:
+        record = self.session.get(ModelChangeRecord, change_id)
+        if not record or record.entity_type not in self._models:
+            raise LookupError("规则中心治理变更不存在")
+        if record.row_version != expected_row_version:
+            raise ConcurrentUpdateError(
+                f"治理变更版本已变化，当前版本为 {record.row_version}"
+            )
+        return record
+
+    def _repository(self, asset_type: str):
+        self._ensure_asset_type(asset_type)
+        if asset_type == "rule":
+            return RuleDefinitionRepository(self.session)
+        if asset_type == "rule_set":
+            return RuleSetDefinitionRepository(self.session)
+        return DecisionPipelineRepository(self.session)
+
+    def _validate_governed_definition(self, asset_type: str, definition: dict) -> None:
+        self._ensure_asset_type(asset_type)
+        if asset_type == "rule":
+            RuleDefinitionRepository(self.session)._validate(definition)
+            return
+        if asset_type == "rule_set":
+            rule_codes = definition.get("rule_codes")
+            if not isinstance(rule_codes, list) or not rule_codes:
+                raise ValueError("规则集至少需要引用一条规则")
+            normalized = [str(code).strip() for code in rule_codes]
+            if any(not code for code in normalized):
+                raise ValueError("规则集不能包含空规则引用")
+            if len(normalized) != len(set(normalized)):
+                raise ValueError("规则集不能重复引用同一规则")
+            self._assert_active_or_draft_dependencies("rule", normalized, "规则集")
+            return
+
+        stages = definition.get("stages_json")
+        if not isinstance(stages, list) or not stages:
+            raise ValueError("决策管线至少需要一个阶段")
+        if not isinstance(stages[0], dict) or stages[0].get("stage_type") != "scoring":
+            raise ValueError("决策管线必须以 scoring 阶段开始")
+        supported = DecisionPipelineRepository.supported_stage_types
+        references = []
+        for stage in stages:
+            if not isinstance(stage, dict):
+                raise ValueError("决策管线阶段必须是对象")
+            stage_type = str(stage.get("stage_type") or "").strip()
+            if stage_type not in supported:
+                raise ValueError(f"不支持的决策管线阶段: {stage_type or '<empty>'}")
+            if "rule_set_code" in stage:
+                code = str(stage.get("rule_set_code") or "").strip()
+                if not code:
+                    raise ValueError("决策管线不能包含空规则集引用")
+                references.append(code)
+        if len(references) != len(set(references)):
+            raise ValueError("决策管线不能重复引用同一规则集")
+        self._assert_active_or_draft_dependencies("rule_set", references, "决策管线")
+
+    def _assert_active_or_draft_dependencies(
+        self, asset_type: str, codes: list[str], owner_label: str
+    ) -> None:
+        if not codes:
+            return
+        model = self._models[asset_type]
+        available = set(
+            self.session.scalars(
+                select(model.code).where(
+                    model.code.in_(codes),
+                    model.status == "published",
+                    model.is_active.is_(True),
+                )
+            ).all()
+        )
+        available.update(
+            self.session.scalars(
+                select(ModelChangeRecord.template_key).where(
+                    ModelChangeRecord.entity_type == asset_type,
+                    ModelChangeRecord.template_key.in_(codes),
+                    ModelChangeRecord.status.in_(("draft", "package_draft")),
+                )
+            ).all()
+        )
+        missing = [code for code in codes if code not in available]
+        if missing:
+            raise ValueError(
+                f"{owner_label}引用了未发布且无有效草稿的依赖: {', '.join(missing)}"
+            )
+
+    def _model(self, asset_type: str):
+        self._ensure_asset_type(asset_type)
+        return self._models[asset_type]
+
+    def _ensure_asset_type(self, asset_type: str) -> None:
+        if asset_type not in self._models:
+            raise ValueError("不支持的规则中心资产类型")
+
+    def _commit_change(
+        self,
+        record: ModelChangeRecord,
+        event_type: str,
+        actor_name: str,
+        payload: dict,
+    ) -> dict:
+        try:
+            self.session.flush()
+            self.audit.append(
+                "rule_center_change", record.id, event_type, actor_name, payload
+            )
+            self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("规则中心治理变更发生并发冲突，请刷新后重试") from exc
+        self.session.refresh(record)
+        return self._change_to_dict(record)
+
+    @staticmethod
+    def _change_to_dict(record: ModelChangeRecord) -> dict:
+        return {
+            **_model_change_to_dict(record),
+            "asset_type": record.entity_type,
+            "code": record.template_key,
+            "restore_source": deepcopy((record.impact_json or {}).get("restore_source")),
+        }
+
+    @staticmethod
+    def _definition_config(asset_type: str, record) -> dict:
+        if asset_type == "rule":
+            return {
+                "code": record.code,
+                "name": record.name,
+                "rule_type": record.rule_type,
+                "category": record.category,
+                "enabled": record.enabled,
+                "conditions_json": deepcopy(record.conditions_json),
+                "condition_relation": record.condition_relation,
+                "actions_json": deepcopy(record.actions_json),
+                "priority": record.priority,
+            }
+        if asset_type == "rule_set":
+            return {
+                "code": record.code,
+                "name": record.name,
+                "rule_codes": deepcopy(record.rule_codes),
+                "evaluation_strategy": record.evaluation_strategy,
+            }
+        return {
+            "code": record.code,
+            "name": record.name,
+            "stages_json": deepcopy(record.stages_json),
+        }
+
+    @classmethod
+    def _definition_to_dict(cls, asset_type: str, record) -> dict:
+        return {
+            "id": record.id,
+            "asset_type": asset_type,
+            "code": record.code,
+            "version": record.version,
+            "status": record.status,
+            "is_active": record.is_active,
+            "created_by": record.created_by,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+            "config": cls._definition_config(asset_type, record),
+        }
+
+
+class RuleCenterReplayDatasetRepository:
+    """Create replay datasets and append immutable, validated sample snapshots."""
+
+    _required_paths = ("id", "name", "counterparty_type")
+    _sensitive_keys = {
+        "bank_account", "bank_card", "contact_name", "email", "id_card",
+        "identity_number", "mobile", "passport", "phone", "wechat",
+    }
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.audit = AuditRepository(session)
+
+    def list_datasets(self) -> list[dict]:
+        rows = self.session.scalars(
+            select(RuleCenterReplayDataset).order_by(
+                RuleCenterReplayDataset.created_at.desc(), RuleCenterReplayDataset.code
+            )
+        ).all()
+        return [self._dataset_to_dict(row) for row in rows]
+
+    def create_dataset(
+        self, code: str, name: str, description: str, actor_subject: str, actor_name: str
+    ) -> dict:
+        normalized_code = code.strip().upper()
+        if self.session.scalars(
+            select(RuleCenterReplayDataset).where(RuleCenterReplayDataset.code == normalized_code)
+        ).first():
+            raise ValueError("回放数据集编码已存在")
+        record = RuleCenterReplayDataset(
+            id=str(uuid4()), code=normalized_code, name=name.strip(),
+            description=description.strip(), status="active",
+            created_by=actor_subject, created_by_name=actor_name,
+        )
+        self.session.add(record)
+        self.session.flush()
+        self.audit.append(
+            "rule_center_replay_dataset", record.id, "rule_center_replay_dataset_created",
+            actor_name, {"code": record.code, "name": record.name},
+        )
+        self.session.commit()
+        self.session.refresh(record)
+        return self._dataset_to_dict(record)
+
+    def list_snapshots(self, dataset_id: str | None = None) -> list[dict]:
+        statement = select(RuleCenterReplayDatasetSnapshot)
+        if dataset_id:
+            if self.session.get(RuleCenterReplayDataset, dataset_id) is None:
+                raise LookupError("回放数据集不存在")
+            statement = statement.where(RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id)
+        rows = self.session.scalars(
+            statement.order_by(
+                RuleCenterReplayDatasetSnapshot.created_at.desc(),
+                RuleCenterReplayDatasetSnapshot.version.desc(),
+            )
+        ).all()
+        return [self._snapshot_to_dict(row) for row in rows]
+
+    def import_snapshot(
+        self,
+        dataset_id: str,
+        payload: dict,
+        actor_subject: str,
+        actor_name: str,
+    ) -> dict:
+        dataset = self.session.get(RuleCenterReplayDataset, dataset_id)
+        if dataset is None:
+            raise LookupError("回放数据集不存在")
+        if dataset.status != "active":
+            raise ValueError("只有启用中的回放数据集可以导入快照")
+        records = deepcopy(payload["records"])
+        mapping = deepcopy(payload.get("field_mapping") or {})
+        if len(mapping) > 500:
+            raise ValueError("字段映射最多包含 500 项")
+        if any(not target.strip() or not source.strip() for target, source in mapping.items()):
+            raise ValueError("字段映射路径不能为空")
+
+        source_hash = content_hash({
+            "source_name": payload["source_name"], "schema_version": payload["schema_version"],
+            "as_of_date": payload["as_of_date"], "field_mapping": mapping,
+            "label_field": payload.get("label_field"),
+            "observed_at_field": payload.get("observed_at_field"), "records": records,
+        })
+        duplicate = self.session.scalars(
+            select(RuleCenterReplayDatasetSnapshot).where(
+                RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id,
+                RuleCenterReplayDatasetSnapshot.source_hash == source_hash,
+            )
+        ).first()
+        if duplicate:
+            raise ValueError(f"相同源数据已固化为快照 v{duplicate.version}")
+
+        canonical_rows: list[dict] = []
+        sample_ids: set[str] = set()
+        sensitive_hits: set[str] = set()
+        label_counts: dict[str, int] = {}
+        label_present = observed_present = 0
+        all_paths: set[str] = set(mapping) if mapping else set()
+        path_counts: dict[str, int] = {}
+        as_of = payload["as_of_date"]
+
+        for index, source in enumerate(records, start=1):
+            if not isinstance(source, dict):
+                raise ValueError(f"第 {index} 条样本必须是对象")
+            flat_source = flatten_payload(source)
+            sensitive_hits.update(
+                path for path, value in flat_source.items()
+                if value not in (None, "", []) and path.rsplit(".", 1)[-1].lower() in self._sensitive_keys
+            )
+            if mapping:
+                fields = []
+                for target, source_path in mapping.items():
+                    value = self._path_value(source, source_path)
+                    if value is not None:
+                        fields.append({"field_path": target, "value": deepcopy(value)})
+                canonical = unflatten_fields(fields)
+            else:
+                canonical = deepcopy(source)
+            flat_canonical = flatten_payload(canonical)
+            all_paths.update(flat_canonical)
+            for path, value in flat_canonical.items():
+                if value not in (None, "", []):
+                    path_counts[path] = path_counts.get(path, 0) + 1
+            missing = [path for path in self._required_paths if self._path_value(canonical, path) in (None, "")]
+            if missing:
+                raise ValueError(f"第 {index} 条样本缺少必填字段：{', '.join(missing)}")
+            sample_id = str(self._path_value(canonical, "id"))
+            if sample_id in sample_ids:
+                raise ValueError(f"样本 ID 重复：{sample_id}")
+            sample_ids.add(sample_id)
+
+            label = self._path_value(source, payload.get("label_field"))
+            if label not in (None, ""):
+                label_present += 1
+                label_counts[str(label)] = label_counts.get(str(label), 0) + 1
+            observed_at = self._path_value(source, payload.get("observed_at_field"))
+            observed_iso = None
+            if observed_at not in (None, ""):
+                observed_date = self._parse_date(observed_at, index)
+                if observed_date > as_of:
+                    raise ValueError(f"第 {index} 条样本观察时间晚于数据集时间截面")
+                observed_present += 1
+                observed_iso = observed_date.isoformat()
+            canonical_rows.append({
+                "sample": canonical,
+                "label": deepcopy(label),
+                "observed_at": observed_iso,
+            })
+
+        if sensitive_hits:
+            raise ValueError(f"脱敏检查失败，发现敏感字段：{', '.join(sorted(sensitive_hits)[:10])}")
+        sample_count = len(canonical_rows)
+        field_coverage = [
+            {
+                "path": path,
+                "present_count": path_counts.get(path, 0),
+                "coverage_rate": round(path_counts.get(path, 0) / sample_count, 6),
+            }
+            for path in sorted(all_paths)
+        ]
+        overall_rate = round(
+            sum(item["coverage_rate"] for item in field_coverage) / len(field_coverage), 6
+        ) if field_coverage else 0
+        coverage = {
+            "overall_field_coverage_rate": overall_rate,
+            "field_coverage": field_coverage,
+            "required_fields": [
+                {
+                    "path": path,
+                    "present_count": path_counts.get(path, 0),
+                    "coverage_rate": round(path_counts.get(path, 0) / sample_count, 6),
+                }
+                for path in self._required_paths
+            ],
+            "label_coverage_rate": round(label_present / sample_count, 6),
+            "label_distribution": label_counts,
+            "observed_at_coverage_rate": round(observed_present / sample_count, 6),
+            "deidentification": {
+                "passed": True, "scanned_field_count": len(set().union(*(flatten_payload(row) for row in records))),
+                "sensitive_fields": [], "data_classification": payload["data_classification"],
+            },
+            "time_travel_check": {"passed": True, "future_observation_count": 0},
+        }
+        latest_version = int(self.session.scalar(
+            select(func.max(RuleCenterReplayDatasetSnapshot.version)).where(
+                RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id
+            )
+        ) or 0)
+        version = latest_version + 1
+        hash_payload = {
+            "dataset_id": dataset_id, "version": version,
+            "source_name": payload["source_name"], "schema_version": payload["schema_version"],
+            "as_of_date": as_of, "evidence_reference": payload["evidence_reference"],
+            "data_classification": payload["data_classification"], "field_mapping": mapping,
+            "label_field": payload.get("label_field"),
+            "observed_at_field": payload.get("observed_at_field"),
+            "samples": canonical_rows, "coverage": coverage, "source_hash": source_hash,
+        }
+        record = RuleCenterReplayDatasetSnapshot(
+            id=str(uuid4()), dataset_id=dataset_id, version=version,
+            source_name=payload["source_name"], schema_version=payload["schema_version"],
+            as_of_date=as_of, evidence_reference=payload["evidence_reference"],
+            data_classification=payload["data_classification"], field_mapping_json=mapping,
+            label_field=payload.get("label_field"), observed_at_field=payload.get("observed_at_field"),
+            sample_count=sample_count, samples_json=canonical_rows, coverage_json=coverage,
+            source_hash=source_hash, content_hash=content_hash(hash_payload),
+            created_by=actor_subject, created_by_name=actor_name,
+        )
+        self.session.add(record)
+        self.session.flush()
+        self.audit.append(
+            "rule_center_replay_dataset", dataset_id, "rule_center_replay_snapshot_imported",
+            actor_name, {"snapshot_id": record.id, "version": version, "sample_count": sample_count, "content_hash": record.content_hash},
+        )
+        self.session.commit()
+        self.session.refresh(record)
+        return self._snapshot_to_dict(record)
+
+    @staticmethod
+    def snapshot_content_hash(record: RuleCenterReplayDatasetSnapshot) -> str:
+        return content_hash({
+            "dataset_id": record.dataset_id, "version": record.version,
+            "source_name": record.source_name, "schema_version": record.schema_version,
+            "as_of_date": record.as_of_date, "evidence_reference": record.evidence_reference,
+            "data_classification": record.data_classification,
+            "field_mapping": record.field_mapping_json,
+            "label_field": record.label_field, "observed_at_field": record.observed_at_field,
+            "samples": record.samples_json, "coverage": record.coverage_json,
+            "source_hash": record.source_hash,
+        })
+
+    @staticmethod
+    def _path_value(value: dict, path: str | None):
+        if not path:
+            return None
+        current = value
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        return current
+
+    @staticmethod
+    def _parse_date(value, index: int) -> date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+        except ValueError as exc:
+            raise ValueError(f"第 {index} 条样本观察时间格式无效") from exc
+
+    def _dataset_to_dict(self, record: RuleCenterReplayDataset) -> dict:
+        latest = self.session.scalars(
+            select(RuleCenterReplayDatasetSnapshot)
+            .where(RuleCenterReplayDatasetSnapshot.dataset_id == record.id)
+            .order_by(RuleCenterReplayDatasetSnapshot.version.desc())
+        ).first()
+        return {
+            "id": record.id, "code": record.code, "name": record.name,
+            "description": record.description, "status": record.status,
+            "latest_snapshot": self._snapshot_to_dict(latest) if latest else None,
+            "created_by": record.created_by, "created_by_name": record.created_by_name,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+
+    @staticmethod
+    def _snapshot_to_dict(record: RuleCenterReplayDatasetSnapshot) -> dict:
+        return {
+            "id": record.id, "dataset_id": record.dataset_id, "version": record.version,
+            "source_name": record.source_name, "schema_version": record.schema_version,
+            "as_of_date": record.as_of_date.isoformat(),
+            "evidence_reference": record.evidence_reference,
+            "data_classification": record.data_classification,
+            "field_mapping": deepcopy(record.field_mapping_json),
+            "label_field": record.label_field, "observed_at_field": record.observed_at_field,
+            "sample_count": record.sample_count, "coverage": deepcopy(record.coverage_json),
+            "source_hash": record.source_hash, "content_hash": record.content_hash,
+            "created_by": record.created_by, "created_by_name": record.created_by_name,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+
+
+class RuleCenterReplayComparisonRepository:
+    """Run reproducible champion/challenger validation on one immutable snapshot."""
+
+    _score_bins = tuple(range(0, 101, 10))
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.audit = AuditRepository(session)
+
+    def list_runs(self) -> list[dict]:
+        rows = self.session.scalars(
+            select(RuleCenterReplayComparisonRun).order_by(
+                RuleCenterReplayComparisonRun.created_at.desc(),
+                RuleCenterReplayComparisonRun.id.desc(),
+            )
+        ).all()
+        return [self._to_dict(row) for row in rows]
+
+    def run(self, payload: dict, demo_repository: DemoRepository,
+            model_repository: ModelGovernanceRepository,
+            actor_subject: str, actor_name: str) -> dict:
+        from rating.scorecard import rate_counterparty
+
+        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, payload["dataset_snapshot_id"])
+        if snapshot is None:
+            raise LookupError("历史回放数据集快照不存在")
+        if RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot) != snapshot.content_hash:
+            raise ValueError("历史回放数据集快照哈希不一致")
+        dataset = self.session.get(RuleCenterReplayDataset, snapshot.dataset_id)
+        if dataset is None or dataset.status != "active":
+            raise ValueError("历史回放数据集不可用")
+
+        champion_config = model_repository.get_config(demo_repository, payload["champion_model_key"])
+        challenger_config = model_repository.get_config(demo_repository, payload["challenger_model_key"])
+        if champion_config is None:
+            raise LookupError("Champion 模型不存在")
+        if challenger_config is None:
+            raise LookupError("Challenger 模型不存在")
+        champion_code, champion_pipeline_version = self._pin_pipeline(champion_config, payload.get("champion_pipeline_code"))
+        challenger_code, challenger_pipeline_version = self._pin_pipeline(challenger_config, payload.get("challenger_pipeline_code"))
+        champion_config["decision_pipeline_code"] = "" if champion_code == "LEGACY-SCORECARD" else champion_code
+        challenger_config["decision_pipeline_code"] = "" if challenger_code == "LEGACY-SCORECARD" else challenger_code
+
+        entries = deepcopy((snapshot.samples_json or [])[: payload["sample_limit"]])
+        if not entries:
+            raise ValueError("回放样本不能为空")
+        details: list[dict] = []
+        failures = {"champion": 0, "challenger": 0}
+        for entry in entries:
+            sample = deepcopy(entry.get("sample") or {})
+            outputs = {}
+            for side, config in (("champion", champion_config), ("challenger", challenger_config)):
+                try:
+                    result = rate_counterparty(deepcopy(sample), deepcopy(config))
+                except Exception as exc:  # Keep per-sample evidence even when one model fails.
+                    result = {"ok": False, "error": str(exc)}
+                if not result or not result.get("ok"):
+                    failures[side] += 1
+                outputs[side] = self._result_summary(result)
+            details.append({
+                "sample_id": str(sample.get("id", "")),
+                "segment": str(RuleCenterReplayDatasetRepository._path_value(sample, payload["segment_field"]) or "N/A"),
+                "label": entry.get("label"),
+                **outputs,
+            })
+
+        count = len(details)
+        if any(value / count > payload["max_execution_failure_rate"] for value in failures.values()):
+            raise ValueError(
+                f"模型执行失败率超过阈值：Champion {failures['champion'] / count:.1%}，"
+                f"Challenger {failures['challenger'] / count:.1%}"
+            )
+        evidence_level = "labeled" if any(row["label"] not in (None, "") for row in details) else "unlabeled"
+        metrics = self._metrics(details, failures, payload, evidence_level)
+        config = {
+            "sample_limit": payload["sample_limit"],
+            "max_execution_failure_rate": payload["max_execution_failure_rate"],
+            "positive_labels": payload["positive_labels"],
+            "positive_admissions": payload["positive_admissions"],
+        }
+        pinned = {
+            "champion": {"model_key": payload["champion_model_key"], "model_version": champion_config["version"], "pipeline_code": champion_code, "pipeline_version": champion_pipeline_version},
+            "challenger": {"model_key": payload["challenger_model_key"], "model_version": challenger_config["version"], "pipeline_code": challenger_code, "pipeline_version": challenger_pipeline_version},
+        }
+        evidence_hash = content_hash({
+            "dataset_snapshot_id": snapshot.id, "dataset_snapshot_hash": snapshot.content_hash,
+            **pinned, "segment_field": payload["segment_field"], "evidence_level": evidence_level,
+            "config": config, "metrics": metrics, "details": details,
+        })
+        record = RuleCenterReplayComparisonRun(
+            id=str(uuid4()), dataset_snapshot_id=snapshot.id, dataset_snapshot_hash=snapshot.content_hash,
+            champion_model_key=payload["champion_model_key"], champion_model_version=str(champion_config["version"]),
+            challenger_model_key=payload["challenger_model_key"], challenger_model_version=str(challenger_config["version"]),
+            champion_pipeline_code=champion_code, champion_pipeline_version=champion_pipeline_version,
+            challenger_pipeline_code=challenger_code, challenger_pipeline_version=challenger_pipeline_version,
+            segment_field=payload["segment_field"], evidence_level=evidence_level,
+            config_json=config, metrics_json=metrics, details_json=details,
+            evidence_hash=evidence_hash, created_by=actor_subject, created_by_name=actor_name,
+        )
+        self.session.add(record)
+        self.session.flush()
+        self.audit.append(
+            "rule_center_replay_comparison", record.id, "rule_center_replay_comparison_completed",
+            actor_name, {"snapshot_id": snapshot.id, "evidence_level": evidence_level, "evidence_hash": evidence_hash},
+        )
+        self.session.commit()
+        self.session.refresh(record)
+        return self._to_dict(record)
+
+    def _pin_pipeline(self, config: dict, override: str | None) -> tuple[str, int | None]:
+        code = str(override or config.get("decision_pipeline_code") or "").strip().upper()
+        if not code:
+            return "LEGACY-SCORECARD", None
+        pipeline = self.session.scalars(
+            select(DecisionPipelineDefinition).where(
+                DecisionPipelineDefinition.code == code,
+                DecisionPipelineDefinition.is_active.is_(True),
+            ).order_by(DecisionPipelineDefinition.version.desc())
+        ).first()
+        if pipeline is None:
+            raise LookupError(f"决策管线不存在或未发布：{code}")
+        return code, pipeline.version
+
+    @staticmethod
+    def _result_summary(result: dict | None) -> dict:
+        result = result or {}
+        score = result.get("total_score")
+        return {
+            "ok": bool(result.get("ok")),
+            "score": round(float(score), 6) if isinstance(score, (int, float)) else None,
+            "rating": str(result.get("rating") or "N/A"),
+            "admission": str(result.get("access_strategy") or "error"),
+            "error": None if result.get("ok") else str(result.get("error") or "执行失败"),
+        }
+
+    @classmethod
+    def _metrics(cls, details: list[dict], failures: dict, payload: dict, evidence_level: str) -> dict:
+        count = len(details)
+        champion = cls._side_metrics(details, "champion", failures["champion"])
+        challenger = cls._side_metrics(details, "challenger", failures["challenger"])
+        paired = [row for row in details if row["champion"]["score"] is not None and row["challenger"]["score"] is not None]
+        deltas = [row["challenger"]["score"] - row["champion"]["score"] for row in paired]
+        metrics = {
+            "sample_count": count,
+            "labeled_sample_count": sum(row["label"] not in (None, "") for row in details),
+            "champion": champion, "challenger": challenger,
+            "average_score_delta": round(sum(deltas) / len(deltas), 6) if deltas else None,
+            "rating_change_rate": round(sum(row["champion"]["rating"] != row["challenger"]["rating"] for row in details) / count, 6),
+            "admission_change_rate": round(sum(row["champion"]["admission"] != row["challenger"]["admission"] for row in details) / count, 6),
+            "psi": cls._psi(champion["score_distribution"], challenger["score_distribution"], count),
+            "segments": cls._segments(details), "warning": None,
+        }
+        if evidence_level == "labeled":
+            labeled = [row for row in details if row["label"] not in (None, "")]
+            positives = {str(value) for value in payload["positive_labels"]}
+            predicted = {str(value) for value in payload["positive_admissions"]}
+            for side in ("champion", "challenger"):
+                metrics[side]["ks"] = cls._ks(labeled, side, positives)
+                metrics[side]["confusion_matrix"] = cls._confusion(labeled, side, positives, predicted)
+        else:
+            metrics["warning"] = "快照不含有效标签，本次仅提供非监督稳定性证据；KS 与混淆矩阵不可计算。"
+            for side in ("champion", "challenger"):
+                metrics[side]["ks"] = None
+                metrics[side]["confusion_matrix"] = None
+        return metrics
+
+    @classmethod
+    def _side_metrics(cls, details: list[dict], side: str, failures: int) -> dict:
+        scores = sorted(row[side]["score"] for row in details if row[side]["score"] is not None)
+        ratings: dict[str, int] = {}
+        admissions: dict[str, int] = {}
+        bins = {f"{low}-{low + 10}": 0 for low in cls._score_bins[:-1]}
+        for row in details:
+            ratings[row[side]["rating"]] = ratings.get(row[side]["rating"], 0) + 1
+            admissions[row[side]["admission"]] = admissions.get(row[side]["admission"], 0) + 1
+            score = row[side]["score"]
+            if score is not None:
+                low = min(max(int(score // 10) * 10, 0), 90)
+                bins[f"{low}-{low + 10}"] += 1
+        middle = len(scores) // 2
+        median = ((scores[middle - 1] + scores[middle]) / 2 if len(scores) % 2 == 0 else scores[middle]) if scores else None
+        return {
+            "failure_count": failures, "failure_rate": round(failures / len(details), 6),
+            "score_mean": round(sum(scores) / len(scores), 6) if scores else None,
+            "score_min": min(scores) if scores else None, "score_max": max(scores) if scores else None,
+            "score_median": round(median, 6) if median is not None else None,
+            "rating_distribution": ratings, "admission_distribution": admissions,
+            "score_distribution": bins,
+        }
+
+    @staticmethod
+    def _psi(champion: dict[str, int], challenger: dict[str, int], count: int) -> float:
+        import math
+        value = 0.0
+        for key in champion:
+            expected = max(champion[key] / count, 1e-6)
+            actual = max(challenger[key] / count, 1e-6)
+            value += (actual - expected) * math.log(actual / expected)
+        return round(value, 6)
+
+    @staticmethod
+    def _ks(rows: list[dict], side: str, positives: set[str]) -> float | None:
+        usable = [row for row in rows if row[side]["score"] is not None]
+        bad = sum(str(row["label"]) in positives for row in usable)
+        good = len(usable) - bad
+        if not good or not bad:
+            return None
+        cumulative_good = cumulative_bad = maximum = 0.0
+        for row in sorted(usable, key=lambda item: item[side]["score"]):
+            if str(row["label"]) in positives:
+                cumulative_bad += 1 / bad
+            else:
+                cumulative_good += 1 / good
+            maximum = max(maximum, abs(cumulative_bad - cumulative_good))
+        return round(maximum, 6)
+
+    @staticmethod
+    def _confusion(rows: list[dict], side: str, positives: set[str], predicted: set[str]) -> dict:
+        matrix = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+        for row in rows:
+            actual = str(row["label"]) in positives
+            prediction = row[side]["admission"] in predicted
+            matrix["tp" if actual and prediction else "fn" if actual else "fp" if prediction else "tn"] += 1
+        return matrix
+
+    @staticmethod
+    def _segments(details: list[dict]) -> list[dict]:
+        groups: dict[str, list[dict]] = {}
+        for row in details:
+            groups.setdefault(row["segment"], []).append(row)
+        output = []
+        for segment, rows in sorted(groups.items()):
+            champion_scores = [row["champion"]["score"] for row in rows if row["champion"]["score"] is not None]
+            challenger_scores = [row["challenger"]["score"] for row in rows if row["challenger"]["score"] is not None]
+            paired = [row for row in rows if row["champion"]["score"] is not None and row["challenger"]["score"] is not None]
+            deltas = [row["challenger"]["score"] - row["champion"]["score"] for row in paired]
+            output.append({
+                "segment": segment, "sample_count": len(rows),
+                "champion_score_mean": round(sum(champion_scores) / len(champion_scores), 6) if champion_scores else None,
+                "challenger_score_mean": round(sum(challenger_scores) / len(challenger_scores), 6) if challenger_scores else None,
+                "average_score_delta": round(sum(deltas) / len(deltas), 6) if deltas else None,
+                "rating_change_rate": round(sum(row["champion"]["rating"] != row["challenger"]["rating"] for row in rows) / len(rows), 6),
+                "admission_change_rate": round(sum(row["champion"]["admission"] != row["challenger"]["admission"] for row in rows) / len(rows), 6),
+            })
+        return output
+
+    @staticmethod
+    def _to_dict(record: RuleCenterReplayComparisonRun) -> dict:
+        return {
+            "id": record.id, "dataset_snapshot_id": record.dataset_snapshot_id,
+            "dataset_snapshot_hash": record.dataset_snapshot_hash,
+            "champion_model_key": record.champion_model_key, "champion_model_version": record.champion_model_version,
+            "challenger_model_key": record.challenger_model_key, "challenger_model_version": record.challenger_model_version,
+            "champion_pipeline_code": record.champion_pipeline_code, "champion_pipeline_version": record.champion_pipeline_version,
+            "challenger_pipeline_code": record.challenger_pipeline_code, "challenger_pipeline_version": record.challenger_pipeline_version,
+            "segment_field": record.segment_field, "evidence_level": record.evidence_level,
+            "config": deepcopy(record.config_json), "metrics": deepcopy(record.metrics_json),
+            "details": deepcopy(record.details_json), "evidence_hash": record.evidence_hash,
+            "created_by": record.created_by, "created_by_name": record.created_by_name,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+
+
+class RuleCenterReleasePackageRepository:
+    """Validate and atomically publish dependency-linked rule-center candidates."""
+
+    _asset_order = {"rule": 1, "rule_set": 2, "pipeline": 3}
+    _models = {
+        "rule": RuleDefinition,
+        "rule_set": RuleSetDefinition,
+        "pipeline": DecisionPipelineDefinition,
+    }
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.audit = AuditRepository(session)
+
+    def list_packages(self) -> list[dict]:
+        rows = self.session.scalars(
+            select(RuleCenterReleasePackage).order_by(
+                RuleCenterReleasePackage.created_at.desc(),
+                RuleCenterReleasePackage.id.desc(),
+            )
+        ).all()
+        return [self._package_to_dict(row) for row in rows]
+
+    def list_replays(self, package_id: str) -> list[dict]:
+        if self.session.get(RuleCenterReleasePackage, package_id) is None:
+            raise LookupError("规则中心发布包不存在")
+        rows = self.session.scalars(
+            select(RuleCenterReplayRun)
+            .where(RuleCenterReplayRun.package_id == package_id)
+            .order_by(RuleCenterReplayRun.created_at.desc(), RuleCenterReplayRun.id.desc())
+        ).all()
+        return [self._replay_to_dict(row) for row in rows]
+
+    def run_replay(
+        self,
+        package_id: str,
+        dataset_snapshot_id: str,
+        model_key: str,
+        model_config: dict,
+        pipeline_code: str | None,
+        thresholds: dict,
+        actor_subject: str,
+        actor_name: str,
+    ) -> dict:
+        from rating.decision_pipeline import run_decision_pipeline_sandbox
+        from rating.scorecard import rate_counterparty
+
+        package = self.session.get(RuleCenterReleasePackage, package_id)
+        if package is None:
+            raise LookupError("规则中心发布包不存在")
+        if package.status != "draft":
+            raise ValueError("只有待提交发布包可以运行发布前回放")
+        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, dataset_snapshot_id)
+        if snapshot is None:
+            raise LookupError("历史回放数据集快照不存在")
+        actual_snapshot_hash = RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot)
+        if actual_snapshot_hash != snapshot.content_hash:
+            raise ValueError("历史回放数据集快照哈希不一致")
+        dataset = self.session.get(RuleCenterReplayDataset, snapshot.dataset_id)
+        if dataset is None or dataset.status != "active":
+            raise ValueError("历史回放数据集不可用")
+        changes = self._package_changes(package.id, {"package_draft"})
+        candidate_rules, candidate_sets, candidate_pipelines = self._definition_maps(changes)
+        affected_codes = self._affected_pipeline_codes(
+            changes, candidate_sets, candidate_pipelines
+        )
+        selected_code = pipeline_code or (affected_codes[0] if len(affected_codes) == 1 else None)
+        if not selected_code:
+            raise ValueError("发布包影响多条管线，请明确选择回放管线")
+        if selected_code not in affected_codes:
+            raise ValueError("所选管线不在发布包影响范围内")
+        candidate_pipeline = candidate_pipelines.get(selected_code)
+        if candidate_pipeline is None:
+            raise ValueError("所选候选管线不存在")
+
+        active_rules, active_sets, active_pipelines = self._definition_maps([])
+        baseline_pipeline = active_pipelines.get(selected_code)
+        selected_entries = deepcopy((snapshot.samples_json or [])[: int(thresholds["sample_limit"])])
+        if not selected_entries:
+            raise ValueError("回放样本不能为空")
+
+        details = []
+        baseline_hits: dict[str, int] = {}
+        candidate_hits: dict[str, int] = {}
+        rating_matrix = self._empty_matrix(["AAA", "AA", "A", "BBB", "BB", "B", "C", "D", "N/A"])
+        admission_labels = ["approve", "manual_review", "reject", "error"]
+        admission_matrix = self._empty_matrix(admission_labels)
+        failures = rating_changes = decision_changes = tightened = loosened = 0
+        score_deltas: list[float] = []
+
+        for entry in selected_entries:
+            sample = deepcopy(entry.get("sample") or {})
+            baseline_context = {"counterparty": deepcopy(sample), "config": deepcopy(model_config)}
+            if baseline_pipeline:
+                baseline = run_decision_pipeline_sandbox(
+                    baseline_pipeline, active_sets, active_rules, baseline_context
+                )
+            else:
+                baseline_config = deepcopy(model_config)
+                baseline_config["decision_pipeline_code"] = ""
+                baseline = rate_counterparty(deepcopy(sample), baseline_config)
+            candidate_context = {"counterparty": deepcopy(sample), "config": deepcopy(model_config)}
+            candidate = run_decision_pipeline_sandbox(
+                candidate_pipeline, candidate_sets, candidate_rules, candidate_context
+            )
+
+            baseline_ok = bool(baseline and baseline.get("ok"))
+            candidate_ok = bool(candidate and candidate.get("ok"))
+            if not baseline_ok or not candidate_ok:
+                failures += 1
+            before_rating = str((baseline or {}).get("rating") or "N/A")
+            after_rating = str((candidate or {}).get("rating") or "N/A")
+            if before_rating not in rating_matrix:
+                before_rating = "N/A"
+            if after_rating not in rating_matrix[before_rating]:
+                after_rating = "N/A"
+            rating_matrix[before_rating][after_rating] += 1
+            rating_changes += before_rating != after_rating
+
+            before_admission = self._admission(baseline)
+            after_admission = self._admission(candidate)
+            admission_matrix[before_admission][after_admission] += 1
+            decision_changes += before_admission != after_admission
+            before_rank = admission_labels.index(before_admission)
+            after_rank = admission_labels.index(after_admission)
+            tightened += after_rank > before_rank and after_admission != "error"
+            loosened += after_rank < before_rank and before_admission != "error"
+            if baseline_ok and candidate_ok:
+                before_score = baseline.get("total_score")
+                after_score = candidate.get("total_score")
+                if isinstance(before_score, (int, float)) and isinstance(after_score, (int, float)):
+                    score_deltas.append(float(after_score) - float(before_score))
+
+            before_codes = self._hit_codes(baseline, baseline_context)
+            after_codes = self._hit_codes(candidate, candidate_context)
+            for code in before_codes:
+                baseline_hits[code] = baseline_hits.get(code, 0) + 1
+            for code in after_codes:
+                candidate_hits[code] = candidate_hits.get(code, 0) + 1
+            details.append(
+                {
+                    "counterparty_id": sample.get("id"),
+                    "counterparty_name": sample.get("name"),
+                    "sample_label": deepcopy(entry.get("label")),
+                    "observed_at": entry.get("observed_at"),
+                    "baseline": self._decision_summary(baseline, before_admission, before_codes),
+                    "candidate": self._decision_summary(candidate, after_admission, after_codes),
+                    "changed": before_rating != after_rating or before_admission != after_admission,
+                }
+            )
+
+        sample_count = len(selected_entries)
+        failure_rate = failures / sample_count
+        decision_change_rate = decision_changes / sample_count
+        errors = []
+        if sample_count < int(thresholds["min_sample_count"]):
+            errors.append(f"有效样本 {sample_count} 少于门禁要求 {thresholds['min_sample_count']}")
+        if failure_rate > float(thresholds["max_execution_failure_rate"]):
+            errors.append(f"执行失败率 {failure_rate:.1%} 超过阈值 {float(thresholds['max_execution_failure_rate']):.1%}")
+        if decision_change_rate > float(thresholds["max_decision_change_rate"]):
+            errors.append(f"准入变化率 {decision_change_rate:.1%} 超过阈值 {float(thresholds['max_decision_change_rate']):.1%}")
+        warnings = [] if sample_count >= 30 else ["当前为小样本开发验证证据，不能替代正式生产回溯"]
+        metrics = {
+            "sample_count": sample_count,
+            "failure_count": failures,
+            "failure_rate": round(failure_rate, 6),
+            "rating_change_count": rating_changes,
+            "rating_change_rate": round(rating_changes / sample_count, 6),
+            "decision_change_count": decision_changes,
+            "decision_change_rate": round(decision_change_rate, 6),
+            "tightened_count": tightened,
+            "loosened_count": loosened,
+            "average_score_delta": round(sum(score_deltas) / len(score_deltas), 4) if score_deltas else None,
+            "baseline_rule_hits": self._hit_rates(baseline_hits, sample_count),
+            "candidate_rule_hits": self._hit_rates(candidate_hits, sample_count),
+            "rating_migration_matrix": rating_matrix,
+            "admission_migration_matrix": admission_matrix,
+        }
+        gate = {"passed": not errors, "errors": errors, "warnings": warnings, "summary": "回放门禁通过" if not errors else "；".join(errors)}
+        evidence_payload = {
+            "package_id": package.id,
+            "package_config_hash": package.config_hash,
+            "dataset_snapshot_id": snapshot.id,
+            "dataset_snapshot_hash": snapshot.content_hash,
+            "model_key": model_key,
+            "model_version": model_config.get("version", ""),
+            "pipeline_code": selected_code,
+            "sample_ids": [item.get("sample", {}).get("id") for item in selected_entries],
+            "thresholds": thresholds,
+            "metrics": metrics,
+            "details": details,
+            "gate": gate,
+        }
+        record = RuleCenterReplayRun(
+            id=str(uuid4()), package_id=package.id, package_config_hash=package.config_hash,
+            dataset_snapshot_id=snapshot.id, dataset_snapshot_hash=snapshot.content_hash,
+            model_key=model_key, model_version=str(model_config.get("version", "")),
+            pipeline_code=selected_code, sample_source=f"dataset:{dataset.code}:v{snapshot.version}",
+            sample_count=sample_count, status="completed", thresholds_json=deepcopy(thresholds),
+            metrics_json=metrics, details_json=details, gate_json=gate,
+            evidence_hash=content_hash(evidence_payload), created_by=actor_subject,
+            created_by_name=actor_name,
+        )
+        self.session.add(record)
+        self.session.flush()
+        self.audit.append(
+            "rule_center_replay", record.id, "rule_center_replay_completed", actor_name,
+            {"package_id": package.id, "dataset_snapshot_id": snapshot.id, "dataset_snapshot_hash": snapshot.content_hash, "pipeline_code": selected_code, "sample_count": sample_count, "gate": gate, "evidence_hash": record.evidence_hash},
+        )
+        self.session.commit()
+        self.session.refresh(record)
+        return self._replay_to_dict(record)
+
+    def preview(self, change_ids: list[str]) -> dict:
+        changes = self._changes(change_ids, {"draft"})
+        return self._analyze(changes)
+
+    def create(
+        self,
+        name: str,
+        change_reason: str,
+        change_ids: list[str],
+        actor_subject: str,
+        actor_name: str,
+        allow_admin: bool = False,
+    ) -> dict:
+        changes = self._changes(change_ids, {"draft"})
+        if not allow_admin and any(row.created_by != actor_subject for row in changes):
+            raise PermissionError("发布包只能包含当前用户创建的治理草稿")
+        analysis = self._analyze(changes)
+        if not analysis["release_gate"]["passed"]:
+            raise ValueError(analysis["release_gate"]["summary"])
+        package = RuleCenterReleasePackage(
+            id=str(uuid4()),
+            name=name,
+            change_reason=change_reason,
+            status="draft",
+            config_hash=analysis["config_hash"],
+            dependency_snapshot_json=deepcopy(analysis["dependency_snapshot"]),
+            impact_json=deepcopy(analysis["impact"]),
+            created_by=actor_subject,
+            created_by_name=actor_name,
+        )
+        self.session.add(package)
+        for sequence, row in enumerate(self._ordered(changes), start=1):
+            row.status = "package_draft"
+            self.session.add(
+                RuleCenterReleasePackageMember(
+                    id=str(uuid4()),
+                    package_id=package.id,
+                    change_id=row.id,
+                    asset_type=row.entity_type,
+                    code=row.template_key,
+                    candidate_version=row.candidate_version,
+                    sequence=sequence,
+                )
+            )
+        return self._commit_package(
+            package,
+            "rule_center_package_created",
+            actor_name,
+            {"config_hash": package.config_hash, "member_count": len(changes)},
+        )
+
+    def submit(
+        self,
+        package_id: str,
+        expected_row_version: int,
+        actor_subject: str,
+        actor_name: str,
+        allow_admin: bool = False,
+    ) -> dict:
+        package = self._versioned_package(package_id, expected_row_version)
+        if package.status != "draft":
+            raise ValueError("只有草稿发布包可以提交复核")
+        if package.created_by != actor_subject and not allow_admin:
+            raise PermissionError("只有发布包创建人可以提交复核")
+        changes = self._package_changes(package.id, {"package_draft"})
+        analysis = self._analyze(changes)
+        if not analysis["release_gate"]["passed"]:
+            raise ValueError(analysis["release_gate"]["summary"])
+        package.config_hash = analysis["config_hash"]
+        package.dependency_snapshot_json = deepcopy(analysis["dependency_snapshot"])
+        package.impact_json = deepcopy(analysis["impact"])
+        self._assert_replay_gate(package, changes)
+        package.status = "pending_review"
+        package.submitted_at = datetime.now(timezone.utc)
+        for row in changes:
+            row.status = "package_pending_review"
+        return self._commit_package(
+            package,
+            "rule_center_package_submitted",
+            actor_name,
+            {"config_hash": package.config_hash, "member_count": len(changes)},
+        )
+
+    def review(
+        self,
+        package_id: str,
+        expected_row_version: int,
+        decision: str,
+        comment: str,
+        reviewer_subject: str,
+        reviewer_name: str,
+    ) -> dict:
+        package = self._versioned_package(package_id, expected_row_version)
+        if package.status != "pending_review":
+            raise ValueError("只有待复核发布包可以执行评审")
+        if package.created_by == reviewer_subject:
+            raise PermissionError("发布包创建人与复核人必须分离")
+        changes = self._package_changes(package.id, {"package_pending_review"})
+        now = datetime.now(timezone.utc)
+        package.reviewed_by = reviewer_subject
+        package.reviewed_by_name = reviewer_name
+        package.reviewed_at = now
+        package.review_comment = comment
+        if decision == "reject":
+            package.status = "rejected"
+            for row in changes:
+                row.status = "draft"
+            return self._commit_package(
+                package,
+                "rule_center_package_rejected",
+                reviewer_name,
+                {"comment": comment},
+            )
+
+        analysis = self._analyze(changes)
+        if not analysis["release_gate"]["passed"]:
+            raise ConcurrentUpdateError(analysis["release_gate"]["summary"])
+        if analysis["config_hash"] != package.config_hash:
+            raise ConcurrentUpdateError("发布包成员配置已变化，请重新创建发布包")
+        if analysis["dependency_snapshot"] != package.dependency_snapshot_json:
+            raise ConcurrentUpdateError("发布包依赖环境已变化，请重新分析后提交")
+        self._assert_replay_gate(package, changes, concurrent=True)
+        try:
+            for row in self._ordered(changes):
+                repository = self._repository(row.entity_type)
+                repository._publish(
+                    deepcopy(row.config_json),
+                    reviewer_subject,
+                    reviewer_name,
+                    row,
+                    commit=False,
+                )
+            package.status = "published"
+            package.published_at = now
+            self.audit.append(
+                "rule_center_release_package",
+                package.id,
+                "rule_center_package_published",
+                reviewer_name,
+                {
+                    "config_hash": package.config_hash,
+                    "member_count": len(changes),
+                    "members": [
+                        {
+                            "asset_type": row.entity_type,
+                            "code": row.template_key,
+                            "version": row.candidate_version,
+                        }
+                        for row in self._ordered(changes)
+                    ],
+                    "comment": comment,
+                },
+            )
+            self.session.commit()
+        except (IntegrityError, StaleDataError, ValueError, ConcurrentUpdateError) as exc:
+            self.session.rollback()
+            if isinstance(exc, ConcurrentUpdateError):
+                raise
+            raise ConcurrentUpdateError("发布包原子发布失败，所有成员均已回滚") from exc
+        self.session.refresh(package)
+        return self._package_to_dict(package)
+
+    def _analyze(self, changes: list[ModelChangeRecord]) -> dict:
+        ordered = self._ordered(changes)
+        candidate_by_asset = {
+            (row.entity_type, row.template_key): row for row in ordered
+        }
+        errors: list[str] = []
+        dependencies: list[dict] = []
+        base_versions: dict[str, str] = {}
+        member_rows = []
+        changed_rules = set()
+        changed_sets = set()
+
+        for row in ordered:
+            active = self._active(row.entity_type, row.template_key)
+            current_version = str(active.version if active else 0)
+            actual_config_hash = content_hash(row.config_json)
+            recorded_config_hash = (row.validation_json or {}).get("config_hash")
+            key = f"{row.entity_type}:{row.template_key}"
+            base_versions[key] = current_version
+            if current_version != row.base_version:
+                errors.append(
+                    f"{row.template_key} 生效基线已从 v{row.base_version} 变化为 v{current_version}"
+                )
+            if recorded_config_hash != actual_config_hash:
+                errors.append(f"{row.template_key} 候选配置指纹不一致")
+            member_rows.append(
+                {
+                    "change_id": row.id,
+                    "asset_type": row.entity_type,
+                    "code": row.template_key,
+                    "base_version": row.base_version,
+                    "candidate_version": row.candidate_version,
+                    "config_hash": actual_config_hash,
+                    "change_type": "update" if active else "create",
+                }
+            )
+            if row.entity_type == "rule":
+                changed_rules.add(row.template_key)
+            elif row.entity_type == "rule_set":
+                changed_sets.add(row.template_key)
+
+        for row in ordered:
+            refs: list[tuple[str, str]] = []
+            if row.entity_type == "rule_set":
+                refs = [("rule", str(code)) for code in row.config_json.get("rule_codes", [])]
+            elif row.entity_type == "pipeline":
+                refs = [
+                    ("rule_set", str(stage.get("rule_set_code")))
+                    for stage in row.config_json.get("stages_json", [])
+                    if stage.get("rule_set_code")
+                ]
+            for dependency_type, code in refs:
+                candidate = candidate_by_asset.get((dependency_type, code))
+                active = self._active(dependency_type, code)
+                if candidate:
+                    source = "package"
+                    version = candidate.candidate_version
+                elif active:
+                    source = "active"
+                    version = str(active.version)
+                else:
+                    errors.append(f"{row.template_key} 缺少依赖 {dependency_type}:{code}")
+                    source = "missing"
+                    version = "0"
+                dependencies.append(
+                    {
+                        "asset_type": row.entity_type,
+                        "code": row.template_key,
+                        "depends_on_type": dependency_type,
+                        "depends_on_code": code,
+                        "source": source,
+                        "version": version,
+                    }
+                )
+
+        downstream_sets = set()
+        if changed_rules:
+            active_sets = self.session.scalars(
+                select(RuleSetDefinition).where(RuleSetDefinition.is_active.is_(True))
+            ).all()
+            downstream_sets = {
+                item.code
+                for item in active_sets
+                if changed_rules.intersection(set(item.rule_codes or []))
+            }
+        impacted_sets = changed_sets | downstream_sets
+        downstream_pipelines = set()
+        if impacted_sets:
+            active_pipelines = self.session.scalars(
+                select(DecisionPipelineDefinition).where(
+                    DecisionPipelineDefinition.is_active.is_(True)
+                )
+            ).all()
+            downstream_pipelines = {
+                item.code
+                for item in active_pipelines
+                if impacted_sets.intersection(
+                    {
+                        str(stage.get("rule_set_code"))
+                        for stage in item.stages_json or []
+                        if stage.get("rule_set_code")
+                    }
+                )
+            }
+
+        dependency_snapshot = {
+            "base_versions": base_versions,
+            "dependencies": sorted(
+                dependencies,
+                key=lambda item: (
+                    item["asset_type"],
+                    item["code"],
+                    item["depends_on_type"],
+                    item["depends_on_code"],
+                ),
+            ),
+        }
+        config_hash = content_hash(
+            {
+                "members": member_rows,
+                "dependency_snapshot": dependency_snapshot,
+            }
+        )
+        impact = {
+            "member_count": len(member_rows),
+            "create_count": sum(item["change_type"] == "create" for item in member_rows),
+            "update_count": sum(item["change_type"] == "update" for item in member_rows),
+            "asset_counts": {
+                asset_type: sum(item["asset_type"] == asset_type for item in member_rows)
+                for asset_type in self._asset_order
+            },
+            "package_dependency_count": sum(item["source"] == "package" for item in dependencies),
+            "active_dependency_count": sum(item["source"] == "active" for item in dependencies),
+            "downstream_assets": {
+                "rule_sets": sorted(downstream_sets),
+                "pipelines": sorted(downstream_pipelines),
+            },
+        }
+        summary = "发布门禁通过" if not errors else "；".join(errors)
+        return {
+            "config_hash": config_hash,
+            "members": member_rows,
+            "dependency_snapshot": dependency_snapshot,
+            "impact": impact,
+            "release_gate": {"passed": not errors, "errors": errors, "summary": summary},
+        }
+
+    def _changes(
+        self, change_ids: list[str], allowed_statuses: set[str]
+    ) -> list[ModelChangeRecord]:
+        unique_ids = list(dict.fromkeys(change_ids))
+        if not unique_ids or len(unique_ids) != len(change_ids):
+            raise ValueError("发布包成员不能为空或重复")
+        rows = list(
+            self.session.scalars(
+                select(ModelChangeRecord).where(ModelChangeRecord.id.in_(unique_ids))
+            ).all()
+        )
+        by_id = {row.id: row for row in rows}
+        if len(rows) != len(unique_ids):
+            raise LookupError("发布包包含不存在的治理变更")
+        ordered = [by_id[change_id] for change_id in unique_ids]
+        if any(row.entity_type not in self._asset_order for row in ordered):
+            raise ValueError("发布包仅支持规则、规则集和决策管线")
+        if any(row.status not in allowed_statuses for row in ordered):
+            raise ValueError("发布包成员状态已变化，请刷新后重新选择")
+        assets = {(row.entity_type, row.template_key) for row in ordered}
+        if len(assets) != len(ordered):
+            raise ValueError("同一发布包不能包含同一资产的多个候选版本")
+        return ordered
+
+    def _definition_maps(self, changes: list[ModelChangeRecord]) -> tuple[dict, dict, dict]:
+        rules = {
+            row.code: {
+                "code": row.code, "name": row.name, "enabled": row.enabled,
+                "conditions_json": deepcopy(row.conditions_json),
+                "condition_relation": row.condition_relation,
+                "actions_json": deepcopy(row.actions_json), "priority": row.priority,
+                "version": row.version,
+            }
+            for row in self.session.scalars(
+                select(RuleDefinition).where(RuleDefinition.is_active.is_(True))
+            ).all()
+        }
+        rule_sets = {
+            row.code: {
+                "code": row.code, "rule_codes": deepcopy(row.rule_codes),
+                "evaluation_strategy": row.evaluation_strategy, "version": row.version,
+            }
+            for row in self.session.scalars(
+                select(RuleSetDefinition).where(RuleSetDefinition.is_active.is_(True))
+            ).all()
+        }
+        pipelines = {
+            row.code: {
+                "code": row.code, "stages_json": deepcopy(row.stages_json),
+                "version": row.version,
+            }
+            for row in self.session.scalars(
+                select(DecisionPipelineDefinition).where(DecisionPipelineDefinition.is_active.is_(True))
+            ).all()
+        }
+        for change in changes:
+            item = deepcopy(change.config_json)
+            item["version"] = change.candidate_version
+            if change.entity_type == "rule":
+                rules[change.template_key] = item
+            elif change.entity_type == "rule_set":
+                rule_sets[change.template_key] = item
+            elif change.entity_type == "pipeline":
+                pipelines[change.template_key] = item
+        return rules, rule_sets, pipelines
+
+    @staticmethod
+    def _affected_pipeline_codes(
+        changes: list[ModelChangeRecord], rule_sets: dict[str, dict], pipelines: dict[str, dict]
+    ) -> list[str]:
+        changed_rules = {row.template_key for row in changes if row.entity_type == "rule"}
+        impacted_sets = {row.template_key for row in changes if row.entity_type == "rule_set"}
+        impacted_sets.update(
+            code for code, item in rule_sets.items()
+            if changed_rules.intersection(set(item.get("rule_codes", [])))
+        )
+        impacted_pipelines = {row.template_key for row in changes if row.entity_type == "pipeline"}
+        impacted_pipelines.update(
+            code for code, item in pipelines.items()
+            if impacted_sets.intersection({
+                str(stage.get("rule_set_code")) for stage in item.get("stages_json", [])
+                if stage.get("rule_set_code")
+            })
+        )
+        return sorted(impacted_pipelines)
+
+    def _assert_replay_gate(
+        self, package: RuleCenterReleasePackage, changes: list[ModelChangeRecord], concurrent: bool = False
+    ) -> None:
+        _, rule_sets, pipelines = self._definition_maps(changes)
+        if not self._affected_pipeline_codes(changes, rule_sets, pipelines):
+            return
+        replay = self.session.scalars(
+            select(RuleCenterReplayRun)
+            .where(
+                RuleCenterReplayRun.package_id == package.id,
+                RuleCenterReplayRun.package_config_hash == package.config_hash,
+                RuleCenterReplayRun.status == "completed",
+            )
+            .order_by(RuleCenterReplayRun.created_at.desc(), RuleCenterReplayRun.id.desc())
+        ).first()
+        message = None
+        if replay is None:
+            message = "发布包必须先完成与当前配置指纹一致的历史样本回放"
+        elif not replay.dataset_snapshot_id or not replay.dataset_snapshot_hash:
+            message = "发布前回放必须绑定不可变历史数据集快照"
+        else:
+            snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, replay.dataset_snapshot_id)
+            if snapshot is None:
+                message = "发布前回放引用的历史数据集快照不存在"
+            elif snapshot.content_hash != replay.dataset_snapshot_hash:
+                message = "发布前回放引用的历史数据集快照已变化"
+            elif snapshot.content_hash != RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot):
+                message = "历史数据集快照内容哈希不一致"
+        if not message and replay.evidence_hash != self._replay_evidence_hash(replay):
+            message = "发布前回放证据哈希不一致"
+        elif not message and not (replay.gate_json or {}).get("passed"):
+            message = f"发布前回放门禁未通过：{(replay.gate_json or {}).get('summary', '')}"
+        if message:
+            if concurrent:
+                raise ConcurrentUpdateError(message)
+            raise ValueError(message)
+
+    @staticmethod
+    def _empty_matrix(labels: list[str]) -> dict[str, dict[str, int]]:
+        return {before: {after: 0 for after in labels} for before in labels}
+
+    @staticmethod
+    def _admission(result: dict | None) -> str:
+        if not result or not result.get("ok"):
+            return "error"
+        explicit = result.get("final_admission")
+        if explicit in {"approve", "manual_review", "reject"}:
+            return str(explicit)
+        access = str(result.get("access_strategy", ""))
+        if access in {"禁入", "不建议准入"}:
+            return "reject"
+        if result.get("review_required") or access in {"人工复核", "限制准入", "审慎准入"}:
+            return "manual_review"
+        return "approve"
+
+    @staticmethod
+    def _hit_codes(result: dict | None, context: dict) -> list[str]:
+        codes = set()
+        for item in (result or {}).get("strong_rule_hits", []) or []:
+            code = (item.get("code") or item.get("id")) if isinstance(item, dict) else None
+            if code:
+                codes.add(str(code))
+        for stage in context.get("pipeline_trace", {}).get("stages", []) or []:
+            for item in stage.get("output", {}).get("triggered_rules", []) or []:
+                if item.get("code"):
+                    codes.add(str(item["code"]))
+        return sorted(codes)
+
+    @staticmethod
+    def _decision_summary(result: dict | None, admission: str, hit_codes: list[str]) -> dict:
+        return {
+            "ok": bool(result and result.get("ok")),
+            "score": (result or {}).get("total_score"),
+            "rating": (result or {}).get("rating"),
+            "access_strategy": (result or {}).get("access_strategy"),
+            "admission": admission,
+            "rule_hits": hit_codes,
+            "error": (result or {}).get("error"),
+        }
+
+    @staticmethod
+    def _hit_rates(counts: dict[str, int], sample_count: int) -> list[dict]:
+        return [
+            {"code": code, "hit_count": count, "hit_rate": round(count / sample_count, 6)}
+            for code, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+
+    @staticmethod
+    def _replay_evidence_hash(record: RuleCenterReplayRun) -> str:
+        return content_hash({
+            "package_id": record.package_id,
+            "package_config_hash": record.package_config_hash,
+            "dataset_snapshot_id": record.dataset_snapshot_id,
+            "dataset_snapshot_hash": record.dataset_snapshot_hash,
+            "model_key": record.model_key,
+            "model_version": record.model_version,
+            "pipeline_code": record.pipeline_code,
+            "sample_ids": [item.get("counterparty_id") for item in record.details_json or []],
+            "thresholds": record.thresholds_json,
+            "metrics": record.metrics_json,
+            "details": record.details_json,
+            "gate": record.gate_json,
+        })
+
+    @staticmethod
+    def _replay_to_dict(record: RuleCenterReplayRun) -> dict:
+        return {
+            "id": record.id, "package_id": record.package_id,
+            "package_config_hash": record.package_config_hash,
+            "dataset_snapshot_id": record.dataset_snapshot_id,
+            "dataset_snapshot_hash": record.dataset_snapshot_hash,
+            "model_key": record.model_key, "model_version": record.model_version,
+            "pipeline_code": record.pipeline_code, "sample_source": record.sample_source,
+            "sample_count": record.sample_count, "status": record.status,
+            "thresholds": deepcopy(record.thresholds_json),
+            "metrics": deepcopy(record.metrics_json), "details": deepcopy(record.details_json),
+            "gate": deepcopy(record.gate_json), "evidence_hash": record.evidence_hash,
+            "created_by": record.created_by, "created_by_name": record.created_by_name,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+
+    def _package_changes(
+        self, package_id: str, allowed_statuses: set[str]
+    ) -> list[ModelChangeRecord]:
+        member_ids = list(
+            self.session.scalars(
+                select(RuleCenterReleasePackageMember.change_id)
+                .where(RuleCenterReleasePackageMember.package_id == package_id)
+                .order_by(RuleCenterReleasePackageMember.sequence)
+            ).all()
+        )
+        return self._changes(member_ids, allowed_statuses)
+
+    def _active(self, asset_type: str, code: str):
+        model = self._models[asset_type]
+        return self.session.scalars(
+            select(model).where(model.code == code, model.is_active.is_(True))
+        ).first()
+
+    def _repository(self, asset_type: str):
+        if asset_type == "rule":
+            return RuleDefinitionRepository(self.session)
+        if asset_type == "rule_set":
+            return RuleSetDefinitionRepository(self.session)
+        return DecisionPipelineRepository(self.session)
+
+    def _ordered(self, changes: list[ModelChangeRecord]) -> list[ModelChangeRecord]:
+        return sorted(
+            changes,
+            key=lambda row: (self._asset_order[row.entity_type], row.template_key),
+        )
+
+    def _versioned_package(
+        self, package_id: str, expected_row_version: int
+    ) -> RuleCenterReleasePackage:
+        package = self.session.get(RuleCenterReleasePackage, package_id)
+        if package is None:
+            raise LookupError("规则中心发布包不存在")
+        if package.row_version != expected_row_version:
+            raise ConcurrentUpdateError(
+                f"发布包版本已变化，当前版本为 {package.row_version}"
+            )
+        return package
+
+    def _commit_package(
+        self,
+        package: RuleCenterReleasePackage,
+        event_type: str,
+        actor_name: str,
+        payload: dict,
+    ) -> dict:
+        try:
+            self.session.flush()
+            self.audit.append(
+                "rule_center_release_package",
+                package.id,
+                event_type,
+                actor_name,
+                payload,
+            )
+            self.session.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("规则中心发布包发生并发冲突，请刷新后重试") from exc
+        self.session.refresh(package)
+        return self._package_to_dict(package)
+
+    def _package_to_dict(self, package: RuleCenterReleasePackage) -> dict:
+        members = self.session.scalars(
+            select(RuleCenterReleasePackageMember)
+            .where(RuleCenterReleasePackageMember.package_id == package.id)
+            .order_by(RuleCenterReleasePackageMember.sequence)
+        ).all()
+        latest_replay = self.session.scalars(
+            select(RuleCenterReplayRun)
+            .where(RuleCenterReplayRun.package_id == package.id)
+            .order_by(RuleCenterReplayRun.created_at.desc(), RuleCenterReplayRun.id.desc())
+        ).first()
+        return {
+            "id": package.id,
+            "name": package.name,
+            "change_reason": package.change_reason,
+            "status": package.status,
+            "config_hash": package.config_hash,
+            "dependency_snapshot": deepcopy(package.dependency_snapshot_json),
+            "impact": deepcopy(package.impact_json),
+            "members": [
+                {
+                    "id": item.id,
+                    "change_id": item.change_id,
+                    "asset_type": item.asset_type,
+                    "code": item.code,
+                    "candidate_version": item.candidate_version,
+                    "sequence": item.sequence,
+                }
+                for item in members
+            ],
+            "latest_replay": self._replay_to_dict(latest_replay) if latest_replay else None,
+            "created_by": package.created_by,
+            "created_by_name": package.created_by_name,
+            "submitted_at": package.submitted_at.isoformat() if package.submitted_at else None,
+            "reviewed_by": package.reviewed_by,
+            "reviewed_by_name": package.reviewed_by_name,
+            "reviewed_at": package.reviewed_at.isoformat() if package.reviewed_at else None,
+            "review_comment": package.review_comment,
+            "published_at": package.published_at.isoformat() if package.published_at else None,
+            "row_version": package.row_version,
+            "created_at": package.created_at.isoformat() if package.created_at else None,
+            "updated_at": package.updated_at.isoformat() if package.updated_at else None,
+        }

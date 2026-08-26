@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -94,6 +94,18 @@ class ModelChangeRecord(Base):
     __tablename__ = "model_changes"
     __table_args__ = (
         Index("ix_model_changes_template_status_created", "template_key", "status", "created_at"),
+        Index(
+            "uq_rule_center_change_one_scheduled",
+            "entity_type",
+            "template_key",
+            unique=True,
+            sqlite_where=text(
+                "status = 'scheduled' AND entity_type IN ('rule', 'rule_set', 'pipeline')"
+            ),
+            postgresql_where=text(
+                "status = 'scheduled' AND entity_type IN ('rule', 'rule_set', 'pipeline')"
+            ),
+        ),
         UniqueConstraint(
             "entity_type",
             "template_key",
@@ -119,6 +131,7 @@ class ModelChangeRecord(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     entity_type: Mapped[str] = mapped_column(
         String(32), default="model", server_default="model", index=True
     )
@@ -127,6 +140,145 @@ class ModelChangeRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __mapper_args__ = {"version_id_col": row_version}
+
+
+class RuleCenterReleasePackage(Base):
+    __tablename__ = "rule_center_release_packages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(256))
+    change_reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    dependency_snapshot_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    impact_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class RuleCenterReleasePackageMember(Base):
+    __tablename__ = "rule_center_release_package_members"
+    __table_args__ = (
+        UniqueConstraint("package_id", "change_id", name="uq_rule_center_package_change"),
+        UniqueConstraint("package_id", "asset_type", "code", name="uq_rule_center_package_asset"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_id: Mapped[str] = mapped_column(ForeignKey("rule_center_release_packages.id", ondelete="CASCADE"), index=True)
+    change_id: Mapped[str] = mapped_column(ForeignKey("model_changes.id", ondelete="RESTRICT"), index=True)
+    asset_type: Mapped[str] = mapped_column(String(32), index=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    candidate_version: Mapped[str] = mapped_column(String(128))
+    sequence: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RuleCenterReplayDataset(Base):
+    __tablename__ = "rule_center_replay_datasets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RuleCenterReplayDatasetSnapshot(Base):
+    __tablename__ = "rule_center_replay_dataset_snapshots"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "version", name="uq_rule_center_replay_dataset_version"),
+        UniqueConstraint("dataset_id", "source_hash", name="uq_rule_center_replay_dataset_source"),
+        Index("ix_rule_center_replay_snapshot_dataset_created", "dataset_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("rule_center_replay_datasets.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    source_name: Mapped[str] = mapped_column(String(256))
+    schema_version: Mapped[str] = mapped_column(String(64))
+    as_of_date: Mapped[date] = mapped_column(Date, index=True)
+    evidence_reference: Mapped[str] = mapped_column(Text)
+    data_classification: Mapped[str] = mapped_column(String(32))
+    field_mapping_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    label_field: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    observed_at_field: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer)
+    samples_json: Mapped[list] = mapped_column(JSON, default=list)
+    coverage_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RuleCenterReplayRun(Base):
+    __tablename__ = "rule_center_replay_runs"
+    __table_args__ = (
+        Index("ix_rule_center_replay_package_created", "package_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_id: Mapped[str] = mapped_column(ForeignKey("rule_center_release_packages.id", ondelete="CASCADE"), index=True)
+    package_config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    dataset_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), nullable=True, index=True)
+    dataset_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    model_key: Mapped[str] = mapped_column(String(64), index=True)
+    model_version: Mapped[str] = mapped_column(String(128))
+    pipeline_code: Mapped[str] = mapped_column(String(128), index=True)
+    sample_source: Mapped[str] = mapped_column(String(64), default="demo_counterparties")
+    sample_count: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="completed", index=True)
+    thresholds_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    details_json: Mapped[list] = mapped_column(JSON, default=list)
+    gate_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    evidence_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RuleCenterReplayComparisonRun(Base):
+    __tablename__ = "rule_center_replay_comparison_runs"
+    __table_args__ = (
+        Index("ix_rule_center_replay_comparison_snapshot_created", "dataset_snapshot_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    dataset_snapshot_id: Mapped[str] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), index=True)
+    dataset_snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    champion_model_key: Mapped[str] = mapped_column(String(64), index=True)
+    champion_model_version: Mapped[str] = mapped_column(String(128))
+    challenger_model_key: Mapped[str] = mapped_column(String(64), index=True)
+    challenger_model_version: Mapped[str] = mapped_column(String(128))
+    champion_pipeline_code: Mapped[str] = mapped_column(String(128))
+    champion_pipeline_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    challenger_pipeline_code: Mapped[str] = mapped_column(String(128))
+    challenger_pipeline_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    segment_field: Mapped[str] = mapped_column(String(256))
+    evidence_level: Mapped[str] = mapped_column(String(32), index=True)
+    config_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    details_json: Mapped[list] = mapped_column(JSON, default=list)
+    evidence_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class ModelReleaseRecord(Base):
@@ -969,6 +1121,114 @@ class IndicatorDefinition(Base):
     default_weight: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=1.0)
     source_references: Mapped[list | None] = mapped_column(JSON, nullable=True)
     seed_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class RuleDefinition(Base):
+    __tablename__ = "rule_definitions"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_rule_code_version"),
+        Index(
+            "uq_rule_single_active",
+            "code",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    rule_type: Mapped[str] = mapped_column(String(32), index=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    conditions_json: Mapped[dict] = mapped_column(JSON)
+    condition_relation: Mapped[str] = mapped_column(String(8), default="all")
+    actions_json: Mapped[dict] = mapped_column(JSON)
+    priority: Mapped[int] = mapped_column(Integer, default=999)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class RuleSetDefinition(Base):
+    __tablename__ = "rule_set_definitions"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_rule_set_code_version"),
+        Index(
+            "uq_rule_set_single_active",
+            "code",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    rule_codes: Mapped[list] = mapped_column(JSON)
+    evaluation_strategy: Mapped[str] = mapped_column(
+        String(32), default="most_restrictive"
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class DecisionPipelineDefinition(Base):
+    __tablename__ = "decision_pipeline_definitions"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_pipeline_code_version"),
+        Index(
+            "uq_pipeline_single_active",
+            "code",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    stages_json: Mapped[list] = mapped_column(JSON)
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(16), default="draft")
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

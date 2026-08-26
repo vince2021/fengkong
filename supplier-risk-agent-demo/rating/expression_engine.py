@@ -29,6 +29,9 @@ SAFE_FUNCTIONS = {
     "clamp": lambda v, lo, hi: max(lo, min(v, hi)),
     "sum": sum,
     "len": len,
+    "contains": lambda container, item: (
+        item in container if isinstance(container, (list, tuple, str)) else False
+    ),
 }
 
 
@@ -42,7 +45,7 @@ class ExpressionSyntaxError(Exception):
 
 _ALLOWED_NODES = (
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Compare, ast.BoolOp,
-    ast.Name, ast.Constant, ast.Load, ast.Call,
+    ast.Name, ast.Constant, ast.List, ast.Tuple, ast.Load, ast.Call,
     ast.And, ast.Or, ast.Not,
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
     ast.UAdd, ast.USub,
@@ -66,6 +69,10 @@ def _eval_node(node: ast.AST, context: dict) -> object:
         return _eval_node(node.body, context)
     if isinstance(node, ast.Constant):
         return node.value
+    if isinstance(node, ast.List):
+        return [_eval_node(element, context) for element in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_eval_node(element, context) for element in node.elts)
     if isinstance(node, ast.Name):
         if node.id in SAFE_FUNCTIONS:
             return SAFE_FUNCTIONS[node.id]
