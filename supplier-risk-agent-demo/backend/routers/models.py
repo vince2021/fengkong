@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.dependencies import get_demo_repository, get_enterprise_data_repository, get_enterprise_indicator_observation_repository, get_model_governance_repository, get_portfolio_rating_batch_repository, get_rating_run_repository
@@ -98,6 +100,7 @@ def get_model(
         "editable_indicators": get_editable_indicators(config),
         "indicator_selection": build_model_indicator_details(config),
         "risk_screening_policy": get_risk_screening_policy(config),
+        "scorecard_binding": deepcopy(config.get("scorecard_binding")),
         "change_reason": config.get("change_reason", "继承基础模型配置"),
     }
 

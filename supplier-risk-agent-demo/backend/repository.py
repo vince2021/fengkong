@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionPipelineDefinition, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, RuleCenterReleasePackage, RuleCenterReleasePackageMember, RuleCenterReplayComparisonRun, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot, RuleCenterReplayRun, RuleDefinition, RuleSetDefinition, SlaScanLeaseRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditCalibrationPlan, CreditCalibrationRun, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionPipelineDefinition, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, RuleCenterReleasePackage, RuleCenterReleasePackageMember, RuleCenterReplayComparisonException, RuleCenterReplayComparisonRun, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot, RuleCenterReplayRun, RuleDefinition, RuleSetDefinition, ScorecardDevelopmentRun, ScorecardValidationPolicy, SlaScanLeaseRecord
 from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
 from backend.security import APPROVAL_STAGE_ROLES
@@ -561,17 +561,19 @@ class _ModelGovernanceRepositoryBase:
         )
         if template_key:
             statement = statement.where(ModelChangeRecord.template_key == template_key)
-        return [_model_change_to_dict(record) for record in self.session.scalars(statement).all()]
+        return [self._change_to_dict(record) for record in self.session.scalars(statement).all()]
 
     def get_change(self, change_id: str) -> dict | None:
         record = self.session.get(ModelChangeRecord, change_id)
         return (
-            _model_change_to_dict(record)
+            self._change_to_dict(record)
             if record and record.entity_type == "model"
             else None
         )
 
     def create_change(self, payload: dict, actor_subject: str, actor_name: str) -> dict:
+        scorecard_evidence = deepcopy(payload.get("scorecard_validation_evidence") or {})
+        calibration_evidence = deepcopy(payload.get("calibration_evidence") or {})
         record = ModelChangeRecord(
             id=str(uuid4()),
             template_key=payload["template_key"],
@@ -580,6 +582,12 @@ class _ModelGovernanceRepositoryBase:
             config_json=deepcopy(payload["config"]),
             validation_json=deepcopy(payload["validation"]),
             impact_json=deepcopy(payload["impact"]),
+            scorecard_validation_run_id=scorecard_evidence.get("validation_run_id"),
+            scorecard_validation_evidence_json=scorecard_evidence,
+            scorecard_validation_binding_hash=content_hash(scorecard_evidence) if scorecard_evidence else None,
+            calibration_snapshot_id=calibration_evidence.get("dataset_snapshot_id"),
+            calibration_evidence_json=calibration_evidence,
+            calibration_evidence_binding_hash=content_hash(calibration_evidence) if calibration_evidence else None,
             change_reason=payload["change_reason"],
             created_by=actor_subject,
             created_by_name=actor_name,
@@ -588,13 +596,45 @@ class _ModelGovernanceRepositoryBase:
         self.session.add(record)
         try:
             self.session.flush()
-            self.audit.append("model_change", record.id, "model_change_created", actor_name, {"template_key": record.template_key, "base_version": record.base_version, "candidate_version": record.candidate_version, "config_hash": record.validation_json["config_hash"]})
+            self.audit.append("model_change", record.id, "model_change_created", actor_name, {"template_key": record.template_key, "base_version": record.base_version, "candidate_version": record.candidate_version, "config_hash": record.validation_json["config_hash"], "calibration_evidence_hash": calibration_evidence.get("analysis", {}).get("evidence_hash")})
             self.session.commit()
         except IntegrityError as exc:
             self.session.rollback()
             raise ValueError("同一模型下候选版本不能重复") from exc
         self.session.refresh(record)
-        return _model_change_to_dict(record)
+        return self._change_to_dict(record)
+
+    def _change_to_dict(self, record: ModelChangeRecord) -> dict:
+        result = _model_change_to_dict(record)
+        binding = result.get("comparison_evidence") or {}
+        comparison_run_id = binding.get("comparison_run_id")
+        if comparison_run_id:
+            try:
+                comparison_repository = RuleCenterReplayComparisonRepository(self.session)
+                comparison = comparison_repository._to_dict(
+                    comparison_repository._verified_comparison(comparison_run_id)
+                )
+                binding["current_effective_status"] = comparison["effective_status"]
+                binding["current_gate"] = comparison["gate"]
+                binding["latest_exception"] = comparison["latest_exception"]
+            except Exception as exc:
+                binding["current_effective_status"] = "invalid"
+                binding["current_error"] = str(exc)
+        if result["config"].get("scorecard_binding"):
+            try:
+                self._assert_scorecard_validation_evidence(record)
+                result["scorecard_validation_evidence"]["current_valid"] = True
+            except Exception as exc:
+                result["scorecard_validation_evidence"]["current_valid"] = False
+                result["scorecard_validation_evidence"]["current_error"] = str(exc)
+        if result.get("calibration_evidence"):
+            try:
+                self._assert_calibration_evidence(record)
+                result["calibration_evidence"]["current_valid"] = True
+            except Exception as exc:
+                result["calibration_evidence"]["current_valid"] = False
+                result["calibration_evidence"]["current_error"] = str(exc)
+        return result
 
 
 class ModelMonitoringRepository:
@@ -1074,6 +1114,14 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         record.config_json = deepcopy(payload["config"])
         record.validation_json = deepcopy(payload["validation"])
         record.impact_json = deepcopy(payload["impact"])
+        record.comparison_evidence_json = {}
+        scorecard_evidence = deepcopy(payload.get("scorecard_validation_evidence") or {})
+        record.scorecard_validation_run_id = scorecard_evidence.get("validation_run_id")
+        record.scorecard_validation_evidence_json = scorecard_evidence
+        record.scorecard_validation_binding_hash = content_hash(scorecard_evidence) if scorecard_evidence else None
+        record.calibration_snapshot_id = None
+        record.calibration_evidence_json = {}
+        record.calibration_evidence_binding_hash = None
         record.change_reason = payload["change_reason"]
         return self._commit_change(record, "model_change_updated", actor_name, {"candidate_version": record.candidate_version, "config_hash": record.validation_json["config_hash"]})
 
@@ -1094,6 +1142,9 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             raise ValueError("缺少模型验证快照，请重新保存治理草稿")
         if not model_risk.get("release_gate", {}).get("passed"):
             raise ValueError(f"模型验证发布门槛未通过：{model_risk['release_gate'].get('summary', '请补充验证样本')}")
+        self._assert_scorecard_validation_evidence(record)
+        self._assert_comparison_evidence(record)
+        self._assert_calibration_evidence(record)
         record.status = "pending_review"
         record.submitted_at = datetime.now(timezone.utc)
         return self._commit_change(record, "model_change_submitted", actor_name, {"candidate_version": record.candidate_version})
@@ -1122,6 +1173,9 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             raise ValueError("缺少模型验证快照，请退回并重新保存治理草稿")
         if not model_risk.get("release_gate", {}).get("passed"):
             raise ValueError(f"模型验证发布门槛未通过：{model_risk['release_gate'].get('summary', '请补充验证样本')}")
+        self._assert_scorecard_validation_evidence(record)
+        self._assert_comparison_evidence(record)
+        self._assert_calibration_evidence(record)
 
         current = self.get_config(demo_repository, record.template_key)
         if not current or current.get("version") != record.base_version:
@@ -1160,9 +1214,177 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             self.session.rollback()
             raise ConcurrentUpdateError("模型发布发生并发冲突，请刷新后重试") from exc
         self.session.refresh(record)
-        result = _model_change_to_dict(record)
+        result = self._change_to_dict(record)
         result["release_id"] = release.id
         return result
+
+    def run_and_bind_comparison_evidence(
+        self, change_id: str, expected_row_version: int, payload: dict,
+        demo_repository: DemoRepository, actor_subject: str, actor_name: str,
+        allow_admin: bool = False,
+    ) -> dict:
+        record = self.session.get(ModelChangeRecord, change_id)
+        if not record or record.entity_type != "model":
+            raise LookupError("模型变更单不存在")
+        if record.row_version != expected_row_version:
+            raise ConcurrentUpdateError(f"模型变更单版本已变化，当前版本为 {record.row_version}")
+        if record.status != "draft":
+            raise ValueError("只有草稿状态可以运行并绑定比较证据")
+        if record.created_by != actor_subject and not allow_admin:
+            raise PermissionError("只有变更单创建人可以绑定比较证据")
+        comparison_payload = {
+            key: deepcopy(value)
+            for key, value in payload.items()
+            if key not in {"expected_row_version", "evidence_valid_days"}
+        }
+        comparison_payload.update({
+            "champion_model_key": record.template_key,
+            "challenger_model_key": record.template_key,
+            "challenger_change_id": record.id,
+        })
+        comparison = RuleCenterReplayComparisonRepository(self.session).run(
+            comparison_payload, demo_repository, self, actor_subject, actor_name
+        )
+        self.session.refresh(record)
+        if record.row_version != expected_row_version or record.status != "draft":
+            raise ConcurrentUpdateError("比较运行期间模型变更单已变化，请重新运行")
+        valid_until = date.today() + timedelta(days=payload["evidence_valid_days"])
+        binding = {
+            "comparison_run_id": comparison["id"],
+            "comparison_evidence_hash": comparison["evidence_hash"],
+            "dataset_snapshot_id": comparison["dataset_snapshot_id"],
+            "dataset_snapshot_hash": comparison["dataset_snapshot_hash"],
+            "champion_model_key": comparison["champion_model_key"],
+            "champion_model_version": comparison["champion_model_version"],
+            "challenger_model_key": comparison["challenger_model_key"],
+            "challenger_model_version": comparison["challenger_model_version"],
+            "challenger_config_hash": comparison["challenger_config_hash"],
+            "gate": deepcopy(comparison["gate"]),
+            "effective_status": comparison["effective_status"],
+            "evidence_level": comparison["evidence_level"],
+            "valid_until": valid_until.isoformat(),
+            "bound_at": datetime.now(timezone.utc).isoformat(),
+            "bound_by": actor_subject,
+            "bound_by_name": actor_name,
+        }
+        binding["binding_hash"] = content_hash(binding)
+        record.comparison_evidence_json = binding
+        return self._commit_change(
+            record, "model_change_comparison_evidence_bound", actor_name,
+            {"comparison_run_id": comparison["id"], "evidence_hash": comparison["evidence_hash"], "binding_hash": binding["binding_hash"], "valid_until": binding["valid_until"]},
+        )
+
+    def _assert_comparison_evidence(self, record: ModelChangeRecord) -> dict:
+        binding = deepcopy(record.comparison_evidence_json or {})
+        if not binding:
+            raise ValueError("缺少 Champion/Challenger 比较证据，请先运行候选比较")
+        binding_hash = binding.pop("binding_hash", None)
+        if not binding_hash or content_hash(binding) != binding_hash:
+            raise ValueError("模型变更单比较证据绑定哈希不一致")
+        try:
+            valid_until = date.fromisoformat(str(binding["valid_until"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("模型变更单比较证据有效期无效") from exc
+        if valid_until < date.today():
+            raise ValueError("模型变更单比较证据已过期，请重新运行")
+        comparison_repository = RuleCenterReplayComparisonRepository(self.session)
+        comparison_record = comparison_repository._verified_comparison(str(binding.get("comparison_run_id") or ""))
+        comparison = comparison_repository._to_dict(comparison_record)
+        candidate_hash = content_hash(record.config_json)
+        expected = {
+            "comparison_evidence_hash": comparison_record.evidence_hash,
+            "dataset_snapshot_id": comparison_record.dataset_snapshot_id,
+            "dataset_snapshot_hash": comparison_record.dataset_snapshot_hash,
+            "champion_model_key": record.template_key,
+            "champion_model_version": record.base_version,
+            "challenger_model_key": record.template_key,
+            "challenger_model_version": record.candidate_version,
+            "challenger_config_hash": candidate_hash,
+        }
+        for key, expected_value in expected.items():
+            if binding.get(key) != expected_value:
+                raise ValueError(f"模型变更单比较证据与当前候选不一致：{key}")
+        if comparison_record.challenger_change_id != record.id:
+            raise ValueError("比较证据未绑定当前模型变更单")
+        if comparison_record.challenger_config_hash != candidate_hash:
+            raise ValueError("比较运行中的 Challenger 配置哈希已失效")
+        if comparison["effective_status"] not in {"passed", "exception_approved"}:
+            raise ValueError(f"Champion/Challenger 比较证据不可发布：{comparison['gate']['summary']}")
+        return comparison
+
+    def _assert_scorecard_validation_evidence(self, record: ModelChangeRecord) -> dict | None:
+        scorecard_binding = record.config_json.get("scorecard_binding")
+        evidence = deepcopy(record.scorecard_validation_evidence_json or {})
+        if not scorecard_binding:
+            if record.scorecard_validation_run_id or evidence or record.scorecard_validation_binding_hash:
+                raise ValueError("未绑定评分卡的模型候选不能携带评分卡开发验证证据")
+            return None
+        if not evidence or not record.scorecard_validation_run_id:
+            raise ValueError("缺少已批准的评分卡开发验证证据")
+        if not record.scorecard_validation_binding_hash or content_hash(evidence) != record.scorecard_validation_binding_hash:
+            raise ValueError("评分卡开发验证证据绑定哈希不一致")
+        if evidence.get("validation_run_id") != record.scorecard_validation_run_id:
+            raise ValueError("评分卡开发验证运行引用不一致")
+        from backend.scorecard_repository import ScorecardRepository
+
+        current = ScorecardRepository(self.session).approved_validation_evidence(
+            record.scorecard_validation_run_id, scorecard_binding
+        )
+        for key, expected in current.items():
+            if evidence.get(key) != expected:
+                raise ValueError(f"评分卡开发验证证据与当前固定记录不一致：{key}")
+        return current
+
+    def _assert_calibration_evidence(self, record: ModelChangeRecord) -> dict | None:
+        evidence = deepcopy(record.calibration_evidence_json or {})
+        if not evidence:
+            if record.calibration_snapshot_id or record.calibration_evidence_binding_hash:
+                raise ValueError("模型变更单校准证据字段不完整")
+            return None
+        if not record.calibration_snapshot_id or not record.calibration_evidence_binding_hash:
+            raise ValueError("模型变更单校准证据字段不完整")
+        if content_hash(evidence) != record.calibration_evidence_binding_hash:
+            raise ValueError("模型变更单校准证据绑定哈希不一致")
+        analysis = deepcopy(evidence.get("analysis") or {})
+        analysis_hash = analysis.pop("evidence_hash", None)
+        analysis.pop("generated_at", None)
+        if not analysis_hash or content_hash(analysis) != analysis_hash:
+            raise ValueError("模型变更单校准分析证据哈希不一致")
+        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, record.calibration_snapshot_id)
+        if snapshot is None:
+            raise ValueError("模型变更单引用的校准快照不存在")
+        if RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot) != snapshot.content_hash:
+            raise ValueError("模型变更单引用的校准快照内容哈希校验失败")
+        expected = {
+            "dataset_snapshot_id": record.calibration_snapshot_id,
+            "dataset_snapshot_hash": snapshot.content_hash,
+            "template_key": record.template_key,
+            "base_model_version": record.base_version,
+            "candidate_config_hash": content_hash(record.config_json),
+        }
+        for key, expected_value in expected.items():
+            if evidence.get(key) != expected_value:
+                raise ValueError(f"模型变更单校准证据与当前候选不一致：{key}")
+        if evidence.get("analysis", {}).get("model", {}).get("baseline_config_hash") != evidence.get("baseline_config_hash"):
+            raise ValueError("模型变更单校准基线配置哈希不一致")
+        if evidence.get("schema_version") == "credit-calibration-evidence-v2":
+            plan = self.session.get(CreditCalibrationPlan, evidence.get("plan_id"))
+            run = self.session.get(CreditCalibrationRun, evidence.get("calibration_run_id"))
+            if plan is None or run is None or run.plan_id != plan.id:
+                raise ValueError("模型变更单引用的校准方案或运行不存在")
+            plan_expected = {
+                "plan_code": plan.code, "plan_version": plan.version, "plan_config_hash": plan.config_hash,
+                "plan_reviewed_by": plan.reviewed_by, "dataset_snapshot_id": run.dataset_snapshot_id,
+                "dataset_snapshot_hash": run.dataset_snapshot_hash,
+            }
+            for key, expected_value in plan_expected.items():
+                if evidence.get(key) != expected_value:
+                    raise ValueError(f"模型变更单校准方案证据不一致：{key}")
+            if plan.status != "approved" or not plan.reviewed_by or plan.reviewed_by == plan.created_by:
+                raise ValueError("模型变更单引用的校准方案未通过有效独立复核")
+            if run.plan_config_hash != plan.config_hash or run.evidence_hash != analysis_hash:
+                raise ValueError("模型变更单引用的校准运行已失效")
+        return evidence
 
     def list_releases(self, template_key: str | None = None) -> list[dict]:
         statement = select(ModelReleaseRecord).order_by(ModelReleaseRecord.published_at.desc(), ModelReleaseRecord.id.desc())
@@ -1203,7 +1425,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             self.session.rollback()
             raise ConcurrentUpdateError("模型变更单发生并发冲突，请刷新后重试") from exc
         self.session.refresh(record)
-        return _model_change_to_dict(record)
+        return self._change_to_dict(record)
 
 
 class AuditRepository:
@@ -3445,6 +3667,8 @@ def clear_persistent_data(session: Session) -> None:
     session.execute(delete(RatingRunRecord))
     session.execute(delete(ModelSnapshotRecord))
     session.execute(delete(ModelReleaseRecord))
+    session.execute(delete(ScorecardDevelopmentRun))
+    session.execute(delete(ScorecardValidationPolicy))
     session.execute(delete(ModelChangeRecord))
     session.execute(delete(AuthorityPolicyActivationRunRecord))
     session.execute(delete(AuthorityPolicyEvidenceAnchorRecord))
@@ -3899,6 +4123,12 @@ def _money(value: object) -> Decimal:
 
 
 def _model_change_to_dict(record: ModelChangeRecord) -> dict:
+    scorecard_validation_evidence = deepcopy(record.scorecard_validation_evidence_json or {})
+    if scorecard_validation_evidence:
+        scorecard_validation_evidence["binding_hash"] = record.scorecard_validation_binding_hash
+    calibration_evidence = deepcopy(record.calibration_evidence_json or {})
+    if calibration_evidence:
+        calibration_evidence["binding_hash"] = record.calibration_evidence_binding_hash
     return {
         "id": record.id,
         "template_key": record.template_key,
@@ -3908,6 +4138,9 @@ def _model_change_to_dict(record: ModelChangeRecord) -> dict:
         "config": deepcopy(record.config_json),
         "validation": deepcopy(record.validation_json),
         "impact": deepcopy(record.impact_json),
+        "comparison_evidence": deepcopy(record.comparison_evidence_json or {}),
+        "scorecard_validation_evidence": scorecard_validation_evidence,
+        "calibration_evidence": calibration_evidence,
         "change_reason": record.change_reason,
         "created_by": record.created_by,
         "created_by_name": record.created_by_name,
@@ -5076,6 +5309,22 @@ class RuleCenterReplayDatasetRepository:
         ).all()
         return [self._snapshot_to_dict(row) for row in rows]
 
+    def get_snapshot_for_analysis(self, snapshot_id: str) -> dict:
+        record = self.session.get(RuleCenterReplayDatasetSnapshot, snapshot_id)
+        if record is None:
+            raise LookupError("回放数据集快照不存在")
+        if self.snapshot_content_hash(record) != record.content_hash:
+            raise ValueError("回放数据集快照内容哈希校验失败")
+        dataset = self.session.get(RuleCenterReplayDataset, record.dataset_id)
+        if dataset is None:
+            raise LookupError("回放数据集不存在")
+        return {
+            **self._snapshot_to_dict(record),
+            "dataset_code": dataset.code,
+            "dataset_name": dataset.name,
+            "samples": deepcopy(record.samples_json or []),
+        }
+
     def import_snapshot(
         self,
         dataset_id: str,
@@ -5320,6 +5569,19 @@ class RuleCenterReplayComparisonRepository:
         ).all()
         return [self._to_dict(row) for row in rows]
 
+    def list_exceptions(self, comparison_run_id: str) -> list[dict]:
+        if self.session.get(RuleCenterReplayComparisonRun, comparison_run_id) is None:
+            raise LookupError("双模型比较运行不存在")
+        rows = self.session.scalars(
+            select(RuleCenterReplayComparisonException).where(
+                RuleCenterReplayComparisonException.comparison_run_id == comparison_run_id
+            ).order_by(
+                RuleCenterReplayComparisonException.created_at.desc(),
+                RuleCenterReplayComparisonException.id.desc(),
+            )
+        ).all()
+        return [self._exception_to_dict(row) for row in rows]
+
     def run(self, payload: dict, demo_repository: DemoRepository,
             model_repository: ModelGovernanceRepository,
             actor_subject: str, actor_name: str) -> dict:
@@ -5334,8 +5596,25 @@ class RuleCenterReplayComparisonRepository:
         if dataset is None or dataset.status != "active":
             raise ValueError("历史回放数据集不可用")
 
-        champion_config = model_repository.get_config(demo_repository, payload["champion_model_key"])
-        challenger_config = model_repository.get_config(demo_repository, payload["challenger_model_key"])
+        challenger_change = None
+        if payload.get("challenger_change_id"):
+            challenger_change = self.session.get(ModelChangeRecord, payload["challenger_change_id"])
+            if challenger_change is None or challenger_change.entity_type != "model":
+                raise LookupError("Challenger 模型变更单不存在")
+            if challenger_change.status != "draft":
+                raise ValueError("只有草稿模型变更单可以生成候选比较证据")
+            if challenger_change.template_key != payload["challenger_model_key"] or payload["champion_model_key"] != challenger_change.template_key:
+                raise ValueError("Champion、Challenger 与模型变更单模板不一致")
+            if not challenger_change.validation_json.get("valid"):
+                raise ValueError("Challenger 候选配置校验未通过")
+            champion_config = model_repository.get_config(
+                demo_repository, challenger_change.template_key, challenger_change.base_version
+            )
+            challenger_config = _materialize_model_runtime_defaults(deepcopy(challenger_change.config_json))
+            challenger_config["version"] = challenger_change.candidate_version
+        else:
+            champion_config = model_repository.get_config(demo_repository, payload["champion_model_key"])
+            challenger_config = model_repository.get_config(demo_repository, payload["challenger_model_key"])
         if champion_config is None:
             raise LookupError("Champion 模型不存在")
         if challenger_config is None:
@@ -5360,7 +5639,9 @@ class RuleCenterReplayComparisonRepository:
                     result = {"ok": False, "error": str(exc)}
                 if not result or not result.get("ok"):
                     failures[side] += 1
-                outputs[side] = self._result_summary(result)
+                outputs[side] = self._result_summary(
+                    result, self._score_scale(config)
+                )
             details.append({
                 "sample_id": str(sample.get("id", "")),
                 "segment": str(RuleCenterReplayDatasetRepository._path_value(sample, payload["segment_field"]) or "N/A"),
@@ -5381,39 +5662,177 @@ class RuleCenterReplayComparisonRepository:
             "max_execution_failure_rate": payload["max_execution_failure_rate"],
             "positive_labels": payload["positive_labels"],
             "positive_admissions": payload["positive_admissions"],
+            "score_comparison_basis": "standardized_0_100",
+            "score_scales": {
+                "champion": self._score_scale(champion_config),
+                "challenger": self._score_scale(challenger_config),
+            },
+            "thresholds": {
+                "max_psi": payload["max_psi"],
+                "max_rating_change_rate": payload["max_rating_change_rate"],
+                "max_admission_change_rate": payload["max_admission_change_rate"],
+                "max_absolute_average_score_delta": payload["max_absolute_average_score_delta"],
+                "max_segment_absolute_score_delta": payload["max_segment_absolute_score_delta"],
+                "max_ks_drop": payload["max_ks_drop"],
+                "require_labeled_evidence": payload["require_labeled_evidence"],
+            },
         }
         pinned = {
             "champion": {"model_key": payload["champion_model_key"], "model_version": champion_config["version"], "pipeline_code": champion_code, "pipeline_version": champion_pipeline_version},
             "challenger": {"model_key": payload["challenger_model_key"], "model_version": challenger_config["version"], "pipeline_code": challenger_code, "pipeline_version": challenger_pipeline_version},
         }
-        evidence_hash = content_hash({
+        gate = self._gate(metrics, config["thresholds"], evidence_level)
+        evidence_payload = {
             "dataset_snapshot_id": snapshot.id, "dataset_snapshot_hash": snapshot.content_hash,
             **pinned, "segment_field": payload["segment_field"], "evidence_level": evidence_level,
-            "config": config, "metrics": metrics, "details": details,
-        })
+            "config": config, "metrics": metrics, "details": details, "gate": gate,
+        }
+        challenger_config_hash = content_hash(challenger_change.config_json) if challenger_change else None
+        if challenger_change:
+            evidence_payload.update({
+                "challenger_change_id": challenger_change.id,
+                "challenger_config_hash": challenger_config_hash,
+            })
+        evidence_hash = content_hash(evidence_payload)
         record = RuleCenterReplayComparisonRun(
             id=str(uuid4()), dataset_snapshot_id=snapshot.id, dataset_snapshot_hash=snapshot.content_hash,
             champion_model_key=payload["champion_model_key"], champion_model_version=str(champion_config["version"]),
             challenger_model_key=payload["challenger_model_key"], challenger_model_version=str(challenger_config["version"]),
+            challenger_change_id=challenger_change.id if challenger_change else None,
+            challenger_config_hash=challenger_config_hash,
             champion_pipeline_code=champion_code, champion_pipeline_version=champion_pipeline_version,
             challenger_pipeline_code=challenger_code, challenger_pipeline_version=challenger_pipeline_version,
             segment_field=payload["segment_field"], evidence_level=evidence_level,
-            config_json=config, metrics_json=metrics, details_json=details,
+            config_json=config, metrics_json=metrics, details_json=details, gate_json=gate,
             evidence_hash=evidence_hash, created_by=actor_subject, created_by_name=actor_name,
         )
         self.session.add(record)
         self.session.flush()
         self.audit.append(
             "rule_center_replay_comparison", record.id, "rule_center_replay_comparison_completed",
-            actor_name, {"snapshot_id": snapshot.id, "evidence_level": evidence_level, "evidence_hash": evidence_hash},
+            actor_name, {"snapshot_id": snapshot.id, "challenger_change_id": challenger_change.id if challenger_change else None, "evidence_level": evidence_level, "gate_passed": gate["passed"], "evidence_hash": evidence_hash},
         )
         self.session.commit()
         self.session.refresh(record)
         return self._to_dict(record)
 
+    def request_exception(self, comparison_run_id: str, payload: dict,
+                          actor_subject: str, actor_name: str) -> dict:
+        record = self._verified_comparison(comparison_run_id)
+        gate = record.gate_json or {}
+        if gate.get("passed"):
+            raise ValueError("比较门禁已通过，无需申请例外")
+        today = date.today()
+        valid_until = payload["valid_until"]
+        if valid_until <= today:
+            raise ValueError("例外有效期必须晚于今天")
+        if (valid_until - today).days > 180:
+            raise ValueError("例外有效期最长为 180 天")
+        active = self.session.scalars(
+            select(RuleCenterReplayComparisonException).where(
+                RuleCenterReplayComparisonException.comparison_run_id == comparison_run_id,
+                RuleCenterReplayComparisonException.status.in_(("pending_review", "approved")),
+                RuleCenterReplayComparisonException.valid_until >= today,
+            )
+        ).first()
+        if active:
+            raise ValueError("当前比较证据已有待复核或生效中的例外")
+        request_hash = content_hash({
+            "comparison_run_id": record.id, "comparison_evidence_hash": record.evidence_hash,
+            "reason": payload["reason"], "business_impact": payload["business_impact"],
+            "compensating_controls": payload["compensating_controls"], "valid_until": valid_until,
+        })
+        exception = RuleCenterReplayComparisonException(
+            id=str(uuid4()), comparison_run_id=record.id,
+            comparison_evidence_hash=record.evidence_hash, status="pending_review",
+            reason=payload["reason"], business_impact=payload["business_impact"],
+            compensating_controls=payload["compensating_controls"], valid_until=valid_until,
+            request_hash=request_hash, requested_by=actor_subject, requested_by_name=actor_name,
+            row_version=1,
+        )
+        self.session.add(exception)
+        self.session.flush()
+        self.audit.append(
+            "rule_center_replay_comparison_exception", exception.id,
+            "replay_comparison_exception_requested", actor_name,
+            {"comparison_run_id": record.id, "evidence_hash": record.evidence_hash, "valid_until": valid_until.isoformat(), "request_hash": request_hash},
+        )
+        self.session.commit()
+        self.session.refresh(exception)
+        return self._exception_to_dict(exception)
+
+    def review_exception(self, comparison_run_id: str, exception_id: str,
+                         expected_row_version: int, decision: str, comment: str,
+                         reviewer_subject: str, reviewer_name: str) -> dict:
+        record = self._verified_comparison(comparison_run_id)
+        exception = self.session.get(RuleCenterReplayComparisonException, exception_id)
+        if exception is None or exception.comparison_run_id != comparison_run_id:
+            raise LookupError("比较例外申请不存在")
+        if exception.row_version != expected_row_version:
+            raise ConcurrentUpdateError(f"例外申请版本已变化，当前版本为 {exception.row_version}")
+        if exception.status != "pending_review":
+            raise ValueError("只有待复核例外可以审批")
+        if exception.requested_by == reviewer_subject:
+            raise PermissionError("例外申请人与复核人必须分离")
+        if exception.comparison_evidence_hash != record.evidence_hash:
+            raise ValueError("比较证据已变化，例外申请失效")
+        if exception.valid_until <= date.today():
+            raise ValueError("例外申请已过期")
+        exception.status = "approved" if decision == "approve" else "rejected"
+        exception.reviewed_by = reviewer_subject
+        exception.reviewed_by_name = reviewer_name
+        exception.reviewed_at = datetime.now(timezone.utc)
+        exception.review_comment = comment
+        try:
+            self.session.flush()
+            self.audit.append(
+                "rule_center_replay_comparison_exception", exception.id,
+                f"replay_comparison_exception_{exception.status}", reviewer_name,
+                {"comparison_run_id": record.id, "decision": decision, "comment": comment, "evidence_hash": record.evidence_hash},
+            )
+            self.session.commit()
+        except StaleDataError as exc:
+            self.session.rollback()
+            raise ConcurrentUpdateError("例外申请发生并发冲突，请刷新后重试") from exc
+        self.session.refresh(exception)
+        return self._exception_to_dict(exception)
+
+    def _verified_comparison(self, comparison_run_id: str) -> RuleCenterReplayComparisonRun:
+        record = self.session.get(RuleCenterReplayComparisonRun, comparison_run_id)
+        if record is None:
+            raise LookupError("双模型比较运行不存在")
+        if not record.gate_json:
+            raise ValueError("历史比较证据未配置门禁，请使用当前阈值重新运行")
+        if self.comparison_evidence_hash(record) != record.evidence_hash:
+            raise ValueError("双模型比较证据哈希不一致")
+        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, record.dataset_snapshot_id)
+        if snapshot is None or snapshot.content_hash != record.dataset_snapshot_hash:
+            raise ValueError("比较运行引用的快照已变化")
+        if RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot) != snapshot.content_hash:
+            raise ValueError("历史回放数据集快照哈希不一致")
+        return record
+
+    @staticmethod
+    def comparison_evidence_hash(record: RuleCenterReplayComparisonRun) -> str:
+        payload = {
+            "dataset_snapshot_id": record.dataset_snapshot_id,
+            "dataset_snapshot_hash": record.dataset_snapshot_hash,
+            "champion": {"model_key": record.champion_model_key, "model_version": record.champion_model_version, "pipeline_code": record.champion_pipeline_code, "pipeline_version": record.champion_pipeline_version},
+            "challenger": {"model_key": record.challenger_model_key, "model_version": record.challenger_model_version, "pipeline_code": record.challenger_pipeline_code, "pipeline_version": record.challenger_pipeline_version},
+            "segment_field": record.segment_field, "evidence_level": record.evidence_level,
+            "config": record.config_json, "metrics": record.metrics_json,
+            "details": record.details_json, "gate": record.gate_json,
+        }
+        if record.challenger_change_id:
+            payload.update({
+                "challenger_change_id": record.challenger_change_id,
+                "challenger_config_hash": record.challenger_config_hash,
+            })
+        return content_hash(payload)
+
     def _pin_pipeline(self, config: dict, override: str | None) -> tuple[str, int | None]:
         code = str(override or config.get("decision_pipeline_code") or "").strip().upper()
-        if not code:
+        if not code or code == "LEGACY-SCORECARD":
             return "LEGACY-SCORECARD", None
         pipeline = self.session.scalars(
             select(DecisionPipelineDefinition).where(
@@ -5426,12 +5845,54 @@ class RuleCenterReplayComparisonRepository:
         return code, pipeline.version
 
     @staticmethod
-    def _result_summary(result: dict | None) -> dict:
+    def _score_scale(config: dict) -> dict:
+        binding_scale = (
+            (config.get("scorecard_binding") or {}).get("config") or {}
+        ).get("score_scale")
+        configured = binding_scale or config.get("score_scale") or {}
+        minimum = configured.get("min", 0)
+        maximum = configured.get("max", 100)
+        try:
+            minimum = float(minimum)
+            maximum = float(maximum)
+        except (TypeError, ValueError):
+            minimum, maximum = 0.0, 100.0
+        if maximum <= minimum:
+            minimum, maximum = 0.0, 100.0
+        return {
+            "min": minimum,
+            "max": maximum,
+            "higher_is_better": bool(configured.get("higher_is_better", True)),
+            "standard_min": 0,
+            "standard_max": 100,
+        }
+
+    @staticmethod
+    def _standardize_score(score: float, scale: dict) -> float:
+        value = (score - scale["min"]) / (scale["max"] - scale["min"]) * 100
+        value = max(0.0, min(100.0, value))
+        if not scale["higher_is_better"]:
+            value = 100 - value
+        return round(value, 6)
+
+    @classmethod
+    def _result_summary(cls, result: dict | None, scale: dict) -> dict:
         result = result or {}
         score = result.get("total_score")
+        numeric_score = round(float(score), 6) if isinstance(score, (int, float)) else None
+        execution = result.get("scorecard_execution") or {}
+        explicit_standard = execution.get("normalized_score")
+        standard_score = (
+            round(float(explicit_standard), 6)
+            if isinstance(explicit_standard, (int, float))
+            else cls._standardize_score(numeric_score, scale) if numeric_score is not None else None
+        )
+        scaled_score = execution.get("scaled_score")
         return {
             "ok": bool(result.get("ok")),
-            "score": round(float(score), 6) if isinstance(score, (int, float)) else None,
+            "score": numeric_score,
+            "standard_score": standard_score,
+            "business_score": round(float(scaled_score), 6) if isinstance(scaled_score, (int, float)) else numeric_score,
             "rating": str(result.get("rating") or "N/A"),
             "admission": str(result.get("access_strategy") or "error"),
             "error": None if result.get("ok") else str(result.get("error") or "执行失败"),
@@ -5442,8 +5903,8 @@ class RuleCenterReplayComparisonRepository:
         count = len(details)
         champion = cls._side_metrics(details, "champion", failures["champion"])
         challenger = cls._side_metrics(details, "challenger", failures["challenger"])
-        paired = [row for row in details if row["champion"]["score"] is not None and row["challenger"]["score"] is not None]
-        deltas = [row["challenger"]["score"] - row["champion"]["score"] for row in paired]
+        paired = [row for row in details if row["champion"]["standard_score"] is not None and row["challenger"]["standard_score"] is not None]
+        deltas = [row["challenger"]["standard_score"] - row["champion"]["standard_score"] for row in paired]
         metrics = {
             "sample_count": count,
             "labeled_sample_count": sum(row["label"] not in (None, "") for row in details),
@@ -5470,14 +5931,16 @@ class RuleCenterReplayComparisonRepository:
 
     @classmethod
     def _side_metrics(cls, details: list[dict], side: str, failures: int) -> dict:
-        scores = sorted(row[side]["score"] for row in details if row[side]["score"] is not None)
+        scores = sorted(row[side]["standard_score"] for row in details if row[side]["standard_score"] is not None)
+        raw_scores = sorted(row[side]["score"] for row in details if row[side]["score"] is not None)
+        business_scores = sorted(row[side]["business_score"] for row in details if row[side]["business_score"] is not None)
         ratings: dict[str, int] = {}
         admissions: dict[str, int] = {}
         bins = {f"{low}-{low + 10}": 0 for low in cls._score_bins[:-1]}
         for row in details:
             ratings[row[side]["rating"]] = ratings.get(row[side]["rating"], 0) + 1
             admissions[row[side]["admission"]] = admissions.get(row[side]["admission"], 0) + 1
-            score = row[side]["score"]
+            score = row[side]["standard_score"]
             if score is not None:
                 low = min(max(int(score // 10) * 10, 0), 90)
                 bins[f"{low}-{low + 10}"] += 1
@@ -5488,6 +5951,12 @@ class RuleCenterReplayComparisonRepository:
             "score_mean": round(sum(scores) / len(scores), 6) if scores else None,
             "score_min": min(scores) if scores else None, "score_max": max(scores) if scores else None,
             "score_median": round(median, 6) if median is not None else None,
+            "raw_score_mean": round(sum(raw_scores) / len(raw_scores), 6) if raw_scores else None,
+            "raw_score_min": min(raw_scores) if raw_scores else None,
+            "raw_score_max": max(raw_scores) if raw_scores else None,
+            "business_score_mean": round(sum(business_scores) / len(business_scores), 6) if business_scores else None,
+            "business_score_min": min(business_scores) if business_scores else None,
+            "business_score_max": max(business_scores) if business_scores else None,
             "rating_distribution": ratings, "admission_distribution": admissions,
             "score_distribution": bins,
         }
@@ -5504,13 +5973,13 @@ class RuleCenterReplayComparisonRepository:
 
     @staticmethod
     def _ks(rows: list[dict], side: str, positives: set[str]) -> float | None:
-        usable = [row for row in rows if row[side]["score"] is not None]
+        usable = [row for row in rows if row[side]["standard_score"] is not None]
         bad = sum(str(row["label"]) in positives for row in usable)
         good = len(usable) - bad
         if not good or not bad:
             return None
         cumulative_good = cumulative_bad = maximum = 0.0
-        for row in sorted(usable, key=lambda item: item[side]["score"]):
+        for row in sorted(usable, key=lambda item: item[side]["standard_score"]):
             if str(row["label"]) in positives:
                 cumulative_bad += 1 / bad
             else:
@@ -5534,10 +6003,10 @@ class RuleCenterReplayComparisonRepository:
             groups.setdefault(row["segment"], []).append(row)
         output = []
         for segment, rows in sorted(groups.items()):
-            champion_scores = [row["champion"]["score"] for row in rows if row["champion"]["score"] is not None]
-            challenger_scores = [row["challenger"]["score"] for row in rows if row["challenger"]["score"] is not None]
-            paired = [row for row in rows if row["champion"]["score"] is not None and row["challenger"]["score"] is not None]
-            deltas = [row["challenger"]["score"] - row["champion"]["score"] for row in paired]
+            champion_scores = [row["champion"]["standard_score"] for row in rows if row["champion"]["standard_score"] is not None]
+            challenger_scores = [row["challenger"]["standard_score"] for row in rows if row["challenger"]["standard_score"] is not None]
+            paired = [row for row in rows if row["champion"]["standard_score"] is not None and row["challenger"]["standard_score"] is not None]
+            deltas = [row["challenger"]["standard_score"] - row["champion"]["standard_score"] for row in paired]
             output.append({
                 "segment": segment, "sample_count": len(rows),
                 "champion_score_mean": round(sum(champion_scores) / len(champion_scores), 6) if champion_scores else None,
@@ -5549,19 +6018,103 @@ class RuleCenterReplayComparisonRepository:
         return output
 
     @staticmethod
-    def _to_dict(record: RuleCenterReplayComparisonRun) -> dict:
+    def _gate(metrics: dict, thresholds: dict, evidence_level: str) -> dict:
+        violations: list[dict] = []
+        warnings: list[str] = []
+
+        def maximum(key: str, label: str, actual: float | None, threshold: float) -> None:
+            if actual is not None and actual > threshold:
+                violations.append({
+                    "key": key, "label": label, "actual": round(actual, 6),
+                    "threshold": threshold, "direction": "maximum",
+                    "message": f"{label} {actual:.4f} 超过上限 {threshold:.4f}",
+                })
+
+        maximum("psi", "评分分布 PSI", metrics.get("psi"), thresholds["max_psi"])
+        maximum("rating_change_rate", "评级变化率", metrics.get("rating_change_rate"), thresholds["max_rating_change_rate"])
+        maximum("admission_change_rate", "准入变化率", metrics.get("admission_change_rate"), thresholds["max_admission_change_rate"])
+        average_delta = metrics.get("average_score_delta")
+        maximum("absolute_average_score_delta", "平均分绝对差", abs(average_delta) if average_delta is not None else None, thresholds["max_absolute_average_score_delta"])
+        segment_deltas = [
+            abs(item["average_score_delta"])
+            for item in metrics.get("segments", [])
+            if item.get("average_score_delta") is not None
+        ]
+        maximum("max_segment_absolute_score_delta", "最大分群平均分绝对差", max(segment_deltas) if segment_deltas else None, thresholds["max_segment_absolute_score_delta"])
+        champion_ks = metrics.get("champion", {}).get("ks")
+        challenger_ks = metrics.get("challenger", {}).get("ks")
+        if champion_ks is not None and challenger_ks is not None:
+            maximum("ks_drop", "Challenger KS 下降", champion_ks - challenger_ks, thresholds["max_ks_drop"])
+        elif evidence_level == "unlabeled":
+            message = "快照无有效标签，不能验证 Challenger 的监督区分度"
+            if thresholds["require_labeled_evidence"]:
+                violations.append({
+                    "key": "labeled_evidence", "label": "有标签验证证据",
+                    "actual": 0, "threshold": 1, "direction": "required", "message": message,
+                })
+            else:
+                warnings.append(message)
+        return {
+            "passed": not violations,
+            "summary": "比较门禁通过" if not violations else f"比较门禁阻断：{len(violations)} 项超出阈值",
+            "violations": violations, "warnings": warnings,
+        }
+
+    def _to_dict(self, record: RuleCenterReplayComparisonRun) -> dict:
+        latest_exception = self.session.scalars(
+            select(RuleCenterReplayComparisonException).where(
+                RuleCenterReplayComparisonException.comparison_run_id == record.id
+            ).order_by(
+                RuleCenterReplayComparisonException.created_at.desc(),
+                RuleCenterReplayComparisonException.id.desc(),
+            )
+        ).first()
+        gate = deepcopy(record.gate_json) if record.gate_json else {
+            "passed": False,
+            "summary": "历史比较证据未配置门禁，请使用当前阈值重新运行",
+            "violations": [],
+            "warnings": ["该证据生成于比较门禁上线前，不能据此申请例外或作为上线门禁结论。"],
+        }
+        gate_passed = bool(gate.get("passed"))
+        exception_effective = bool(
+            latest_exception and latest_exception.status == "approved"
+            and latest_exception.valid_until >= date.today()
+            and latest_exception.comparison_evidence_hash == record.evidence_hash
+        )
+        effective_status = "passed" if gate_passed else "exception_approved" if exception_effective else "exception_pending" if latest_exception and latest_exception.status == "pending_review" else "blocked"
         return {
             "id": record.id, "dataset_snapshot_id": record.dataset_snapshot_id,
             "dataset_snapshot_hash": record.dataset_snapshot_hash,
             "champion_model_key": record.champion_model_key, "champion_model_version": record.champion_model_version,
             "challenger_model_key": record.challenger_model_key, "challenger_model_version": record.challenger_model_version,
+            "challenger_change_id": record.challenger_change_id,
+            "challenger_config_hash": record.challenger_config_hash,
             "champion_pipeline_code": record.champion_pipeline_code, "champion_pipeline_version": record.champion_pipeline_version,
             "challenger_pipeline_code": record.challenger_pipeline_code, "challenger_pipeline_version": record.challenger_pipeline_version,
             "segment_field": record.segment_field, "evidence_level": record.evidence_level,
             "config": deepcopy(record.config_json), "metrics": deepcopy(record.metrics_json),
+            "gate": gate, "effective_status": effective_status,
+            "latest_exception": self._exception_to_dict(latest_exception) if latest_exception else None,
             "details": deepcopy(record.details_json), "evidence_hash": record.evidence_hash,
             "created_by": record.created_by, "created_by_name": record.created_by_name,
             "created_at": record.created_at.isoformat() if record.created_at else None,
+        }
+
+    @staticmethod
+    def _exception_to_dict(record: RuleCenterReplayComparisonException) -> dict:
+        return {
+            "id": record.id, "comparison_run_id": record.comparison_run_id,
+            "comparison_evidence_hash": record.comparison_evidence_hash,
+            "status": record.status, "reason": record.reason,
+            "business_impact": record.business_impact,
+            "compensating_controls": record.compensating_controls,
+            "valid_until": record.valid_until.isoformat(), "request_hash": record.request_hash,
+            "requested_by": record.requested_by, "requested_by_name": record.requested_by_name,
+            "reviewed_by": record.reviewed_by, "reviewed_by_name": record.reviewed_by_name,
+            "reviewed_at": record.reviewed_at.isoformat() if record.reviewed_at else None,
+            "review_comment": record.review_comment, "row_version": record.row_version,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+            "updated_at": record.updated_at.isoformat() if record.updated_at else None,
         }
 
 

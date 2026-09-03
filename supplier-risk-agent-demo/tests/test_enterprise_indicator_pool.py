@@ -20,12 +20,32 @@ class EnterpriseIndicatorPoolTest(unittest.TestCase):
         counterparties = json.loads((base / "data" / "counterparties.json").read_text(encoding="utf-8"))
         self.counterparty = next(item for item in counterparties if item.get("tech_enterprise"))
 
-    def test_pool_preserves_all_canonical_excel_indicators(self) -> None:
+    def test_pool_preserves_source_indicators_and_adds_credit_policy_dimensions(self) -> None:
         pool = get_indicator_pool()
-        self.assertEqual(pool["summary"]["indicator_count"], 185)
-        self.assertEqual(len(pool["indicators"]), 185)
+        self.assertEqual(pool["summary"]["indicator_count"], 201)
+        self.assertEqual(len(pool["indicators"]), 201)
         self.assertGreaterEqual(len(pool["summary"]["category_counts"]), 10)
         self.assertTrue(all(item["source_references"] for item in pool["indicators"]))
+        self.assertEqual(pool["summary"]["category_counts"]["财务承债能力"], 5)
+        self.assertEqual(pool["summary"]["category_counts"]["交易履约表现"], 6)
+        self.assertEqual(pool["summary"]["category_counts"]["信用敞口与回款"], 5)
+
+    def test_credit_policy_indicators_score_real_values_and_degrade_missing_to_neutral(self) -> None:
+        indicators = {item["name"]: item for item in list_enterprise_risk_indicators()}
+        config = {"indicator_selection": [
+            {"indicator_id": indicators["资产负债率"]["id"], "weight": 1, "enabled": True},
+            {"indicator_id": indicators["应收逾期率"]["id"], "weight": 1, "enabled": True},
+            {"indicator_id": indicators["交付达成率"]["id"], "weight": 1, "enabled": True},
+        ]}
+        result = evaluate_indicator_pool({
+            "corporate_profile": {"financial": {"debt_to_assets_pct": 82}},
+            "financial": {"overdue_rate": 0.02},
+        }, config)
+        details = {item["name"]: item for item in result["details"]}
+        self.assertEqual(details["资产负债率"]["score"], 2)
+        self.assertEqual(details["应收逾期率"]["score"], 3)
+        self.assertEqual(details["交付达成率"]["score"], 2)
+        self.assertEqual(details["交付达成率"]["data_status"], "待补充")
 
     def test_requested_change_rules_are_explicit_and_calculable(self) -> None:
         indicators = {item["name"]: item for item in list_enterprise_risk_indicators()}

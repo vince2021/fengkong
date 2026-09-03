@@ -56,7 +56,7 @@ class TestSeedRuleCenter(unittest.TestCase):
     def test_dry_run_validates_plan_without_writes(self):
         summary = seed_all(dry_run=True)
 
-        self.assertEqual(summary["rules"], 14)
+        self.assertEqual(summary["rules"], 25)
         self.assertEqual(summary["rule_sets"], 4)
         self.assertEqual(summary["pipelines"], 3)
         self.assertEqual(self.session.query(RuleDefinition).count(), 0)
@@ -66,12 +66,12 @@ class TestSeedRuleCenter(unittest.TestCase):
     def test_seed_publishes_governed_definitions_in_dependency_order(self):
         counts = seed_all(session=self.session)
 
-        self.assertEqual(counts, {"rules": 14, "rule_sets": 4, "pipelines": 3})
-        self.assertEqual(self.session.query(RuleDefinition).count(), 14)
+        self.assertEqual(counts, {"rules": 25, "rule_sets": 4, "pipelines": 3})
+        self.assertEqual(self.session.query(RuleDefinition).count(), 25)
         self.assertEqual(self.session.query(RuleSetDefinition).count(), 4)
         self.assertEqual(self.session.query(DecisionPipelineDefinition).count(), 3)
-        self.assertEqual(self.session.query(ModelChangeRecord).count(), 21)
-        self.assertEqual(self.session.query(AuditEventRecord).count(), 21)
+        self.assertEqual(self.session.query(ModelChangeRecord).count(), 32)
+        self.assertEqual(self.session.query(AuditEventRecord).count(), 32)
         self.assertEqual(
             set(self.session.scalars(select(ModelChangeRecord.entity_type)).all()),
             {"rule", "rule_set", "pipeline"},
@@ -85,7 +85,7 @@ class TestSeedRuleCenter(unittest.TestCase):
         self.assertEqual(
             set(self.session.scalars(select(RuleDefinition.version)).all()), {1}
         )
-        self.assertEqual(self.session.query(ModelChangeRecord).count(), 21)
+        self.assertEqual(self.session.query(ModelChangeRecord).count(), 32)
 
     def test_shared_legacy_rules_are_deduplicated_but_sets_remain_isolated(self):
         plan = build_seed_plan()
@@ -99,7 +99,7 @@ class TestSeedRuleCenter(unittest.TestCase):
         )
         self.assertEqual(
             sets_by_code["STRONG-RULES-CORPORATE"]["rule_codes"],
-            ["CR-001", "CR-002", "CR-101", "CR-102", "CR-103", "CR-201"],
+            ["CR-001", "CR-002", "CR-101", "CR-102", "CR-103", "CR-201", "CR-202", "CR-203", "CR-204", "CR-205", "CR-206", "CR-207", "CR-301", "CR-302", "CR-303", "CR-304", "CR-401"],
         )
 
     def test_converted_membership_and_threshold_conditions_execute(self):
@@ -121,6 +121,26 @@ class TestSeedRuleCenter(unittest.TestCase):
         self.assertTrue(status_hit)
         self.assertTrue(threshold_hit)
         self.assertIn("not contains", status_rule.conditions_json[0]["expression"])
+
+    def test_corporate_credit_rules_require_complete_internal_data_and_keep_restrictive_actions(self):
+        seed_all(session=self.session)
+        overdue = self.session.scalars(
+            select(RuleDefinition).where(RuleDefinition.code == "CR-202")
+        ).one()
+        missing_hit, _ = evaluate_rule_conditions(
+            overdue,
+            {"data_quality": {"internal_transaction_complete": False}, "financial": {"overdue_rate": 0.5}},
+        )
+        complete_hit, _ = evaluate_rule_conditions(
+            overdue,
+            {"data_quality": {"internal_transaction_complete": True}, "financial": {"overdue_rate": 0.5}},
+        )
+        self.assertFalse(missing_hit)
+        self.assertTrue(complete_hit)
+        actions = {item["type"]: item["value"] for item in overdue.actions_json}
+        self.assertEqual(actions["limit_multiplier_cap"], 0.25)
+        self.assertEqual(actions["payment_term_days_cap"], 0)
+        self.assertTrue(actions["review_required"])
 
     def test_seeded_pipeline_executes_after_indicator_dependencies_are_seeded(self):
         seed_all(session=self.session)

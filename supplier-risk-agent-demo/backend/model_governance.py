@@ -8,6 +8,7 @@ from backend.repository import content_hash
 from rating.scorecard import rate_counterparty
 from rating.enterprise_indicator_pool import evaluate_indicator_pool, get_model_indicator_selection, validate_indicator_selection
 from rating.risk_screening_policy import get_risk_screening_policy, validate_risk_screening_policy
+from rating.governed_scorecard import validate_scorecard_binding
 
 
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
@@ -26,6 +27,8 @@ def build_candidate_config(base: dict, payload: dict) -> dict:
         requested_selection if requested_selection is not None else get_model_indicator_selection(base)
     )
     candidate["risk_screening_policy"] = deepcopy(payload.get("risk_screening_policy") or get_risk_screening_policy(base))
+    if "scorecard_binding" in payload:
+        candidate["scorecard_binding"] = deepcopy(payload["scorecard_binding"])
     candidate["change_reason"] = payload["change_reason"].strip()
     candidate["status"] = "active"
     return candidate
@@ -74,6 +77,7 @@ def validate_and_assess(base: dict, candidate: dict, counterparties: list[dict],
     policy_errors, policy_warnings = validate_risk_screening_policy(candidate.get("risk_screening_policy"))
     errors.extend(policy_errors)
     warnings.extend(policy_warnings)
+    errors.extend(validate_scorecard_binding(candidate.get("scorecard_binding")))
 
     rules = candidate.get("strong_rules")
     if not isinstance(rules, list):
@@ -164,6 +168,7 @@ def validate_and_assess(base: dict, candidate: dict, counterparties: list[dict],
     risk_screening_impacted = [item for item in details if item["risk_screening_score_delta"]]
     indicator_selection_changed = get_model_indicator_selection(base) != get_model_indicator_selection(candidate)
     risk_screening_policy_changed = get_risk_screening_policy(base) != get_risk_screening_policy(candidate)
+    scorecard_binding_changed = base.get("scorecard_binding") != candidate.get("scorecard_binding")
     if details and not impacted and not risk_screening_impacted and not indicator_selection_changed:
         warnings.append("本次配置在当前样本组合上未产生结果变化")
     elif details and not impacted and indicator_selection_changed:
@@ -183,6 +188,7 @@ def validate_and_assess(base: dict, candidate: dict, counterparties: list[dict],
         "max_abs_score_delta": max((abs(item["score_delta"]) for item in details), default=0),
         "indicator_selection_changed": indicator_selection_changed,
         "risk_screening_policy_changed": risk_screening_policy_changed,
+        "scorecard_binding_changed": scorecard_binding_changed,
         "risk_screening_impacted_count": len(risk_screening_impacted),
         "max_abs_risk_screening_delta": max((abs(item["risk_screening_score_delta"]) for item in details), default=0),
         "average_limit_delta": round(sum(item["limit_delta"] for item in details) / len(details), 2) if details else 0,

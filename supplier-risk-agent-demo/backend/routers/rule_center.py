@@ -50,6 +50,8 @@ from backend.schemas import (
     RuleCenterPackageReview,
     RuleCenterReplayCreate,
     RuleCenterReplayComparisonCreate,
+    RuleCenterReplayComparisonExceptionCreate,
+    RuleCenterReplayComparisonExceptionReview,
     RuleCenterReplayDatasetCreate,
     RuleCenterReplaySnapshotImport,
     RuleSetCreate,
@@ -589,6 +591,56 @@ def run_replay_comparison(
             principal.subject, principal.name,
         )
     except (LookupError, ValueError, ConcurrentUpdateError) as exc:
+        raise _governance_error(exc) from exc
+
+
+@router.get("/governance/replay-comparisons/{comparison_run_id}/exceptions")
+def list_replay_comparison_exceptions(
+    comparison_run_id: str,
+    repository: RuleCenterReplayComparisonRepository = Depends(
+        get_rule_center_replay_comparison_repository
+    ),
+    _: Principal = Depends(require_permissions("models:view")),
+) -> list[dict]:
+    try:
+        return repository.list_exceptions(comparison_run_id)
+    except LookupError as exc:
+        raise _governance_error(exc) from exc
+
+
+@router.post("/governance/replay-comparisons/{comparison_run_id}/exceptions", status_code=status.HTTP_201_CREATED)
+def request_replay_comparison_exception(
+    comparison_run_id: str,
+    body: RuleCenterReplayComparisonExceptionCreate,
+    repository: RuleCenterReplayComparisonRepository = Depends(
+        get_rule_center_replay_comparison_repository
+    ),
+    principal: Principal = Depends(require_permissions("models:manage")),
+) -> dict:
+    try:
+        return repository.request_exception(
+            comparison_run_id, body.model_dump(), principal.subject, principal.name
+        )
+    except (LookupError, ValueError, ConcurrentUpdateError) as exc:
+        raise _governance_error(exc) from exc
+
+
+@router.post("/governance/replay-comparisons/{comparison_run_id}/exceptions/{exception_id}/review")
+def review_replay_comparison_exception(
+    comparison_run_id: str,
+    exception_id: str,
+    body: RuleCenterReplayComparisonExceptionReview,
+    repository: RuleCenterReplayComparisonRepository = Depends(
+        get_rule_center_replay_comparison_repository
+    ),
+    principal: Principal = Depends(require_permissions("models:review")),
+) -> dict:
+    try:
+        return repository.review_exception(
+            comparison_run_id, exception_id, body.expected_row_version,
+            body.decision, body.comment, principal.subject, principal.name,
+        )
+    except (LookupError, PermissionError, ValueError, ConcurrentUpdateError) as exc:
         raise _governance_error(exc) from exc
 
 

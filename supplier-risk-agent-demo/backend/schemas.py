@@ -28,6 +28,312 @@ class ModelIndicatorSelection(BaseModel):
     enabled: bool = True
 
 
+class ScorecardBin(BaseModel):
+    kind: Literal["range", "category", "missing"]
+    label: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    score: float
+    woe: float | None = None
+    lower: float | None = None
+    upper: float | None = None
+    lower_inclusive: bool = True
+    upper_inclusive: bool = False
+    values: list[str] | None = Field(default=None, max_length=200)
+
+
+class ScorecardIndicatorBinding(BaseModel):
+    indicator_code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    indicator_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    indicator_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    field_path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+    data_type: Literal["numeric", "categorical", "boolean"]
+    weight: float = Field(gt=0, le=1000)
+    bins: list[ScorecardBin] = Field(min_length=2, max_length=200)
+
+
+class ScorecardDefinitionPayload(BaseModel):
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=256)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)]
+    score_scale: dict[str, float | bool]
+    indicators: list[ScorecardIndicatorBinding] = Field(min_length=1, max_length=250)
+
+
+class ScorecardChangeCreate(BaseModel):
+    definition: ScorecardDefinitionPayload
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardChangeUpdate(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    definition: ScorecardDefinitionPayload
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardChangeReview(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    decision: Literal["publish", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardDevelopmentExclusionRule(BaseModel):
+    field_path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
+    operator: Literal["equals", "not_equals", "in", "is_missing", "not_missing"]
+    value: Any = None
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=256)]
+
+
+class ScorecardValidationThresholds(BaseModel):
+    require_validation_snapshot: bool = True
+    require_oot_snapshot: bool = True
+    require_probability_evidence: bool = False
+    require_sensitive_attribute_evidence: bool = False
+    min_auc: float = Field(default=0.6, ge=0, le=1)
+    min_ks: float = Field(default=0.2, ge=0, le=1)
+    max_brier: float = Field(default=0.25, ge=0, le=1)
+    max_score_psi: float = Field(default=0.25, ge=0, le=10)
+    min_segment_coverage: float = Field(default=0.8, ge=0, le=1)
+    max_event_rate_gap: float = Field(default=0.2, ge=0, le=1)
+    max_average_score_gap: float = Field(default=15, ge=0, le=100)
+    max_auc_gap: float = Field(default=0.15, ge=0, le=1)
+    max_ks_gap: float = Field(default=0.15, ge=0, le=1)
+    max_false_positive_rate_gap: float = Field(default=0.15, ge=0, le=1)
+    max_false_negative_rate_gap: float = Field(default=0.15, ge=0, le=1)
+
+
+class ScorecardValidationPolicyPayload(BaseModel):
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=256)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)]
+    applicable_scorecard_codes: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]] = Field(default_factory=list, max_length=100)
+    is_default: bool = False
+    thresholds: ScorecardValidationThresholds
+
+
+class ScorecardValidationPolicyCreate(BaseModel):
+    policy: ScorecardValidationPolicyPayload
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardValidationPolicyUpdate(ScorecardValidationPolicyCreate):
+    expected_row_version: int = Field(ge=1)
+
+
+class ScorecardMonitoringSlaRule(BaseModel):
+    response_hours: int = Field(ge=1, le=720)
+    due_soon_ratio: float = Field(default=0.25, ge=0.05, le=0.9)
+    escalation_after_hours: int = Field(default=4, ge=1, le=168)
+
+
+class ScorecardMonitoringSlaPolicyPayload(BaseModel):
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=256)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)]
+    applicable_scorecard_codes: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]] = Field(default_factory=list, max_length=100)
+    applicable_event_types: list[Literal["gate_failed", "consecutive_deterioration", "evidence_integrity_failed", "policy_integrity_failed", "scheduled_run_failed"]] = Field(default_factory=list, max_length=5)
+    is_default: bool = False
+    severity_rules: dict[Literal["critical", "warning"], ScorecardMonitoringSlaRule]
+
+
+class ScorecardMonitoringSlaPolicyCreate(BaseModel):
+    policy: ScorecardMonitoringSlaPolicyPayload
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardMonitoringSlaPolicyUpdate(ScorecardMonitoringSlaPolicyCreate):
+    expected_row_version: int = Field(ge=1)
+
+
+class ScorecardDevelopmentRunCreate(BaseModel):
+    scorecard_asset_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    validation_policy_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    dataset_snapshot_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    validation_snapshot_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    oot_snapshot_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    subject_id_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)] = "id"
+    predicted_probability_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)] | None = None
+    segment_fields: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]] = Field(default_factory=list, max_length=10)
+    sensitive_attribute_fields: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]] = Field(default_factory=list, max_length=10)
+    min_segment_sample_count: int = Field(default=30, ge=2, le=5000)
+    classification_threshold: float = Field(default=0.5, ge=0, le=1)
+    validation_thresholds: ScorecardValidationThresholds = Field(default_factory=ScorecardValidationThresholds)
+    positive_labels: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(min_length=1, max_length=20)
+    observation_start: date | None = None
+    observation_end: date | None = None
+    performance_window_days: int = Field(default=180, ge=1, le=3650)
+    maturity_days: int = Field(default=90, ge=0, le=3650)
+    min_sample_count: int = Field(default=100, ge=1, le=5000)
+    min_event_count: int = Field(default=20, ge=1, le=5000)
+    min_non_event_count: int = Field(default=20, ge=1, le=5000)
+    exclusion_rules: list[ScorecardDevelopmentExclusionRule] = Field(default_factory=list, max_length=50)
+
+
+class CreditCalibrationCandidate(BaseModel):
+    score_threshold_shift: float = Field(default=0, ge=-5, le=5)
+    limit_multiplier_scale: float = Field(default=1, ge=0.1, le=2)
+    revenue_limit_scale: float = Field(default=1, ge=0.1, le=2)
+    order_amount_scale: float = Field(default=1, ge=0.1, le=2)
+    payment_term_scale: float = Field(default=1, ge=0.5, le=1.5)
+    overdue_rate_high: float = Field(default=0.15, ge=0, le=1)
+    limit_utilization_high: float = Field(default=0.9, ge=0, le=1)
+    invoice_match_rate_low: float = Field(default=0.85, ge=0, le=1)
+    delivery_fulfillment_rate_low: float = Field(default=0.9, ge=0, le=1)
+
+
+class CreditCalibrationAnalyze(BaseModel):
+    dataset_snapshot_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    template_key: Literal["corporate_credit_v2"] = "corporate_credit_v2"
+    positive_labels: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["bad", "default", "reject"], min_length=1, max_length=20)
+    sample_limit: int = Field(default=500, ge=1, le=1000)
+    candidate: CreditCalibrationCandidate = Field(default_factory=CreditCalibrationCandidate)
+
+
+class CreditCalibrationModelChangeCreate(CreditCalibrationAnalyze):
+    candidate_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    expected_evidence_hash: Annotated[str, StringConstraints(strip_whitespace=True, min_length=64, max_length=64)]
+
+
+class CreditCalibrationPlanCreate(BaseModel):
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=256)]
+    template_key: Literal["corporate_credit_v2"] = "corporate_credit_v2"
+    candidate: CreditCalibrationCandidate = Field(default_factory=CreditCalibrationCandidate)
+    positive_labels: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["bad", "default", "reject"], min_length=1, max_length=20)
+    sample_limit: int = Field(default=500, ge=1, le=1000)
+    business_basis: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)]
+
+
+class CreditCalibrationPlanUpdate(CreditCalibrationPlanCreate):
+    expected_row_version: int = Field(ge=1)
+
+
+class CreditCalibrationPlanRun(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    dataset_snapshot_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+
+
+class CreditCalibrationPlanReview(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    decision: Literal["approve", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class CreditCalibrationPlanModelChange(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    run_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    candidate_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)]
+    change_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class CreditCalibrationComparisonRequest(BaseModel):
+    plan_ids: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]] = Field(min_length=2, max_length=5)
+
+
+class ScorecardDevelopmentRunReview(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    decision: Literal["approve", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardMonitoringRunConfig(BaseModel):
+    subject_id_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)] = "id"
+    predicted_probability_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)] | None = None
+    segment_fields: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]] = Field(default_factory=list, max_length=10)
+    sensitive_attribute_fields: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]] = Field(default_factory=list, max_length=10)
+    min_segment_sample_count: int = Field(default=30, ge=2, le=5000)
+    classification_threshold: float = Field(default=0.5, ge=0, le=1)
+    positive_labels: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(min_length=1, max_length=20)
+    performance_window_days: int = Field(default=180, ge=1, le=3650)
+    maturity_days: int = Field(default=90, ge=0, le=3650)
+    min_sample_count: int = Field(default=100, ge=1, le=5000)
+    min_event_count: int = Field(default=20, ge=1, le=5000)
+    min_non_event_count: int = Field(default=20, ge=1, le=5000)
+    exclusion_rules: list[ScorecardDevelopmentExclusionRule] = Field(default_factory=list, max_length=50)
+
+
+class ScorecardMonitoringPlanPayload(BaseModel):
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=256)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)]
+    scorecard_asset_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    validation_policy_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    training_dataset_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    validation_dataset_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    oot_dataset_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    run_config: ScorecardMonitoringRunConfig
+    cadence: Literal["monthly", "quarterly"] = "monthly"
+    timezone_name: Literal["Asia/Shanghai", "UTC"] = "Asia/Shanghai"
+    enabled: bool = True
+    next_run_at: datetime
+    owner: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
+
+
+class ScorecardMonitoringPlanCreate(BaseModel):
+    plan: ScorecardMonitoringPlanPayload
+
+
+class ScorecardMonitoringPlanUpdate(ScorecardMonitoringPlanCreate):
+    expected_row_version: int = Field(ge=1)
+
+
+class ScorecardMonitoringPlanRunRequest(BaseModel):
+    expected_row_version: int = Field(ge=1)
+
+
+class ScorecardMonitoringTickRequest(BaseModel):
+    as_of: datetime | None = None
+    max_plans: int = Field(default=50, ge=1, le=200)
+    run_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")] | None = None
+    trigger_type: Literal["manual", "scheduler"] = "manual"
+
+
+class ScorecardMonitoringSchedulerRetryRequest(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+    max_plans: int = Field(default=50, ge=1, le=200)
+
+
+class ScorecardMonitoringEventAction(BaseModel):
+    expected_row_version: int = Field(ge=1)
+    action: Literal["assign", "acknowledge", "remediate", "submit_revalidation", "review_revalidation"]
+    assignee: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)] | None = None
+    remediation_plan: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)] | None = None
+    remediation_result: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)] | None = None
+    revalidation_run_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    decision: Literal["pass", "fail"] | None = None
+    conclusion: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=2000)] | None = None
+
+
+class ScorecardMonitoringEventFilters(BaseModel):
+    status: Literal["open", "acknowledged", "in_remediation", "pending_revalidation", "closed"] | None = None
+    severity: Literal["critical", "warning"] | None = None
+    event_type: Literal["gate_failed", "consecutive_deterioration", "evidence_integrity_failed", "policy_integrity_failed", "scheduled_run_failed"] | None = None
+    assignee: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] | None = None
+    plan_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    scorecard_code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] | None = None
+    sla_status: Literal["normal", "due_soon", "overdue", "escalated"] | None = None
+
+
+class ScorecardMonitoringBulkAssignItem(BaseModel):
+    event_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    expected_row_version: int = Field(ge=1)
+
+
+class ScorecardMonitoringBulkAssignRequest(BaseModel):
+    items: list[ScorecardMonitoringBulkAssignItem] = Field(min_length=1, max_length=100)
+    assignee: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ScorecardMonitoringSavedViewPayload(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
+    filters: ScorecardMonitoringEventFilters
+    is_default: bool = False
+
+
+class ScorecardMonitoringSavedViewUpdate(ScorecardMonitoringSavedViewPayload):
+    expected_row_version: int = Field(ge=1)
+
+
 class RiskScreeningPolicyAction(BaseModel):
     rating_notch_down: int = Field(default=0, ge=0, le=3)
     limit_cap_ratio: float = Field(default=1, ge=0, le=1)
@@ -62,6 +368,8 @@ class ModelChangeCreate(BaseModel):
     strategy_mapping: list[dict[str, Any]] | None = None
     indicator_selection: list[ModelIndicatorSelection] | None = Field(default=None, max_length=250)
     risk_screening_policy: RiskScreeningPolicy | None = None
+    scorecard_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    scorecard_validation_run_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
 
 
 class VersionedActionRequest(BaseModel):
@@ -76,6 +384,8 @@ class ModelChangeUpdate(VersionedActionRequest):
     strategy_mapping: list[dict[str, Any]] | None = None
     indicator_selection: list[ModelIndicatorSelection] | None = Field(default=None, max_length=250)
     risk_screening_policy: RiskScreeningPolicy | None = None
+    scorecard_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
+    scorecard_validation_run_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
 
 
 class ModelReviewRequest(VersionedActionRequest):
@@ -664,6 +974,7 @@ class RuleCenterReplayComparisonCreate(BaseModel):
     ]
     champion_model_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
     challenger_model_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    challenger_change_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)] | None = None
     champion_pipeline_code: RuleCenterCode | None = None
     challenger_pipeline_code: RuleCenterCode | None = None
     segment_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)] = "counterparty_type"
@@ -671,3 +982,41 @@ class RuleCenterReplayComparisonCreate(BaseModel):
     positive_admissions: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["reject"], min_length=1, max_length=20)
     sample_limit: int = Field(default=500, ge=1, le=500)
     max_execution_failure_rate: float = Field(default=0, ge=0, le=1)
+    max_psi: float = Field(default=0.25, ge=0, le=100)
+    max_rating_change_rate: float = Field(default=0.25, ge=0, le=1)
+    max_admission_change_rate: float = Field(default=0.15, ge=0, le=1)
+    max_absolute_average_score_delta: float = Field(default=10, ge=0, le=100)
+    max_segment_absolute_score_delta: float = Field(default=15, ge=0, le=100)
+    max_ks_drop: float = Field(default=0.05, ge=0, le=1)
+    require_labeled_evidence: bool = False
+
+
+class ModelChangeComparisonEvidenceRun(VersionedActionRequest):
+    dataset_snapshot_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=36)]
+    champion_pipeline_code: RuleCenterCode | None = None
+    challenger_pipeline_code: RuleCenterCode | None = None
+    segment_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)] = "counterparty_type"
+    positive_labels: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["bad", "default", "reject"], min_length=1, max_length=20)
+    positive_admissions: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]] = Field(default_factory=lambda: ["reject"], min_length=1, max_length=20)
+    sample_limit: int = Field(default=500, ge=1, le=500)
+    max_execution_failure_rate: float = Field(default=0, ge=0, le=1)
+    max_psi: float = Field(default=0.25, ge=0, le=100)
+    max_rating_change_rate: float = Field(default=0.25, ge=0, le=1)
+    max_admission_change_rate: float = Field(default=0.15, ge=0, le=1)
+    max_absolute_average_score_delta: float = Field(default=10, ge=0, le=100)
+    max_segment_absolute_score_delta: float = Field(default=15, ge=0, le=100)
+    max_ks_drop: float = Field(default=0.05, ge=0, le=1)
+    require_labeled_evidence: bool = False
+    evidence_valid_days: int = Field(default=30, ge=1, le=180)
+
+
+class RuleCenterReplayComparisonExceptionCreate(BaseModel):
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    business_impact: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    compensating_controls: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=3000)]
+    valid_until: date
+
+
+class RuleCenterReplayComparisonExceptionReview(VersionedActionRequest):
+    decision: Literal["approve", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]

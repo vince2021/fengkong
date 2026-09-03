@@ -55,6 +55,19 @@ THRESHOLD_LABELS = {
     "invoice_match_rate": "发票匹配率最低要求",
     "overdue_rate": "逾期率阈值",
     "contract_dispute_count": "合同争议次数阈值",
+    "enforcement_count": "被执行记录阈值",
+    "revenue_decline_pct": "营业收入下降阈值",
+    "profit_decline_pct": "利润下降阈值",
+    "debt_to_assets_high_pct": "高资产负债率阈值",
+    "transaction_complete": "交易资料完整标志",
+    "overdue_rate_high": "高逾期率阈值",
+    "limit_utilization_high": "高额度使用率阈值",
+    "invoice_match_rate_low": "最低发票匹配率",
+    "delivery_fulfillment_rate_low": "最低交付达成率",
+    "admin_penalty_high": "多次行政处罚阈值",
+    "short_cooperation_years": "短合作期阈值",
+    "large_requested_limit": "大额授信申请阈值",
+    "equity_freeze_count": "股权冻结记录阈值",
 }
 
 
@@ -260,11 +273,11 @@ def _dimension_source(key: str) -> str:
 
 
 def _threshold_source(key: str) -> str:
-    if key in {"major_litigation_amount", "dishonesty_count", "operating_abnormal_count"}:
+    if key in {"major_litigation_amount", "dishonesty_count", "enforcement_count", "operating_abnormal_count", "admin_penalty_high", "equity_freeze_count"}:
         return "外部企业风险数据"
-    if key in {"delivery_delay_count", "invoice_match_rate", "contract_dispute_count"}:
+    if key in {"delivery_delay_count", "invoice_match_rate", "invoice_match_rate_low", "delivery_fulfillment_rate_low", "contract_dispute_count", "transaction_complete", "short_cooperation_years"}:
         return "内部履约数据"
-    if key == "overdue_rate":
+    if key in {"overdue_rate", "overdue_rate_high", "limit_utilization_high"}:
         return "财务应收数据"
     return "模型配置"
 

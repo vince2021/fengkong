@@ -17,10 +17,13 @@ from backend.db_models import (
     FacilityControlConditionRecord,
     FacilityControlExtensionRecord,
     NotificationRecord,
+    ScorecardValidationMonitoringEvent,
+    ScorecardValidationMonitoringPlan,
     SlaScanLeaseRecord,
 )
 from backend.document_correction_sla import ACTIVE_CORRECTION_STATUSES, correction_sla_snapshot
 from backend.repository import AuditRepository, CreditFacilityRepository, NotificationRepository, content_hash
+from backend.scorecard_repository import ScorecardRepository
 from backend.security import APPROVAL_STAGE_ROLES
 from backend.task_lease import assignment_expiry, assignment_is_active, assignment_is_expired, clear_assignment, lease_remaining_seconds
 from rating.approval_workflow import STAGE_SLA_HOURS, stage_label
@@ -157,6 +160,7 @@ def run_sla_scan(
     if lease_guard:
         lease_guard(False)
     post_credit_scan = CreditFacilityRepository(session).scan(actor, now=scan_time, commit=False)
+    scorecard_monitoring_scan = ScorecardRepository(session).scan_monitoring_event_sla(scan_time, actor, commit=False)
     failure_notifications_resolved = (
         _resolve_scan_failure_notifications(session, audit, actor, scan_time, scan_run_id)
         if trigger_type in {"scheduler", "retry"}
@@ -178,7 +182,7 @@ def run_sla_scan(
         "overdue_corrections": correction_level_counts["overdue"],
         "escalated_corrections": correction_level_counts["escalated"],
         "workflow_notifications_created": created_count,
-        "notifications_created": created_count + post_credit_scan["control_notifications_created"],
+        "notifications_created": created_count + post_credit_scan["control_notifications_created"] + scorecard_monitoring_scan["notifications_created"],
         "expired_assignments_released": expired_assignments_released,
         "active_facilities_scanned": post_credit_scan["active_facilities_scanned"],
         "facilities_expired": post_credit_scan["facilities_expired"],
@@ -187,6 +191,11 @@ def run_sla_scan(
         "control_alerts_opened": post_credit_scan["control_alerts_opened"],
         "control_conditions_escalated": post_credit_scan["control_conditions_escalated"],
         "control_notifications_created": post_credit_scan["control_notifications_created"],
+        "scorecard_monitoring_events_scanned": scorecard_monitoring_scan["events_scanned"],
+        "scorecard_monitoring_due_soon": scorecard_monitoring_scan["due_soon"],
+        "scorecard_monitoring_overdue": scorecard_monitoring_scan["overdue"],
+        "scorecard_monitoring_escalated": scorecard_monitoring_scan["escalated"],
+        "scorecard_monitoring_notifications_created": scorecard_monitoring_scan["notifications_created"],
         "failure_notifications_resolved": failure_notifications_resolved,
     }
     if lease_guard:
@@ -1274,6 +1283,56 @@ def build_personal_task_queue(
         counterparty_id,
     )
 
+    monitoring_rows = session.scalars(select(ScorecardValidationMonitoringEvent).where(
+        ScorecardValidationMonitoringEvent.status != "closed"
+    )).all()
+    monitoring_plans = {item.id: item for item in session.scalars(select(ScorecardValidationMonitoringPlan).where(
+        ScorecardValidationMonitoringPlan.id.in_({item.plan_id for item in monitoring_rows})
+    )).all()} if monitoring_rows else {}
+    for event in monitoring_rows:
+        is_revalidation = event.status == "pending_revalidation"
+        owner_roles = ["risk_manager"] if is_revalidation else ["model_admin"]
+        is_direct_owner = actor_subject == event.assignee and not is_revalidation
+        if not is_admin and not set(owner_roles).intersection(role_set) and not is_direct_owner:
+            continue
+        plan = monitoring_plans.get(event.plan_id)
+        due_at = _as_utc(event.sla_due_at)
+        tasks.append({
+            "id": f"scorecard_monitoring:{event.id}",
+            "task_type": "scorecard_monitoring",
+            "title": "独立复验持续验证整改" if is_revalidation else f"处置持续验证预警：{event.title}",
+            "description": event.remediation_result if is_revalidation else event.description,
+            "counterparty_id": None,
+            "counterparty_name": plan.name if plan else "评分卡持续验证",
+            "case_id": None,
+            "stage": event.status,
+            "stage_label": "待独立复验" if is_revalidation else "模型验证预警",
+            "correction_id": None,
+            "document_type": None,
+            "monitoring_event_id": event.id,
+            "status": event.status,
+            "sla_status": ScorecardRepository.monitoring_event_sla_level(event, queue_time),
+            "due_at": due_at.isoformat(),
+            "remaining_seconds": int((due_at - queue_time).total_seconds()),
+            "owner_roles": owner_roles,
+            "viewer_mode": "owner",
+            "assigned_to": None if is_revalidation else event.assignee,
+            "assigned_to_name": None if is_revalidation else event.assignee,
+            "assigned_at": None,
+            "assignment_expires_at": None,
+            "lease_remaining_seconds": None,
+            "assignment_expired": False,
+            "assignment_state": "direct",
+            "can_release": False,
+            "claimable": False,
+            "reminder_role": owner_roles[0],
+            "row_version": event.row_version,
+            "action": {
+                "page": "indicators", "monitoring_event_id": event.id,
+                "run_id": event.run_id, "plan_id": event.plan_id,
+            },
+        })
+
     priority = {"escalated": 0, "overdue": 1, "due_soon": 2, "normal": 3}
     tasks.sort(
         key=lambda task: (
@@ -1296,6 +1355,7 @@ def build_personal_task_queue(
             "correction": counts["correction"],
             "facility_control": counts["facility_control"],
             "control_extension": counts["control_extension"],
+            "scorecard_monitoring": counts["scorecard_monitoring"],
             "post_credit": counts["facility_control"] + counts["control_extension"],
             "due_soon": risk_counts["due_soon"],
             "overdue": risk_counts["overdue"],
@@ -1341,7 +1401,7 @@ def build_team_task_board(
         assignee_counters["risk"] += int(is_risk)
         task["can_release"] = False
         task["can_force_release"] = bool(can_manage and is_claimed)
-        task["can_remind"] = bool(can_manage and (is_claimed or is_direct))
+        task["can_remind"] = bool(can_manage and task["task_type"] != "scorecard_monitoring" and (is_claimed or is_direct))
 
     returned_tasks = tasks[:limit]
     return {

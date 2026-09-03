@@ -65,7 +65,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
     try {
       const result = await api.runSlaScan();
       await reload();
-      onNotice({ kind: "success", text: `扫描 ${result.active_cases_scanned} 笔申请、${result.active_corrections_scanned} 项补件、${result.active_facilities_scanned} 笔授信及 ${result.control_conditions_scanned} 项逾期条件；新增 ${result.notifications_created} 条通知、${result.facility_alerts_opened} 条预警，升级 ${result.control_conditions_escalated} 项贷后任务，回收 ${result.expired_assignments_released} 项过期认领` });
+      onNotice({ kind: "success", text: `扫描 ${result.active_cases_scanned} 笔申请、${result.active_corrections_scanned} 项补件、${result.active_facilities_scanned} 笔授信、${result.control_conditions_scanned} 项贷后条件及 ${result.scorecard_monitoring_events_scanned} 条模型验证预警；新增 ${result.notifications_created} 条通知，升级 ${result.scorecard_monitoring_escalated} 条模型验证任务` });
     } catch (error) {
       onNotice({ kind: "error", text: error instanceof Error ? error.message : "SLA 扫描失败" });
     } finally { setScanning(false); }
@@ -168,6 +168,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
   }
 
   async function supervisorRemind(task: TeamTask, reason: string) {
+    if (task.task_type === "scorecard_monitoring") return;
     const taskId = taskBackendId(task);
     if (!taskId) return;
     setSupervisingId(task.id);
@@ -249,7 +250,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
 }
 
 function PersonalTaskPanel({ queue, assigningId, onAssign, onNavigate }: { queue: PersonalTaskQueue; assigningId: string; onAssign: (task: PersonalTask, action: "claim" | "renew" | "release") => Promise<void>; onNavigate: (action: TaskAction) => void }) {
-  const [filter, setFilter] = useState<"all" | "approval" | "correction" | "post_credit" | "risk">("all");
+  const [filter, setFilter] = useState<"all" | "approval" | "correction" | "post_credit" | "scorecard_monitoring" | "risk">("all");
   const tasks = queue.tasks.filter((task) => filter === "all"
     || task.task_type === filter
     || (filter === "post_credit" && ["facility_control", "control_extension"].includes(task.task_type))
@@ -264,10 +265,11 @@ function PersonalTaskPanel({ queue, assigningId, onAssign, onNavigate }: { queue
       <span><small>审批环节</small><strong>{queue.summary.approval}</strong></span>
       <span><small>补件任务</small><strong>{queue.summary.correction}</strong></span>
       <span><small>贷后任务</small><strong>{queue.summary.post_credit}</strong></span>
+      <span><small>模型验证</small><strong>{queue.summary.scorecard_monitoring}</strong></span>
       <span className={queue.summary.overdue + queue.summary.escalated ? "danger" : ""}><small>超时风险</small><strong>{queue.summary.overdue + queue.summary.escalated}</strong></span>
     </div>
     <div className="personal-task-filters">
-      {([["all", "全部"], ["approval", "审批"], ["correction", "补件"], ["post_credit", "贷后"], ["risk", "时限风险"]] as const).map(([key, label]) => <button className={filter === key ? "active" : ""} key={key} onClick={() => setFilter(key)}>{label}</button>)}
+      {([["all", "全部"], ["approval", "审批"], ["correction", "补件"], ["post_credit", "贷后"], ["scorecard_monitoring", "模型验证"], ["risk", "时限风险"]] as const).map(([key, label]) => <button className={filter === key ? "active" : ""} key={key} onClick={() => setFilter(key)}>{label}</button>)}
     </div>
     {tasks.length ? <div className="personal-task-list">{tasks.map((task) => <PersonalTaskCard task={task} assigning={assigningId === task.id} onAssign={onAssign} onNavigate={onNavigate} key={task.id} />)}</div> : <div className="notification-empty compact"><span>✓</span><strong>{queue.tasks.length ? "当前筛选条件下没有待办" : "当前角色没有待办任务"}</strong><p>任务会随审批环节和补件责任自动流转。</p></div>}
   </section>;
@@ -278,12 +280,12 @@ function PersonalTaskCard({ task, assigning, onAssign, onNavigate }: { task: Per
     <div className={`personal-task-kind ${task.task_type}`}>{taskTypeLabel(task.task_type)}</div>
     <div className="personal-task-main">
       <header><strong>{task.title}</strong><span>{taskSlaLabel(task.sla_status)}</span></header>
-      <p>{task.counterparty_name} · {task.case_id ?? "未关联审批单"}</p>
+      <p>{task.counterparty_name} · {task.task_type === "scorecard_monitoring" ? task.stage_label : task.case_id ?? "未关联审批单"}</p>
       <small>{task.description}</small>
       <footer><span>截止 {formatTime(task.due_at)}</span>{!task.claimable && <em>系统按角色直派</em>}{task.viewer_mode === "collaborator" && <em>协作处理</em>}{task.assigned_to_name && <em>{task.assigned_to_name} 已认领 · {formatLease(task.lease_remaining_seconds)}后回收</em>}{task.assignment_expired && <em className="expired">上次认领已超时回收</em>}</footer>
     </div>
     <div className="personal-task-actions">
-      {!task.claimable ? <button onClick={() => onNavigate(task.action)}>{task.task_type === "control_extension" ? "前往审批" : "前往落实"}</button> : task.assignment_state === "unassigned" ? <button disabled={assigning} onClick={() => void onAssign(task, "claim")}>{assigning ? "认领中…" : "认领任务"}</button> : task.assignment_state === "mine" ? <><button onClick={() => onNavigate(task.action)}>立即处理</button><button className="renew" disabled={assigning} onClick={() => void onAssign(task, "renew")}>续期</button><button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>释放</button></> : <><span>{task.assigned_to_name ?? "他人"}处理中</span>{task.can_release && <button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>{assigning ? "释放中…" : "管理员释放"}</button>}</>}
+      {!task.claimable ? <button onClick={() => onNavigate(task.action)}>{task.task_type === "control_extension" ? "前往审批" : task.task_type === "scorecard_monitoring" ? "前往处置" : "前往落实"}</button> : task.assignment_state === "unassigned" ? <button disabled={assigning} onClick={() => void onAssign(task, "claim")}>{assigning ? "认领中…" : "认领任务"}</button> : task.assignment_state === "mine" ? <><button onClick={() => onNavigate(task.action)}>立即处理</button><button className="renew" disabled={assigning} onClick={() => void onAssign(task, "renew")}>续期</button><button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>释放</button></> : <><span>{task.assigned_to_name ?? "他人"}处理中</span>{task.can_release && <button className="release" disabled={assigning} onClick={() => void onAssign(task, "release")}>{assigning ? "释放中…" : "管理员释放"}</button>}</>}
     </div>
   </article>;
 }
@@ -562,11 +564,11 @@ function eligibleRoles(task: DocumentCorrectionTask): DocumentCorrection["assign
 }
 function correctionRoleLabel(role: DocumentCorrection["assigned_role"]): string { return ({ client: "企业客户", relationship_manager: "客户经理", risk_manager: "风控经理", approver: "授信审批人" } as const)[role]; }
 function taskBackendId(task: PersonalTask): string | null { return task.task_type === "approval" ? task.case_id : task.task_type === "correction" ? task.correction_id : task.task_type === "facility_control" ? task.condition_id ?? null : task.extension_id ?? null; }
-function taskTypeLabel(type: PersonalTask["task_type"]): string { return ({ approval: "审批", correction: "补件", facility_control: "贷后", control_extension: "延期" } as const)[type]; }
+function taskTypeLabel(type: PersonalTask["task_type"]): string { return ({ approval: "审批", correction: "补件", facility_control: "贷后", control_extension: "延期", scorecard_monitoring: "模型" } as const)[type]; }
 function teamRoleLabel(role: string): string { return ({ client: "企业客户", relationship_manager: "客户经理", risk_manager: "风控经理", model_admin: "模型管理员", approver: "授信审批人", operations: "运营值班", admin: "平台管理员" } as Record<string, string>)[role] ?? role; }
 function correctionSlaLabel(status: DocumentCorrection["sla_status"]): string { return ({ normal: "时限正常", due_soon: "即将超时", overdue: "已超时", escalated: "升级催办", stopped: "已停止" } as const)[status]; }
 function taskSlaLabel(status: PersonalTask["sla_status"]): string { return ({ normal: "时限正常", due_soon: "即将超时", overdue: "已超时", escalated: "升级处置" } as const)[status]; }
 function correctionActionLabel(eventType: DocumentCorrectionTask["recent_actions"][number]["event_type"]): string { return ({ correction_manually_reminded: "人工催办", correction_reassigned: "责任转派", correction_sla_extended: "SLA 延期" } as const)[eventType]; }
-function levelLabel(level: NotificationRecord["level"]): string { return ({ due_soon: "即将超时", overdue: "已超时", escalated: "升级催办", reminder: "人工催办", assignment: "任务转派", extension: "SLA 延期", task_created: "新增任务", resubmitted: "等待复核", reopened: "重新补件", completed: "核验完成", resumed: "审批恢复", supervisor_reminder: "个人催办", lease_due_soon: "租约临期", lease_expired: "认领回收", policy_blocked: "策略切换阻断", scan_failed: "扫描失败" } as const)[level]; }
+function levelLabel(level: NotificationRecord["level"]): string { return ({ due_soon: "即将超时", overdue: "已超时", escalated: "升级催办", opened: "新增预警", pending_revalidation: "等待复验", closed: "已闭环", reminder: "人工催办", assignment: "任务转派", extension: "SLA 延期", task_created: "新增任务", resubmitted: "等待复核", reopened: "重新补件", completed: "核验完成", resumed: "审批恢复", supervisor_reminder: "个人催办", lease_due_soon: "租约临期", lease_expired: "认领回收", policy_blocked: "策略切换阻断", scan_failed: "扫描失败" } as const)[level]; }
 function formatLease(value: number | null): string { if (value === null) return "即将"; const totalMinutes = Math.max(1, Math.floor(value / 60)); const hours = Math.floor(totalMinutes / 60); const minutes = totalMinutes % 60; return hours ? `${hours}小时${minutes}分` : `${minutes}分钟`; }
 function formatTime(value: string | null): string { return value ? new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "—"; }

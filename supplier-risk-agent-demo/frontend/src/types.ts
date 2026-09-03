@@ -950,6 +950,35 @@ export type RenewalDocumentCarryover = {
 
 export type RatingResult = {
   total_score: number;
+  scorecard_score?: number;
+  scorecard_raw_score?: number;
+  scorecard_execution?: {
+    scorecard_asset_id: string;
+    code: string;
+    version: number;
+    config_hash: string;
+    binding_hash: string;
+    score_scale: { min: number; max: number; higher_is_better: boolean };
+    raw_range: { min: number; max: number };
+    raw_score: number;
+    normalized_score: number;
+    scaled_score: number;
+    missing_count: number;
+    details: Array<{
+      indicator_code: string;
+      indicator_version: string;
+      indicator_name: string;
+      field_path: string;
+      actual_value: unknown;
+      bin_kind: "range" | "category" | "missing";
+      bin_label: string;
+      score: number;
+      woe?: number | null;
+      weight: number;
+      weighted_score: number;
+      missing: boolean;
+    }>;
+  };
   rating: string;
   risk_level?: string;
   suggested_limit: number;
@@ -1298,22 +1327,44 @@ export type RuleCenterReplayDataset = {
 export type RuleCenterReplayComparisonSide = {
   failure_count: number; failure_rate: number;
   score_mean: number | null; score_min: number | null; score_max: number | null; score_median: number | null;
+  raw_score_mean: number | null; raw_score_min: number | null; raw_score_max: number | null;
+  business_score_mean: number | null; business_score_min: number | null; business_score_max: number | null;
   rating_distribution: Record<string, number>; admission_distribution: Record<string, number>; score_distribution: Record<string, number>;
   ks: number | null; confusion_matrix: { tp: number; fp: number; tn: number; fn: number } | null;
+};
+
+export type RuleCenterReplayComparisonException = {
+  id: string; comparison_run_id: string; comparison_evidence_hash: string;
+  status: "pending_review" | "approved" | "rejected";
+  reason: string; business_impact: string; compensating_controls: string;
+  valid_until: string; request_hash: string;
+  requested_by: string; requested_by_name: string;
+  reviewed_by: string | null; reviewed_by_name: string | null;
+  reviewed_at: string | null; review_comment: string | null;
+  row_version: number; created_at: string | null; updated_at: string | null;
 };
 
 export type RuleCenterReplayComparison = {
   id: string; dataset_snapshot_id: string; dataset_snapshot_hash: string;
   champion_model_key: string; champion_model_version: string; challenger_model_key: string; challenger_model_version: string;
+  challenger_change_id: string | null; challenger_config_hash: string | null;
   champion_pipeline_code: string; champion_pipeline_version: number | null; challenger_pipeline_code: string; challenger_pipeline_version: number | null;
   segment_field: string; evidence_level: "labeled" | "unlabeled";
-  config: { sample_limit: number; max_execution_failure_rate: number; positive_labels: string[]; positive_admissions: string[] };
+  config: {
+    sample_limit: number; max_execution_failure_rate: number; positive_labels: string[]; positive_admissions: string[];
+    score_comparison_basis: "standardized_0_100";
+    score_scales: Record<"champion" | "challenger", { min: number; max: number; higher_is_better: boolean; standard_min: 0; standard_max: 100 }>;
+    thresholds: { max_psi: number; max_rating_change_rate: number; max_admission_change_rate: number; max_absolute_average_score_delta: number; max_segment_absolute_score_delta: number; max_ks_drop: number; require_labeled_evidence: boolean };
+  };
   metrics: {
     sample_count: number; labeled_sample_count: number; champion: RuleCenterReplayComparisonSide; challenger: RuleCenterReplayComparisonSide;
     average_score_delta: number | null; rating_change_rate: number; admission_change_rate: number; psi: number;
     segments: Array<{ segment: string; sample_count: number; champion_score_mean: number | null; challenger_score_mean: number | null; average_score_delta: number | null; rating_change_rate: number; admission_change_rate: number }>;
     warning: string | null;
   };
+  gate: { passed: boolean; summary: string; violations: Array<{ key: string; label: string; actual: number; threshold: number; direction: "maximum" | "required"; message: string }>; warnings: string[] };
+  effective_status: "passed" | "blocked" | "exception_pending" | "exception_approved";
+  latest_exception: RuleCenterReplayComparisonException | null;
   evidence_hash: string; created_by_name: string; created_at: string | null;
 };
 
@@ -1358,6 +1409,387 @@ export type IndicatorPoolResponse = {
   summary: { indicator_count: number; category_count: number; use_cases: string[]; category_counts: Record<string, number> };
   result_count: number;
   indicators: EnterpriseRiskIndicator[];
+};
+
+export type IndicatorCatalogItem = {
+  code: string; name: string; category: string; data_type: "numeric" | "categorical" | "boolean";
+  version: string; version_source: "indicator_factory" | "enterprise_pool"; field_path: string | null;
+  description: string; default_weight: number;
+};
+
+export type CreditCalibrationCandidate = {
+  score_threshold_shift: number; limit_multiplier_scale: number; revenue_limit_scale: number;
+  order_amount_scale: number; payment_term_scale: number; overdue_rate_high: number;
+  limit_utilization_high: number; invoice_match_rate_low: number; delivery_fulfillment_rate_low: number;
+};
+
+export type CreditCalibrationConfig = {
+  template_key: "corporate_credit_v2"; model_name: string; model_version: string; model_config_hash: string;
+  policy_status: string; default_candidate: CreditCalibrationCandidate; parameter_notes: Record<string, string>;
+  rating_bands: Array<{ rating: string; score_min: number; score_max: number; limit_multiplier: number; payment_term_days: number; access_strategy: string }>;
+};
+
+export type CreditCalibrationAnalyzeRequest = {
+  dataset_snapshot_id: string; template_key: "corporate_credit_v2"; positive_labels: string[];
+  sample_limit: number; candidate: CreditCalibrationCandidate;
+};
+
+export type CreditCalibrationModelChangeRequest = CreditCalibrationAnalyzeRequest & {
+  candidate_version: string; change_reason: string; expected_evidence_hash: string;
+};
+
+export type CreditCalibrationRun = {
+  id: string; plan_id: string; plan_config_hash: string; base_model_version: string; baseline_config_hash: string;
+  dataset_snapshot_id: string; dataset_snapshot_hash: string; status: "completed" | "failed";
+  report: CreditCalibrationResult; evidence_hash: string; evidence_level: "supervised" | "degraded";
+  current_valid: boolean; error_message: string | null; created_by: string; created_by_name: string;
+  started_at: string; completed_at: string | null; created_at: string;
+};
+
+export type CreditCalibrationPlan = {
+  id: string; code: string; name: string; version: number; template_key: "corporate_credit_v2";
+  status: "draft" | "pending_review" | "approved" | "rejected"; candidate: CreditCalibrationCandidate;
+  positive_labels: string[]; sample_limit: number; business_basis: string; config_hash: string;
+  created_by: string; created_by_name: string; submitted_at: string | null; reviewed_by: string | null;
+  reviewed_by_name: string | null; review_comment: string | null; reviewed_at: string | null;
+  row_version: number; created_at: string; updated_at: string; runs: CreditCalibrationRun[];
+  latest_valid_run_id: string | null;
+};
+
+export type CreditCalibrationComparison = {
+  comparable: boolean; compatibility: { same_snapshot: boolean; same_baseline: boolean }; message: string;
+  items: Array<{
+    plan_id: string; code: string; name: string; version: number; status: CreditCalibrationPlan["status"];
+    run_id: string; evidence_level: CreditCalibrationRun["evidence_level"]; snapshot_hash: string; baseline_config_hash: string;
+    metrics: Pick<CreditCalibrationMetrics, "automatic_approval_rate" | "manual_review_rate" | "reject_rate" | "average_limit" | "total_limit" | "average_payment_term_days" | "event_exposure_ratio" | "restricted_event_capture_rate">;
+    migration: CreditCalibrationResult["migration"];
+  }>;
+};
+
+export type CreditCalibrationDistribution = { key: string; label?: string; count: number; rate: number };
+export type CreditCalibrationMetrics = {
+  sample_count: number; average_score: number; automatic_approval_rate: number; manual_review_rate: number; reject_rate: number;
+  average_limit: number; median_limit: number; total_limit: number; average_payment_term_days: number;
+  event_exposure_ratio: number | null; restricted_event_capture_rate: number | null; event_limit: number | null; non_event_limit: number | null;
+  rating_distribution: CreditCalibrationDistribution[]; admission_distribution: CreditCalibrationDistribution[];
+  limit_distribution: CreditCalibrationDistribution[]; payment_term_distribution: CreditCalibrationDistribution[];
+};
+
+export type CreditCalibrationResult = {
+  generated_at: string; evidence_hash: string; governance_note: string; warnings: string[];
+  model: { template_key: string; name: string; version: string; baseline_config_hash: string; candidate_config_hash: string };
+  snapshot: { id: string; dataset_id: string; dataset_code: string; dataset_name: string; version: number; as_of_date: string; content_hash: string; sample_count: number };
+  baseline_parameters: CreditCalibrationCandidate;
+  sample: { selected_count: number; paired_success_count: number; failure_count: number; labeled_count: number; event_count: number; non_event_count: number; label_coverage_rate: number; evidence_level: "supervised" | "degraded" };
+  candidate_parameters: CreditCalibrationCandidate; baseline: CreditCalibrationMetrics; candidate: CreditCalibrationMetrics;
+  deltas: Record<string, number | null>;
+  migration: { rating_changed_count: number; rating_change_rate: number; rating_improved_count: number; rating_worsened_count: number; admission_changed_count: number; admission_change_rate: number; rating_cells: Array<{ from: string; to: string; count: number }>; admission_cells: Array<{ from: string; to: string; count: number }> };
+  sensitivity: Array<{ score_threshold_shift: number; automatic_approval_rate: number; manual_review_rate: number; reject_rate: number; average_limit: number; total_limit: number; event_exposure_ratio: number | null }>;
+  failures: Array<{ sample_id: string; reason: string }>;
+};
+
+export type ScorecardBin = {
+  kind: "range" | "category" | "missing"; label: string; score: number; woe: number | null;
+  lower?: number | null; upper?: number | null; lower_inclusive?: boolean; upper_inclusive?: boolean; values?: string[] | null;
+};
+
+export type ScorecardIndicatorBinding = {
+  indicator_code: string; indicator_version: string; indicator_name: string;
+  field_path: string;
+  data_type: "numeric" | "categorical" | "boolean"; weight: number; bins: ScorecardBin[];
+};
+
+export type ScorecardDefinitionPayload = {
+  code: string; name: string; description: string;
+  score_scale: { min: number; max: number; higher_is_better: boolean };
+  indicators: ScorecardIndicatorBinding[];
+};
+
+export type ScorecardDependencyNode = {
+  id: string; type: "scorecard" | "indicator" | "model" | "pipeline" | "rule_set" | "rule" | "release_package";
+  code: string; name: string; version: string | null; status: string; lifecycle: "candidate" | "dependency" | "active" | "evidence" | "inflight";
+  model_kind?: "release" | "snapshot" | "change"; directly_bound?: boolean; field_path?: string; config_hash?: string;
+};
+
+export type ScorecardDependencyGraph = {
+  schema_version: "scorecard-dependency-graph-v1"; root_id: string;
+  nodes: ScorecardDependencyNode[];
+  edges: Array<{ source: string; target: string; relation: string; direct: boolean }>;
+  summary: Record<"indicator" | "model" | "pipeline" | "rule_set" | "rule" | "release_package", number>;
+  risks: Array<{ key: string; severity: "high" | "medium"; label: string; count: number; node_ids: string[] }>;
+  required_actions: string[]; graph_hash: string;
+};
+
+export type ScorecardChange = {
+  id: string; code: string; base_version: string; candidate_version: string;
+  status: "draft" | "submitted" | "published" | "rejected"; definition: ScorecardDefinitionPayload;
+  validation: { valid: boolean; errors: string[]; warnings: string[]; summary: { indicator_count: number; total_weight: number; score_min: number; score_max: number; bin_count: number } };
+  impact: {
+    indicator_codes: string[]; affected_models: string[]; inflight_model_drafts: string[];
+    dependency_graph: ScorecardDependencyGraph; dependency_graph_hash: string;
+    dependency_graph_current_hash: string; dependency_graph_drifted: boolean; dependency_graph_legacy: boolean;
+  };
+  change_reason: string; created_by: string; created_by_name: string; reviewed_by_name: string | null;
+  review_comment: string | null; row_version: number; created_at: string | null; submitted_at: string | null; published_at: string | null;
+};
+
+export type ScorecardAsset = {
+  id: string; code: string; name: string; description: string; version: number; status: string; is_active: boolean;
+  config: ScorecardDefinitionPayload; config_hash: string; change_id: string; created_by_name: string; published_at: string | null;
+};
+
+export type ScorecardDevelopmentExclusionRule = {
+  field_path: string; operator: "equals" | "not_equals" | "in" | "is_missing" | "not_missing"; value: unknown; reason: string;
+};
+
+export type ScorecardValidationThresholds = {
+  require_validation_snapshot: boolean; require_oot_snapshot: boolean; require_probability_evidence: boolean; require_sensitive_attribute_evidence: boolean;
+  min_auc: number; min_ks: number; max_brier: number; max_score_psi: number; min_segment_coverage: number;
+  max_event_rate_gap: number; max_average_score_gap: number; max_auc_gap: number; max_ks_gap: number;
+  max_false_positive_rate_gap: number; max_false_negative_rate_gap: number;
+};
+
+export type ScorecardValidationPolicy = {
+  id: string; code: string; name: string; description: string; version: number;
+  status: "draft" | "submitted" | "published" | "rejected"; is_active: boolean; is_default: boolean;
+  applicable_scorecard_codes: string[]; thresholds: ScorecardValidationThresholds; config_hash: string;
+  change_reason: string; created_by: string; created_by_name: string; reviewed_by_name: string | null;
+  review_comment: string | null; row_version: number; created_at: string | null; submitted_at: string | null; published_at: string | null;
+};
+
+export type ScorecardValidationPolicySnapshot = {
+  id: string; code: string; name: string; version: number; config_hash: string; is_default: boolean;
+  applicable_scorecard_codes: string[]; thresholds: ScorecardValidationThresholds;
+};
+
+export type ScorecardDevelopmentRun = {
+  id: string; scorecard_asset_id: string; scorecard_code: string; scorecard_version: number; scorecard_config_hash: string;
+  dataset_snapshot_id: string; dataset_snapshot_hash: string;
+  validation_policy_id?: string | null; validation_policy_hash?: string | null;
+  validation_policy?: ScorecardValidationPolicySnapshot | null; validation_policy_integrity_valid?: boolean;
+  validation_snapshot_id?: string | null; validation_snapshot_hash?: string | null;
+  oot_snapshot_id?: string | null; oot_snapshot_hash?: string | null;
+  label_policy: {
+    positive_labels: string[]; observation_start: string | null; observation_end: string | null;
+    performance_window_days: number; maturity_days: number; min_sample_count: number; min_event_count: number; min_non_event_count: number;
+    subject_id_field?: string; predicted_probability_field?: string | null;
+    segment_fields?: string[]; sensitive_attribute_fields?: string[]; min_segment_sample_count?: number; classification_threshold?: number;
+    validation_thresholds: ScorecardValidationThresholds;
+    exclusion_rules: ScorecardDevelopmentExclusionRule[];
+  };
+  report: {
+    schema_version: "scorecard-development-report-v1" | "scorecard-development-report-v2" | "scorecard-development-report-v3" | "scorecard-development-report-v4"; evidence_level: "labeled" | "degraded" | "unlabeled";
+    summary: { snapshot_sample_count: number; eligible_sample_count: number; event_count: number; non_event_count: number; unlabeled_count: number; immature_count: number; outside_window_count: number; excluded_count: number; exclusion_reasons: Record<string, number>; total_information_value: number };
+    gates: Record<"sample_count" | "event_count" | "non_event_count", { actual: number; required: number; passed: boolean }>;
+    label_definition: { positive_labels: string[]; observation_start: string | null; observation_end: string | null; performance_window_days: number; maturity_days: number };
+    indicators: Array<{
+      indicator_code: string; indicator_version: string; indicator_name: string; field_path: string; sample_count: number; unmatched_count: number; missing_count: number; information_value: number; event_rate_monotonic: boolean | null;
+      bins: Array<{ bin_index: number; bin_kind: "range" | "category" | "missing"; bin_label: string; configured_woe: number | null; sample_count: number; event_count: number; non_event_count: number; event_rate: number | null; calculated_woe: number | null; iv_contribution: number | null; woe_source: "sample_calculated" }>;
+    }>;
+    performance?: Record<"training" | "validation" | "oot", {
+      sample_count: number; event_count: number; non_event_count: number;
+      auc: number | null; ks: number | null; brier: number | null; probability_coverage_rate: number;
+      score_psi?: number | null; score_distribution: Record<string, number>;
+      calibration: Array<{ range: string; sample_count: number; predicted_rate: number | null; actual_rate: number | null }>;
+    } | null>;
+    split_evidence?: {
+      subject_id_field: string; leakage_passed: boolean;
+      overlaps: Array<{ left: string; right: string; count: number; sample_ids: string[] }>;
+      snapshots: Record<"training" | "validation" | "oot", { id: string; content_hash: string; as_of_date: string } | null>;
+    };
+    fairness?: {
+      status: "tested" | "untestable"; segment_fields: string[]; sensitive_attribute_fields: string[];
+      min_segment_sample_count: number; classification_threshold: number; warnings: string[];
+      splits: Record<"training" | "validation" | "oot", Record<string, {
+        field_path: string; sensitive_attribute: boolean; status: "tested" | "untestable" | "too_many_groups";
+        sample_count: number; covered_count: number; missing_count: number; coverage_rate: number; group_count: number;
+        population_psi?: number | null; distribution: Record<string, number>;
+        disparities: Record<string, number | null>;
+        groups: Array<{
+          group: string; sample_count: number; population_share: number; sample_sufficient: boolean;
+          event_rate: number; average_score: number; auc: number | null; ks: number | null;
+          false_positive_rate: number | null; false_negative_rate: number | null; probability_coverage_rate: number;
+          score_psi?: number | null; score_distribution: Record<string, number>;
+        }>;
+      }> | null>;
+    };
+    validation_gate?: {
+      passed: boolean; summary: string; thresholds: ScorecardValidationThresholds;
+      checks: Array<{ key: string; label: string; scope: string; actual: number | null; threshold: number; operator: string; testable: boolean; passed: boolean; detail: string }>;
+      violations: Array<{ key: string; label: string; scope: string; actual: number | null; threshold: number; operator: string; testable: boolean; passed: false; detail: string }>;
+      warnings: string[];
+    };
+    warnings: string[];
+  };
+  evidence_hash: string; evidence_level: "labeled" | "degraded" | "unlabeled"; integrity_valid: boolean;
+  review_status: "not_required" | "pending_review" | "approved" | "rejected";
+  reviewed_by: string | null; reviewed_by_name: string | null; review_comment: string | null; reviewed_at: string | null;
+  review_hash: string | null; review_integrity_valid: boolean; row_version: number;
+  created_by: string; created_by_name: string; created_at: string | null;
+};
+
+export type ScorecardDevelopmentTrendMetricKey =
+  | "validation_auc" | "validation_ks" | "validation_brier" | "validation_score_psi"
+  | "oot_auc" | "oot_ks" | "oot_brier" | "oot_score_psi"
+  | "max_group_score_psi" | "max_event_rate_gap" | "max_average_score_gap";
+
+export type ScorecardDevelopmentTrendPoint = {
+  run_id: string; scorecard_asset_id: string; scorecard_code: string; scorecard_version: number; scorecard_config_hash: string;
+  created_at: string | null; snapshot_dates: Record<"training" | "validation" | "oot", string | null>;
+  status: "pass" | "block" | "invalid" | "legacy"; evidence_level: "labeled" | "degraded" | "unlabeled";
+  integrity_valid: boolean; review_status: ScorecardDevelopmentRun["review_status"]; violation_count: number; gate_summary: string | null;
+  validation_policy: ScorecardValidationPolicySnapshot | null;
+  metrics: Record<ScorecardDevelopmentTrendMetricKey, number | null>;
+  thresholds: Record<ScorecardDevelopmentTrendMetricKey, number | null>;
+};
+
+export type ScorecardDevelopmentTrends = {
+  generated_at: string;
+  summary: { run_count: number; scorecard_count: number; pass_count: number; block_count: number; invalid_count: number; pending_review_count: number };
+  series: Array<{
+    scorecard_code: string; scorecard_versions: number[]; point_count: number; pass_rate: number | null;
+    latest_status: ScorecardDevelopmentTrendPoint["status"]; latest_run_id: string; points: ScorecardDevelopmentTrendPoint[];
+  }>;
+};
+
+export type ScorecardPortfolioStatus = "healthy" | "attention" | "blocked" | "invalid" | "unmonitored";
+export type ScorecardPortfolioStability = {
+  generated_at: string;
+  summary: {
+    scorecard_count: number; healthy_count: number; attention_count: number; blocked_count: number;
+    invalid_count: number; unmonitored_count: number; open_event_count: number; overdue_event_count: number;
+    enabled_plan_count: number;
+  };
+  rows: Array<{
+    scorecard_code: string; scorecard_name: string; latest_version: number | null; active_asset_id: string | null;
+    status: ScorecardPortfolioStatus; status_reason: string; latest_run_id: string | null; latest_run_at: string | null;
+    latest_run_status: ScorecardDevelopmentTrendPoint["status"] | null; previous_run_id: string | null;
+    evidence_level: ScorecardDevelopmentRun["evidence_level"] | null; integrity_valid: boolean | null;
+    review_status: ScorecardDevelopmentRun["review_status"] | null;
+    metrics: Partial<Record<ScorecardDevelopmentTrendMetricKey, number | null>>;
+    deltas: Partial<Record<ScorecardDevelopmentTrendMetricKey, number | null>>;
+    metric_health: Partial<Record<ScorecardDevelopmentTrendMetricKey, {
+      value: number | null; threshold: number | null; direction: "min" | "max";
+      ratio: number | null; status: "healthy" | "near" | "breach" | "untestable";
+    }>>;
+    threshold_signal_count: number;
+    monitoring: { plan_count: number; enabled_plan_count: number; failed_plan_count: number; next_run_at: string | null; latest_plan_run_at: string | null };
+    open_events: { total: number; critical: number; warning: number; overdue: number; due_soon: number };
+  }>;
+};
+
+export type ScorecardMonitoringRunConfig = {
+  subject_id_field: string; predicted_probability_field?: string | null;
+  segment_fields: string[]; sensitive_attribute_fields: string[];
+  min_segment_sample_count: number; classification_threshold: number; positive_labels: string[];
+  performance_window_days: number; maturity_days: number; min_sample_count: number; min_event_count: number; min_non_event_count: number;
+  exclusion_rules: ScorecardDevelopmentExclusionRule[];
+};
+
+export type ScorecardMonitoringPlan = {
+  id: string; code: string; name: string; description: string;
+  scorecard_asset_id: string; scorecard: { code: string; name: string; version: number; config_hash: string } | null;
+  validation_policy_id: string; validation_policy: { code: string; name: string; version: number; config_hash: string; active: boolean } | null;
+  training_dataset_id: string; validation_dataset_id: string | null; oot_dataset_id: string | null;
+  datasets: Record<"training" | "validation" | "oot", { id: string; code: string; name: string } | null>;
+  run_config: ScorecardMonitoringRunConfig; cadence: "monthly" | "quarterly"; timezone_name: "Asia/Shanghai" | "UTC";
+  enabled: boolean; next_run_at: string; owner: string; last_scheduled_for: string | null; last_run_at: string | null;
+  last_run_id: string | null; last_status: "completed" | "failed" | null; last_error: string | null; row_version: number;
+  created_by: string; updated_by: string; created_at: string | null; updated_at: string | null;
+};
+
+export type ScorecardMonitoringEventType = "gate_failed" | "consecutive_deterioration" | "evidence_integrity_failed" | "policy_integrity_failed" | "scheduled_run_failed";
+export type ScorecardMonitoringSlaRule = { response_hours: number; due_soon_ratio: number; escalation_after_hours: number };
+export type ScorecardMonitoringSlaPolicy = {
+  id: string; code: string; name: string; description: string; version: number;
+  status: "draft" | "submitted" | "published" | "rejected"; is_active: boolean; is_default: boolean;
+  applicable_scorecard_codes: string[]; applicable_event_types: ScorecardMonitoringEventType[];
+  severity_rules: Record<"critical" | "warning", ScorecardMonitoringSlaRule>; config_hash: string;
+  change_reason: string; created_by: string; created_by_name: string; reviewed_by_name: string | null;
+  review_comment: string | null; row_version: number; created_at: string | null; submitted_at: string | null; published_at: string | null;
+};
+export type ScorecardMonitoringSlaPolicySnapshot = {
+  id: string | null; code: string; name: string; version: number; config_hash: string;
+  applicable_scorecard_codes: string[]; applicable_event_types: ScorecardMonitoringEventType[];
+  severity_rules: Record<"critical" | "warning", ScorecardMonitoringSlaRule>;
+};
+
+export type ScorecardMonitoringEvent = {
+  id: string; plan_id: string; run_id: string | null; evidence_hash: string | null;
+  event_type: ScorecardMonitoringEventType;
+  severity: "critical" | "warning"; metric_key: string | null; metric_label: string | null;
+  metric_value: number | null; threshold_value: number | null; threshold_operator: string | null;
+  title: string; description: string; details: Record<string, unknown>;
+  status: "open" | "acknowledged" | "in_remediation" | "pending_revalidation" | "closed"; assignee: string | null;
+  sla_policy_id: string | null; sla_policy_snapshot: ScorecardMonitoringSlaPolicySnapshot | null;
+  sla_policy_snapshot_hash: string | null; sla_policy_integrity_valid: boolean;
+  sla_started_at: string; sla_due_at: string; sla_status: "normal" | "due_soon" | "overdue" | "escalated";
+  escalation_level: number; last_escalated_at: string | null;
+  acknowledged_by: string | null; acknowledged_at: string | null; remediation_plan: string | null; remediation_result: string | null;
+  remediated_by: string | null; remediated_at: string | null; revalidation_run_id: string | null; revalidation_evidence_hash: string | null;
+  revalidation_conclusion: string | null; revalidated_by: string | null; revalidated_by_name: string | null; revalidated_at: string | null;
+  closed_by: string | null; closed_at: string | null; row_version: number; created_by: string; created_at: string | null; updated_at: string | null;
+};
+
+export type ScorecardMonitoringEventFilters = {
+  status?: ScorecardMonitoringEvent["status"];
+  severity?: ScorecardMonitoringEvent["severity"];
+  event_type?: ScorecardMonitoringEventType;
+  assignee?: string;
+  plan_id?: string;
+  scorecard_code?: string;
+  sla_status?: ScorecardMonitoringEvent["sla_status"];
+};
+
+export type ScorecardMonitoringSavedView = {
+  id: string; owner_subject: string; name: string; filters: ScorecardMonitoringEventFilters;
+  is_default: boolean; row_version: number; created_at: string; updated_at: string;
+};
+
+export type ScorecardMonitoringBulkAssignResult = {
+  batch_id: string; assigned_count: number; assignee: string; events: ScorecardMonitoringEvent[];
+};
+
+export type ScorecardMonitoringExecution = {
+  plan: ScorecardMonitoringPlan; run: ScorecardDevelopmentRun | null; events: ScorecardMonitoringEvent[]; idempotent: boolean;
+};
+
+export type ScorecardMonitoringTick = {
+  as_of: string; due_count: number; completed_count: number; failed_count: number; results: ScorecardMonitoringExecution[];
+};
+
+export type ScorecardMonitoringSchedulerRun = {
+  id: string; run_key: string; trigger_type: "manual" | "scheduler" | "retry" | "recovery";
+  status: "running" | "completed" | "partial_failed" | "failed" | "dead_letter";
+  as_of: string; started_at: string; last_heartbeat_at: string | null; completed_at: string | null;
+  actor: string; attempt_number: number; max_attempts: number; recovery_of_run_id: string | null; recovery_reason: string | null;
+  due_count: number; completed_count: number; failed_count: number; backlog_before: number; backlog_after: number;
+  oldest_due_at: string | null; error_type: string | null; error_message: string | null;
+  progress: { completed: number; total: number; last_plan_id: string } | null;
+  can_retry: boolean; can_recover: boolean;
+};
+
+export type ScorecardMonitoringSchedulerExecution = {
+  run: ScorecardMonitoringSchedulerRun | null; tick: ScorecardMonitoringTick | null; deduplicated: boolean;
+  status?: "skipped"; skip_reason?: "scheduler_busy"; active_lease?: ScorecardMonitoringSchedulerHealth["lease"];
+};
+
+export type ScorecardMonitoringSchedulerHealth = {
+  generated_at: string; health: "healthy" | "degraded" | "blocked" | "never";
+  expected_cadence_minutes: number; stale_after_minutes: number; max_attempts: number;
+  lease: {
+    status: "idle" | "active" | "expired"; execution_id: string | null; run_key: string | null;
+    actor: string | null; trigger_type: string | null; acquired_at: string | null; expires_at: string | null;
+    last_heartbeat_at: string | null; heartbeat_count: number; heartbeat_age_seconds: number | null; remaining_seconds: number;
+  };
+  backlog: { count: number; oldest_due_at: string | null; oldest_age_seconds: number };
+  scheduler: { last_run_at: string | null; last_status: string | null; minutes_since_last_run: number | null; next_expected_at: string | null };
+  summary: { returned_runs: number; completed: number; failed: number; dead_letter: number; running: number };
+  runs: ScorecardMonitoringSchedulerRun[];
+};
+
+export type ModelScorecardBinding = {
+  scorecard_asset_id: string; code: string; version: number; config_hash: string; config: ScorecardDefinitionPayload;
 };
 
 export type EnterpriseRiskScreening = {
@@ -1444,6 +1876,7 @@ export type ModelDetail = ModelSummary & {
   editable_indicators: EditableIndicator[];
   indicator_selection: Array<EnterpriseRiskIndicator & { model_weight: number; enabled: boolean }>;
   risk_screening_policy: RiskScreeningPolicy;
+  scorecard_binding: ModelScorecardBinding | null;
   change_reason: string;
 };
 
@@ -1536,6 +1969,7 @@ export type ModelChangeRecord = {
     strategy_mapping: Array<Record<string, string | number>>;
     indicator_selection?: Array<{ indicator_id: string; weight: number; enabled: boolean }>;
     risk_screening_policy?: RiskScreeningPolicy;
+    scorecard_binding?: ModelScorecardBinding | null;
     [key: string]: unknown;
   };
   validation: { valid: boolean; errors: string[]; warnings: string[]; config_hash: string; model_risk?: ModelValidationReport | null };
@@ -1548,10 +1982,52 @@ export type ModelChangeRecord = {
     max_abs_score_delta: number;
     indicator_selection_changed: boolean;
     risk_screening_policy_changed: boolean;
+    scorecard_binding_changed: boolean;
     risk_screening_impacted_count: number;
     max_abs_risk_screening_delta: number;
     average_limit_delta: number;
     details: Array<Record<string, string | number>>;
+  };
+  comparison_evidence: {
+    comparison_run_id?: string;
+    comparison_evidence_hash?: string;
+    dataset_snapshot_id?: string;
+    dataset_snapshot_hash?: string;
+    champion_model_key?: string;
+    champion_model_version?: string;
+    challenger_model_key?: string;
+    challenger_model_version?: string;
+    challenger_config_hash?: string;
+    gate?: RuleCenterReplayComparison["gate"];
+    effective_status?: RuleCenterReplayComparison["effective_status"];
+    current_gate?: RuleCenterReplayComparison["gate"];
+    current_effective_status?: RuleCenterReplayComparison["effective_status"] | "invalid";
+    latest_exception?: RuleCenterReplayComparisonException | null;
+    evidence_level?: "labeled" | "unlabeled";
+    valid_until?: string;
+    binding_hash?: string;
+    current_error?: string;
+  };
+  scorecard_validation_evidence: {
+    validation_run_id?: string;
+    scorecard_asset_id?: string; scorecard_code?: string; scorecard_version?: number; scorecard_config_hash?: string;
+    dataset_snapshot_id?: string; dataset_snapshot_hash?: string;
+    validation_snapshot_id?: string | null; validation_snapshot_hash?: string | null;
+    oot_snapshot_id?: string | null; oot_snapshot_hash?: string | null;
+    report_schema_version?: string; evidence_level?: "labeled" | "degraded" | "unlabeled";
+    evidence_hash?: string; validation_gate_hash?: string; validation_gate_summary?: string;
+    review_hash?: string; reviewed_by_name?: string; reviewed_at?: string;
+    bound_at?: string; bound_by_name?: string; binding_hash?: string;
+    current_valid?: boolean; current_error?: string;
+  };
+  calibration_evidence: {
+    schema_version?: string; dataset_snapshot_id?: string; dataset_snapshot_hash?: string;
+    plan_id?: string; plan_code?: string; plan_version?: number; plan_config_hash?: string;
+    plan_reviewed_by?: string; calibration_run_id?: string;
+    template_key?: string; base_model_version?: string; baseline_config_hash?: string;
+    candidate_config_hash?: string; analysis?: CreditCalibrationResult;
+    bound_at?: string; bound_by?: string; bound_by_name?: string; binding_hash?: string;
+    current_valid?: boolean; current_error?: string;
   };
   change_reason: string;
   created_by: string;
@@ -1738,12 +2214,15 @@ export type ModelGovernanceNotification = {
 export type ApiErrorShape = { detail?: string };
 
 export type TaskAction = {
-  page?: "documents" | "approvals" | "facilities";
+  page?: "documents" | "approvals" | "facilities" | "indicators";
   counterparty_id?: string;
   case_id?: string;
   correction_id?: string;
   facility_id?: string;
   condition_id?: string;
+  monitoring_event_id?: string;
+  run_id?: string | null;
+  plan_id?: string;
 };
 
 export type NotificationRecord = {
@@ -1753,7 +2232,7 @@ export type NotificationRecord = {
   recipient_role: string;
   recipient_subject: string | null;
   category: string;
-  level: "due_soon" | "overdue" | "escalated" | "reminder" | "assignment" | "extension" | "task_created" | "resubmitted" | "reopened" | "completed" | "resumed" | "supervisor_reminder" | "lease_due_soon" | "lease_expired" | "policy_blocked" | "scan_failed";
+  level: "due_soon" | "overdue" | "escalated" | "opened" | "pending_revalidation" | "closed" | "reminder" | "assignment" | "extension" | "task_created" | "resubmitted" | "reopened" | "completed" | "resumed" | "supervisor_reminder" | "lease_due_soon" | "lease_expired" | "policy_blocked" | "scan_failed";
   severity: "info" | "warning" | "critical";
   title: string;
   message: string;
@@ -1765,10 +2244,10 @@ export type NotificationRecord = {
 
 export type PersonalTask = {
   id: string;
-  task_type: "approval" | "correction" | "facility_control" | "control_extension";
+  task_type: "approval" | "correction" | "facility_control" | "control_extension" | "scorecard_monitoring";
   title: string;
   description: string;
-  counterparty_id: string;
+  counterparty_id: string | null;
   counterparty_name: string;
   case_id: string | null;
   stage: string;
@@ -1778,6 +2257,7 @@ export type PersonalTask = {
   facility_id?: string | null;
   condition_id?: string | null;
   extension_id?: string | null;
+  monitoring_event_id?: string | null;
   status: string;
   sla_status: "normal" | "due_soon" | "overdue" | "escalated";
   due_at: string | null;
@@ -1819,6 +2299,7 @@ export type PersonalTaskQueue = {
     correction: number;
     facility_control: number;
     control_extension: number;
+    scorecard_monitoring: number;
     post_credit: number;
     due_soon: number;
     overdue: number;
@@ -1886,6 +2367,11 @@ export type SlaScanResult = {
   control_alerts_opened: number;
   control_conditions_escalated: number;
   control_notifications_created: number;
+  scorecard_monitoring_events_scanned: number;
+  scorecard_monitoring_due_soon: number;
+  scorecard_monitoring_overdue: number;
+  scorecard_monitoring_escalated: number;
+  scorecard_monitoring_notifications_created: number;
   failure_notifications_resolved: number;
   execution_id: string;
   execution_tracked: boolean;

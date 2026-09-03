@@ -69,6 +69,12 @@ def get_editable_indicators(config: dict) -> list[dict]:
         native = EDITABLE_INDICATORS
     rows = [dict(item) for item in native]
     existing_paths = {item["path"] for item in rows}
+    for indicator in (config.get("scorecard_binding") or {}).get("config", {}).get("indicators", []):
+        if indicator.get("data_type") != "numeric" or indicator.get("field_path") in existing_paths:
+            continue
+        boundaries = [value for band in indicator.get("bins", []) for value in (band.get("lower"), band.get("upper")) if value is not None]
+        rows.append({"path": indicator["field_path"], "label": f"[治理评分卡] {indicator['indicator_name']}", "unit": "数值", "step": 1.0, "min": min(boundaries, default=0) - 100, "max": max(boundaries, default=100) + 100, "source": "governed_scorecard"})
+        existing_paths.add(indicator["field_path"])
     for indicator in build_model_indicator_details(config):
         if not indicator["enabled"] or indicator["scoring"]["type"] == "composite_boolean" or indicator["field_path"] in existing_paths:
             continue
@@ -77,10 +83,10 @@ def get_editable_indicators(config: dict) -> list[dict]:
             {
                 "path": indicator["field_path"],
                 "label": f"[企业风险池] {indicator['name']}",
-                "unit": {"boolean": "0/1", "count": "次", "amount": "元", "years": "年"}[data_type],
-                "step": 10000.0 if data_type == "amount" else 1.0,
+                "unit": {"boolean": "0/1", "count": "次", "amount": "元", "years": "年", "numeric": "数值"}[data_type],
+                "step": 10000.0 if data_type == "amount" else 0.01 if data_type == "numeric" else 1.0,
                 "min": 0.0,
-                "max": {"boolean": 1.0, "count": 100000.0, "amount": 100000000000.0, "years": 200.0}[data_type],
+                "max": {"boolean": 1.0, "count": 100000.0, "amount": 100000000000.0, "years": 200.0, "numeric": 100000000000.0}[data_type],
                 "source": "enterprise_risk_pool",
             }
         )
@@ -99,6 +105,8 @@ def build_score_calculation_trace(counterparty: dict, config: dict) -> dict:
             "indicator_deductions": [],
             "formula": "总分 = Σ（维度得分 × 维度权重），当前需先修正模型配置后才能计算。",
         }
+    if result.get("scorecard_execution"):
+        return _build_governed_scorecard_trace(result)
     if result.get("scorecard_type") == "corporate_credit_v2":
         return _build_corporate_trace(result, config)
     if config.get("scorecard_type") == "tech_enterprise_basic":
@@ -133,6 +141,29 @@ def build_score_calculation_trace(counterparty: dict, config: dict) -> dict:
         "dimension_contributions": dimension_rows,
         "indicator_deductions": deductions,
         "formula": "总分 = Σ（维度得分 × 维度权重），经强规则处理后，再由企业风险贷策层按最严格结果收紧",
+    }
+
+
+def _build_governed_scorecard_trace(result: dict) -> dict:
+    execution = result["scorecard_execution"]
+    indicator_rows = [
+        {
+            "维度": "治理评分卡", "指标组": f"{execution['code']}@v{execution['version']}",
+            "指标": item["indicator_name"], "原始值": "缺失" if item["missing"] else str(item["actual_value"]),
+            "标准分": item["score"], "有效权重": f"{item['weight']:g}%",
+            "扣分": round(max(0, item["max_score"] - item["score"]) * item["weight"] / 100, 2),
+            "证据": f"{item['field_path']} @ {item['indicator_version']}",
+            "运算": f"命中 {item['bin_label']}，箱分 {item['score']:g} × 权重 {item['weight']:g}%",
+            "数据状态": "待补充" if item["missing"] else "已取得",
+        }
+        for item in execution["details"]
+    ]
+    return {
+        "ok": True, "result": result,
+        "dimension_contributions": [{"维度": "治理评分卡", "维度得分": execution["normalized_score"], "权重": "100%", "加权贡献": execution["normalized_score"], "计算公式": f"原始分 {execution['raw_score']:g} 映射至标准分 {execution['normalized_score']:g}"}],
+        "indicator_deductions": indicator_rows,
+        "data_quality": {"缺失指标": str(execution["missing_count"]), "评分卡版本": f"{execution['code']}@v{execution['version']}", "配置哈希": execution["config_hash"]},
+        "formula": f"评分卡业务刻度分 {execution['scaled_score']:g}；标准分 {execution['normalized_score']:g} 用于既有评级与策略区间",
     }
 
 

@@ -3,18 +3,20 @@ import { api, devIdentities, getToken, setToken } from "./api";
 import AuthorityPolicyCenter from "./AuthorityPolicyCenter";
 import ModelLab from "./ModelLab";
 import RuleCenter from "./RuleCenter";
+import IndicatorCenter from "./IndicatorCenter";
 import type { ApprovalAction, ApprovalCase, Counterparty, CreditAuthority, CreditFacility, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskBaseline, RenewalRiskReview, TaskAction } from "./types";
 
 const PostCreditCenter = lazy(() => import("./PostCreditCenter"));
 const OperationsCenter = lazy(() => import("./OperationsCenter"));
 
-type PageKey = "overview" | "counterparties" | "approvals" | "models" | "rules" | "documents" | "operations" | "facilities";
+type PageKey = "overview" | "counterparties" | "approvals" | "indicators" | "models" | "rules" | "documents" | "operations" | "facilities";
 type ApprovalQueueFilter = "all" | "active" | "mine" | "urgent" | "supplement" | "completed";
 
 const navItems: Array<{ key: PageKey; label: string; caption: string; icon: string }> = [
   { key: "overview", label: "风险总览", caption: "经营与审批态势", icon: "◫" },
   { key: "counterparties", label: "客商中心", caption: "客户与供应商画像", icon: "◎" },
   { key: "approvals", label: "授信审批", caption: "八阶段工作流", icon: "◇" },
+  { key: "indicators", label: "指标配置", caption: "分箱、权重与评分卡", icon: "▦" },
   { key: "models", label: "模型实验室", caption: "运算链与影响模拟", icon: "⌬" },
   { key: "rules", label: "决策规则", caption: "规则与管线编排", icon: "≋" },
   { key: "documents", label: "资料中心", caption: "可信资料与归档", icon: "▤" },
@@ -26,6 +28,7 @@ const pageMeta: Record<PageKey, { eyebrow: string; description: string; zones: s
   overview: { eyebrow: "MANAGEMENT OVERVIEW", description: "集中查看组合风险、审批态势与授信敞口，再进入对应业务工作台处理。", zones: ["经营指标", "近期审批", "组合风险"], actionHint: "先识别风险，再进入业务模块" },
   counterparties: { eyebrow: "COUNTERPARTY WORKSPACE", description: "从组合筛查进入单户画像，核对原始资料、治理数据和模型结果。", zones: ["组合评级", "企业画像", "原始数据", "数据治理"], actionHint: "筛选企业后查看完整风险证据" },
   approvals: { eyebrow: "CREDIT WORKFLOW", description: "按申请队列、当前责任人和资料门禁推动八阶段审批，所有决策均保留审计轨迹。", zones: ["申请队列", "流程指引", "当前办理", "决策与授权"], actionHint: "主按钮推动当前环节，异常操作独立标识" },
+  indicators: { eyebrow: "INDICATOR FACTORY", description: "从指标目录选择固定版本，配置分箱、分值和权重，形成经独立复核的评分卡资产。", zones: ["指标目录", "分箱设计", "权重刻度", "变更治理"], actionHint: "先完成分箱校验，再提交独立复核" },
   models: { eyebrow: "MODEL WORKSPACE", description: "从结果概览向下追溯运算链、风险指标、决策规则与模型发布治理。", zones: ["结果概览", "评分与模拟", "风险指标", "决策规则", "治理发布"], actionHint: "先看结果，再逐层解释与配置" },
   rules: { eyebrow: "DECISION ORCHESTRATION", description: "集中配置规则、规则集与决策管线，通过测试、模拟和独立复核控制生产生效。", zones: ["规则资产", "规则集", "管线编排", "变更治理"], actionHint: "配置先保存为治理草稿，由独立复核人批准后生效" },
   documents: { eyebrow: "DOCUMENT WORKSPACE", description: "区分资料承接、当期更新、独立核验、退补任务与可信归档，逐项消除流程阻断。", zones: ["资料承接", "逐项核验", "退补追踪", "可信归档"], actionHint: "绿色已满足，黄色待处理，红色为缺口" },
@@ -77,6 +80,8 @@ function App() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [documentFocus, setDocumentFocus] = useState<{ counterpartyId: string; caseId?: string; correctionId?: string } | null>(null);
   const [facilityFocus, setFacilityFocus] = useState<{ caseId: string; facilityId?: string; conditionId?: string } | null>(null);
+  const [indicatorFocus, setIndicatorFocus] = useState<{ monitoringEventId?: string; runId?: string | null } | null>(null);
+  const [modelFocus, setModelFocus] = useState<{ modelKey: string; requestId: number } | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<ApprovalCase | null>(null);
   const [busy, setBusy] = useState(true);
@@ -130,6 +135,11 @@ function App() {
     setPage("documents");
   }
 
+  function openModelGovernance(modelKey: string) {
+    setModelFocus({ modelKey, requestId: Date.now() });
+    setPage("models");
+  }
+
   function openNotificationTarget(action: TaskAction) {
     if (action.page === "documents" && action.counterparty_id) {
       setDocumentFocus({
@@ -149,6 +159,11 @@ function App() {
     if (action.page === "facilities" && action.case_id) {
       setFacilityFocus({ caseId: action.case_id, facilityId: action.facility_id, conditionId: action.condition_id });
       setPage("facilities");
+      return;
+    }
+    if (action.page === "indicators") {
+      setIndicatorFocus({ monitoringEventId: action.monitoring_event_id, runId: action.run_id });
+      setPage("indicators");
     }
   }
 
@@ -211,7 +226,8 @@ function App() {
             {page === "overview" && <Overview counterparties={counterparties} cases={cases} documents={documents} identity={selectedIdentity} onNavigate={setPage} />}
             {page === "counterparties" && <CounterpartyCenter rows={counterparties} canRate={Boolean(can("ratings:run"))} canViewDataGovernance={Boolean(can("data_governance:view"))} canImportData={Boolean(can("data_governance:import"))} canResolveData={Boolean(can("data_governance:resolve"))} canReviewData={Boolean(can("data_governance:review"))} onResult={(text) => setNotice({ kind: "success", text })} onError={(text) => setNotice({ kind: "error", text })} />}
             {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewDocuments={Boolean(can("documents:view"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewFacilities={Boolean(can("facilities:view"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} canViewAuthorityPolicy={Boolean(can("authority_policy:view"))} canManageAuthorityPolicy={Boolean(can("authority_policy:manage"))} canReviewAuthorityPolicy={Boolean(can("authority_policy:review"))} canAnchorAuthorityPolicy={Boolean(can("authority_policy:anchor"))} canRevokeAuthorityPolicyAnchor={Boolean(can("authority_policy:anchor_revoke"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onOpenFacilities={(caseId) => { setFacilityFocus({ caseId }); setPage("facilities"); }} onSwitchIdentity={switchIdentity} onNotice={setNotice} />}
-            {page === "models" && <ModelLab counterparties={counterparties} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} onNotice={setNotice} />}
+            {page === "indicators" && <IndicatorCenter currentSubject={principal?.subject ?? ""} focusMonitoringEventId={indicatorFocus?.monitoringEventId} focusRunId={indicatorFocus?.runId} canView={Boolean(can("models:view"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} onOpenModelGovernance={openModelGovernance} onNotice={setNotice} />}
+            {page === "models" && <ModelLab focus={modelFocus} counterparties={counterparties} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} onNotice={setNotice} />}
             {page === "rules" && <RuleCenter counterparties={counterparties} currentSubject={principal?.subject ?? ""} canView={Boolean(can("models:view"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} onNotice={setNotice} />}
             {page === "documents" && <DocumentCenter rows={documents} counterparties={counterparties} cases={cases} principal={principal} focus={documentFocus} canUpload={Boolean(can("documents:upload"))} canReview={Boolean(can("documents:review"))} onSwitchToReviewer={() => switchIdentity("dev-risk")} onRefresh={async () => setDocuments(await api.documents())} onNotice={setNotice} />}
             {page === "operations" && <Suspense fallback={<LoadingState />}><OperationsCenter canViewTasks={Boolean(can("approvals:view"))} canViewOperations={Boolean(can("operations:view"))} canManageTasks={Boolean(can("tasks:manage"))} canViewNotifications={Boolean(can("notifications:view"))} canScan={Boolean(can("sla:scan"))} canActCorrections={Boolean(can("corrections:act"))} onNavigate={openNotificationTarget} onNotice={setNotice} /></Suspense>}

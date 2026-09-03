@@ -4,17 +4,37 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.dependencies import get_demo_repository, get_model_governance_repository, get_model_monitoring_repository
+from backend.dependencies import get_demo_repository, get_model_governance_repository, get_model_monitoring_repository, get_scorecard_repository
 from backend.model_governance import build_candidate_config, validate_and_assess
 from backend.model_monitoring import build_monitoring_metrics
 from backend.model_validation import build_model_validation_report
 from backend.monitoring_workflow import build_observed_monitoring_dataset, select_effective_monitoring_dataset
 from backend.repository import ConcurrentUpdateError, DemoRepository, ModelGovernanceRepository, ModelMonitoringRepository, content_hash
-from backend.schemas import ModelChangeCreate, ModelChangeUpdate, ModelMonitoringRunRequest, ModelMonitoringScheduleCreate, ModelMonitoringScheduleUpdate, ModelOutcomeBatchCreate, ModelOutcomeCreate, ModelOutcomeImportCreate, ModelOutcomeVerificationRequest, ModelReviewRequest, ModelRollbackRequest, MonitoringIssueLinkChangeRequest, MonitoringRemediationRequest, MonitoringRevalidationReviewRequest, MonitoringRevalidationSubmitRequest, MonitoringSchedulerTickRequest, VersionedActionRequest
+from backend.scorecard_repository import ScorecardRepository
+from backend.schemas import ModelChangeComparisonEvidenceRun, ModelChangeCreate, ModelChangeUpdate, ModelMonitoringRunRequest, ModelMonitoringScheduleCreate, ModelMonitoringScheduleUpdate, ModelOutcomeBatchCreate, ModelOutcomeCreate, ModelOutcomeImportCreate, ModelOutcomeVerificationRequest, ModelReviewRequest, ModelRollbackRequest, MonitoringIssueLinkChangeRequest, MonitoringRemediationRequest, MonitoringRevalidationReviewRequest, MonitoringRevalidationSubmitRequest, MonitoringSchedulerTickRequest, VersionedActionRequest
 from backend.security import Principal, require_permissions
 
 
 router = APIRouter(prefix="/model-governance", tags=["model-governance"])
+
+
+def _resolve_scorecard_validation_evidence(
+    scorecards: ScorecardRepository,
+    scorecard_binding: dict | None,
+    validation_run_id: str | None,
+    principal: Principal,
+) -> dict:
+    if validation_run_id and not scorecard_binding:
+        raise ValueError("未绑定评分卡时不能选择评分卡开发验证证据")
+    if not validation_run_id:
+        return {}
+    evidence = scorecards.approved_validation_evidence(validation_run_id, scorecard_binding or {})
+    evidence.update({
+        "bound_at": datetime.now(timezone.utc).isoformat(),
+        "bound_by": principal.subject,
+        "bound_by_name": principal.name,
+    })
+    return evidence
 
 
 @router.get("/validation")
@@ -419,12 +439,23 @@ def create_change(
     demo_repository: DemoRepository = Depends(get_demo_repository),
     repository: ModelGovernanceRepository = Depends(get_model_governance_repository),
     monitoring_repository: ModelMonitoringRepository = Depends(get_model_monitoring_repository),
+    scorecards: ScorecardRepository = Depends(get_scorecard_repository),
     principal: Principal = Depends(require_permissions("models:manage")),
 ) -> dict:
     base = repository.get_config(demo_repository, request.template_key)
     if not base:
         raise HTTPException(status_code=404, detail="模型模板不存在")
-    candidate = build_candidate_config(base, request.model_dump())
+    payload = request.model_dump()
+    try:
+        payload["scorecard_binding"] = scorecards.binding_for_asset(request.scorecard_id) if request.scorecard_id else None
+        payload["scorecard_validation_evidence"] = _resolve_scorecard_validation_evidence(
+            scorecards, payload["scorecard_binding"], request.scorecard_validation_run_id, principal
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    candidate = build_candidate_config(base, payload)
     dataset, _, _ = _effective_monitoring_context(request.template_key, demo_repository, monitoring_repository)
     validation, impact = validate_and_assess(base, candidate, demo_repository.list_counterparties(), request.template_key, dataset)
     if not validation["valid"]:
@@ -438,6 +469,7 @@ def create_change(
                 "config": candidate,
                 "validation": validation,
                 "impact": impact,
+                "scorecard_validation_evidence": payload["scorecard_validation_evidence"],
                 "change_reason": request.change_reason,
             },
             principal.subject,
@@ -454,6 +486,7 @@ def update_change(
     demo_repository: DemoRepository = Depends(get_demo_repository),
     repository: ModelGovernanceRepository = Depends(get_model_governance_repository),
     monitoring_repository: ModelMonitoringRepository = Depends(get_model_monitoring_repository),
+    scorecards: ScorecardRepository = Depends(get_scorecard_repository),
     principal: Principal = Depends(require_permissions("models:manage")),
 ) -> dict:
     change = repository.get_change(change_id)
@@ -462,7 +495,17 @@ def update_change(
     base = repository.get_config(demo_repository, change["template_key"], change["base_version"])
     if not base:
         raise HTTPException(status_code=409, detail="变更单基线版本已不可用")
-    candidate = build_candidate_config(base, {**request.model_dump(), "candidate_version": change["candidate_version"]})
+    payload = {**request.model_dump(), "candidate_version": change["candidate_version"]}
+    try:
+        payload["scorecard_binding"] = scorecards.binding_for_asset(request.scorecard_id) if request.scorecard_id else None
+        payload["scorecard_validation_evidence"] = _resolve_scorecard_validation_evidence(
+            scorecards, payload["scorecard_binding"], request.scorecard_validation_run_id, principal
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    candidate = build_candidate_config(base, payload)
     dataset, _, _ = _effective_monitoring_context(change["template_key"], demo_repository, monitoring_repository)
     validation, impact = validate_and_assess(base, candidate, demo_repository.list_counterparties(), change["template_key"], dataset)
     if not validation["valid"]:
@@ -471,7 +514,7 @@ def update_change(
         return repository.update_change(
             change_id,
             request.expected_row_version,
-            {"config": candidate, "validation": validation, "impact": impact, "change_reason": request.change_reason},
+            {"config": candidate, "validation": validation, "impact": impact, "scorecard_validation_evidence": payload["scorecard_validation_evidence"], "change_reason": request.change_reason},
             principal.subject,
             principal.name,
             "admin" in principal.roles,
@@ -495,6 +538,29 @@ def submit_change(
 ) -> dict:
     try:
         return repository.submit_change(change_id, request.expected_row_version, principal.subject, principal.name, "admin" in principal.roles)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/changes/{change_id}/comparison-evidence/run")
+def run_change_comparison_evidence(
+    change_id: str,
+    request: ModelChangeComparisonEvidenceRun,
+    demo_repository: DemoRepository = Depends(get_demo_repository),
+    repository: ModelGovernanceRepository = Depends(get_model_governance_repository),
+    principal: Principal = Depends(require_permissions("models:manage")),
+) -> dict:
+    try:
+        return repository.run_and_bind_comparison_evidence(
+            change_id, request.expected_row_version, request.model_dump(),
+            demo_repository, principal.subject, principal.name, "admin" in principal.roles,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:

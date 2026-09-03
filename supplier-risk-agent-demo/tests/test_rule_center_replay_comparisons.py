@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -11,6 +11,7 @@ import backend.database as database
 from backend.database import Base
 from backend.db_models import (
     AuditEventRecord,
+    RuleCenterReplayComparisonException,
     RuleCenterReplayComparisonRun,
     RuleCenterReplayDataset,
     RuleCenterReplayDatasetSnapshot,
@@ -37,6 +38,50 @@ def _rate(sample, config):
     }
 
 
+class _CrossScaleModels:
+    def get_config(self, _demo, key):
+        if key == "champion":
+            return {"version": "1.0", "decision_pipeline_code": ""}
+        if key == "challenger":
+            return {
+                "version": "2.0",
+                "decision_pipeline_code": "",
+                "scorecard_binding": {
+                    "config": {
+                        "score_scale": {
+                            "min": 300,
+                            "max": 900,
+                            "higher_is_better": True,
+                        }
+                    }
+                },
+            }
+        return None
+
+
+def _rate_cross_scale(sample, config):
+    if config["version"] == "1.0":
+        score = sample["champion_score"]
+        side = "champion"
+        execution = None
+    else:
+        score = sample["challenger_score"]
+        side = "challenger"
+        execution = {
+            "normalized_score": score,
+            "scaled_score": 300 + score * 6,
+        }
+    result = {
+        "ok": True,
+        "total_score": score,
+        "rating": sample[f"{side}_rating"],
+        "access_strategy": sample[f"{side}_admission"],
+    }
+    if execution:
+        result["scorecard_execution"] = execution
+    return result
+
+
 class TestRuleCenterReplayComparisons(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -58,6 +103,7 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
 
     def _clear(self):
         with database.SessionLocal() as session:
+            session.query(RuleCenterReplayComparisonException).delete()
             session.query(RuleCenterReplayComparisonRun).delete()
             session.query(RuleCenterReplayDatasetSnapshot).delete()
             session.query(RuleCenterReplayDataset).delete()
@@ -112,6 +158,11 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
             "challenger_pipeline_code": None, "segment_field": "counterparty_type",
             "positive_labels": ["bad"], "positive_admissions": ["reject"],
             "sample_limit": 500, "max_execution_failure_rate": 0,
+            "max_psi": 0.25, "max_rating_change_rate": 0.25,
+            "max_admission_change_rate": 0.15,
+            "max_absolute_average_score_delta": 10,
+            "max_segment_absolute_score_delta": 15,
+            "max_ks_drop": 0.05, "require_labeled_evidence": False,
         }
 
     @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
@@ -129,6 +180,8 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         self.assertEqual(result["metrics"]["champion"]["ks"], 1)
         self.assertEqual(result["metrics"]["challenger"]["confusion_matrix"], {"tp": 2, "fp": 0, "tn": 2, "fn": 0})
         self.assertEqual(len(result["evidence_hash"]), 64)
+        self.assertFalse(result["gate"]["passed"])
+        self.assertTrue(any(item["key"] == "rating_change_rate" for item in result["gate"]["violations"]))
 
     @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
     def test_unlabeled_run_explicitly_downgrades_supervised_evidence(self, _mock):
@@ -141,6 +194,98 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         self.assertIsNone(result["metrics"]["champion"]["ks"])
         self.assertIsNone(result["metrics"]["challenger"]["confusion_matrix"])
         self.assertIn("非监督稳定性证据", result["metrics"]["warning"])
+        self.assertTrue(any("不能验证 Challenger" in item for item in result["gate"]["warnings"]))
+
+    @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
+    def test_legacy_comparison_without_gate_requires_rerun(self, _mock):
+        snapshot_id = self._snapshot()
+        with database.SessionLocal() as session:
+            repository = RuleCenterReplayComparisonRepository(session)
+            result = repository.run(self._payload(snapshot_id), object(), _Models(), "maker", "制作者")
+            record = session.get(RuleCenterReplayComparisonRun, result["id"])
+            record.gate_json = None
+            session.commit()
+
+            listed = repository.list_runs()[0]
+            self.assertFalse(listed["gate"]["passed"])
+            self.assertIn("历史比较证据未配置门禁", listed["gate"]["summary"])
+            with self.assertRaisesRegex(ValueError, "请使用当前阈值重新运行"):
+                repository.request_exception(result["id"], {
+                    "reason": "旧证据不能直接进入例外审批流程",
+                    "business_impact": "必须先基于当前阈值重新生成比较证据",
+                    "compensating_controls": "重新运行前维持现有模型和人工复核",
+                    "valid_until": date.today() + timedelta(days=30),
+                }, "maker", "制作者")
+
+    @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
+    def test_failed_gate_requires_governed_time_limited_exception(self, _mock):
+        snapshot_id = self._snapshot()
+        with database.SessionLocal() as session:
+            repository = RuleCenterReplayComparisonRepository(session)
+            result = repository.run(self._payload(snapshot_id), object(), _Models(), "maker", "制作者")
+            exception = repository.request_exception(result["id"], {
+                "reason": "新模型覆盖企业信用数据缺口，需要限期观察",
+                "business_impact": "若立即阻断会延迟重点客户的模型切换计划",
+                "compensating_controls": "例外期间全部进入人工复核并每日监控准入变化",
+                "valid_until": date.today() + timedelta(days=30),
+            }, "maker", "制作者")
+            self.assertEqual(exception["status"], "pending_review")
+            with self.assertRaisesRegex(PermissionError, "必须分离"):
+                repository.review_exception(result["id"], exception["id"], 1, "approve", "同意限期例外", "maker", "制作者")
+            approved = repository.review_exception(
+                result["id"], exception["id"], 1, "approve", "同意限期例外并持续监控", "risk", "风控经理"
+            )
+            self.assertEqual(approved["status"], "approved")
+            refreshed = repository.list_runs()[0]
+            self.assertEqual(refreshed["effective_status"], "exception_approved")
+            self.assertFalse(refreshed["gate"]["passed"])
+
+    @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
+    def test_passed_gate_rejects_unnecessary_exception(self, _mock):
+        snapshot_id = self._snapshot()
+        payload = self._payload(snapshot_id)
+        payload.update({
+            "max_psi": 100, "max_rating_change_rate": 1,
+            "max_admission_change_rate": 1,
+            "max_absolute_average_score_delta": 100,
+            "max_segment_absolute_score_delta": 100, "max_ks_drop": 1,
+        })
+        with database.SessionLocal() as session:
+            repository = RuleCenterReplayComparisonRepository(session)
+            result = repository.run(payload, object(), _Models(), "maker", "制作者")
+            self.assertTrue(result["gate"]["passed"])
+            with self.assertRaisesRegex(ValueError, "无需申请例外"):
+                repository.request_exception(result["id"], {
+                    "reason": "无需申请但尝试创建例外申请记录",
+                    "business_impact": "测试门禁通过时不允许创建例外申请",
+                    "compensating_controls": "继续执行常规模型监控和复核机制",
+                    "valid_until": date.today() + timedelta(days=30),
+                }, "maker", "制作者")
+
+    @patch("rating.scorecard.rate_counterparty", side_effect=_rate_cross_scale)
+    def test_cross_scale_scores_are_standardized_before_comparison(self, _mock):
+        snapshot_id = self._snapshot()
+        payload = self._payload(snapshot_id)
+        payload.update({
+            "max_psi": 100,
+            "max_rating_change_rate": 1,
+            "max_admission_change_rate": 1,
+            "max_absolute_average_score_delta": 100,
+            "max_segment_absolute_score_delta": 100,
+            "max_ks_drop": 1,
+        })
+        with database.SessionLocal() as session:
+            result = RuleCenterReplayComparisonRepository(session).run(
+                payload, object(), _CrossScaleModels(), "maker", "制作者"
+            )
+        self.assertTrue(result["gate"]["passed"])
+        self.assertEqual(result["config"]["score_comparison_basis"], "standardized_0_100")
+        self.assertEqual(result["config"]["score_scales"]["challenger"]["max"], 900)
+        self.assertGreater(result["metrics"]["challenger"]["business_score_mean"], 300)
+        self.assertLessEqual(result["metrics"]["challenger"]["score_max"], 100)
+        self.assertEqual(result["details"][0]["challenger"]["score"], 85)
+        self.assertEqual(result["details"][0]["challenger"]["business_score"], 810)
+        self.assertEqual(result["details"][0]["challenger"]["standard_score"], 85)
 
     @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
     def test_tampered_snapshot_is_rejected(self, _mock):
@@ -165,6 +310,12 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
             json=self._payload(str(uuid4())), headers=viewer,
         )
         self.assertEqual(forbidden.status_code, 403, forbidden.text)
+        review_forbidden = self.client.post(
+            f"/api/v1/rule-center/governance/replay-comparisons/{uuid4()}/exceptions/{uuid4()}/review",
+            json={"expected_row_version": 1, "decision": "approve", "comment": "同意例外申请"},
+            headers={"Authorization": "Bearer dev-model-admin"},
+        )
+        self.assertEqual(review_forbidden.status_code, 403, review_forbidden.text)
 
 
 if __name__ == "__main__":

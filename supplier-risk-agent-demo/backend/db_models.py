@@ -122,6 +122,13 @@ class ModelChangeRecord(Base):
     config_json: Mapped[dict] = mapped_column(JSON)
     validation_json: Mapped[dict] = mapped_column(JSON)
     impact_json: Mapped[dict] = mapped_column(JSON)
+    comparison_evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    scorecard_validation_run_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_development_runs.id", ondelete="RESTRICT"), nullable=True, index=True)
+    scorecard_validation_evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    scorecard_validation_binding_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    calibration_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), nullable=True, index=True)
+    calibration_evidence_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    calibration_evidence_binding_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     change_reason: Mapped[str] = mapped_column(Text)
     created_by: Mapped[str] = mapped_column(String(128), index=True)
     created_by_name: Mapped[str] = mapped_column(String(128))
@@ -266,6 +273,8 @@ class RuleCenterReplayComparisonRun(Base):
     champion_model_version: Mapped[str] = mapped_column(String(128))
     challenger_model_key: Mapped[str] = mapped_column(String(64), index=True)
     challenger_model_version: Mapped[str] = mapped_column(String(128))
+    challenger_change_id: Mapped[str | None] = mapped_column(ForeignKey("model_changes.id", ondelete="RESTRICT"), nullable=True, index=True)
+    challenger_config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     champion_pipeline_code: Mapped[str] = mapped_column(String(128))
     champion_pipeline_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     challenger_pipeline_code: Mapped[str] = mapped_column(String(128))
@@ -275,10 +284,39 @@ class RuleCenterReplayComparisonRun(Base):
     config_json: Mapped[dict] = mapped_column(JSON, default=dict)
     metrics_json: Mapped[dict] = mapped_column(JSON, default=dict)
     details_json: Mapped[list] = mapped_column(JSON, default=list)
+    gate_json: Mapped[dict] = mapped_column(JSON, default=dict)
     evidence_hash: Mapped[str] = mapped_column(String(64), index=True)
     created_by: Mapped[str] = mapped_column(String(128), index=True)
     created_by_name: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class RuleCenterReplayComparisonException(Base):
+    __tablename__ = "rule_center_replay_comparison_exceptions"
+    __table_args__ = (
+        Index("ix_replay_comparison_exception_run_created", "comparison_run_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    comparison_run_id: Mapped[str] = mapped_column(ForeignKey("rule_center_replay_comparison_runs.id", ondelete="CASCADE"), index=True)
+    comparison_evidence_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
+    reason: Mapped[str] = mapped_column(Text)
+    business_impact: Mapped[str] = mapped_column(Text)
+    compensating_controls: Mapped[str] = mapped_column(Text)
+    valid_until: Mapped[date] = mapped_column(Date, index=True)
+    request_hash: Mapped[str] = mapped_column(String(64), index=True)
+    requested_by: Mapped[str] = mapped_column(String(128), index=True)
+    requested_by_name: Mapped[str] = mapped_column(String(128))
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
 
 
 class ModelReleaseRecord(Base):
@@ -1134,6 +1172,369 @@ class IndicatorDefinition(Base):
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardDefinition(Base):
+    __tablename__ = "scorecard_definitions"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_scorecard_code_version"),
+        Index(
+            "uq_scorecard_single_active",
+            "code",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    description: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="published", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    config_json: Mapped[dict] = mapped_column(JSON)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    change_id: Mapped[str] = mapped_column(ForeignKey("model_changes.id"), index=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CreditCalibrationPlan(Base):
+    __tablename__ = "credit_calibration_plans"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_credit_calibration_plan_code_version"),
+        Index("ix_credit_calibration_plan_template_status", "template_key", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    version: Mapped[int] = mapped_column(Integer)
+    template_key: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    candidate_json: Mapped[dict] = mapped_column(JSON)
+    sample_policy_json: Mapped[dict] = mapped_column(JSON)
+    business_basis: Mapped[str] = mapped_column(Text)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class CreditCalibrationRun(Base):
+    __tablename__ = "credit_calibration_runs"
+    __table_args__ = (
+        Index("ix_credit_calibration_run_plan_created", "plan_id", "created_at"),
+        Index("ix_credit_calibration_run_snapshot_created", "dataset_snapshot_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("credit_calibration_plans.id", ondelete="RESTRICT"), index=True)
+    plan_config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    base_model_version: Mapped[str] = mapped_column(String(128))
+    baseline_config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    dataset_snapshot_id: Mapped[str] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), index=True)
+    dataset_snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="completed", index=True)
+    report_json: Mapped[dict] = mapped_column(JSON)
+    evidence_hash: Mapped[str] = mapped_column(String(64), index=True)
+    evidence_level: Mapped[str] = mapped_column(String(32), index=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class ScorecardValidationPolicy(Base):
+    __tablename__ = "scorecard_validation_policies"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_scorecard_validation_policy_code_version"),
+        Index(
+            "uq_scorecard_validation_policy_single_active",
+            "code", "is_active", unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    description: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    applicable_scorecard_codes: Mapped[list] = mapped_column(JSON, default=list)
+    thresholds_json: Mapped[dict] = mapped_column(JSON)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    change_reason: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardDevelopmentRun(Base):
+    __tablename__ = "scorecard_development_runs"
+    __table_args__ = (
+        Index("ix_scorecard_development_asset_created", "scorecard_asset_id", "created_at"),
+        Index("ix_scorecard_development_snapshot_created", "dataset_snapshot_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scorecard_asset_id: Mapped[str] = mapped_column(ForeignKey("scorecard_definitions.id", ondelete="RESTRICT"), index=True)
+    scorecard_code: Mapped[str] = mapped_column(String(128), index=True)
+    scorecard_version: Mapped[int] = mapped_column(Integer)
+    scorecard_config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    validation_policy_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_validation_policies.id", ondelete="RESTRICT"), nullable=True, index=True)
+    validation_policy_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    dataset_snapshot_id: Mapped[str] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), index=True)
+    dataset_snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    validation_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), nullable=True, index=True)
+    validation_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    oot_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("rule_center_replay_dataset_snapshots.id", ondelete="RESTRICT"), nullable=True, index=True)
+    oot_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    label_policy_json: Mapped[dict] = mapped_column(JSON)
+    report_json: Mapped[dict] = mapped_column(JSON)
+    evidence_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    evidence_level: Mapped[str] = mapped_column(String(32), index=True)
+    review_status: Mapped[str] = mapped_column(String(32), default="pending_review", index=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardValidationMonitoringPlan(Base):
+    __tablename__ = "scorecard_validation_monitoring_plans"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_scorecard_validation_monitoring_plan_code"),
+        Index("ix_scorecard_validation_monitoring_plan_due", "enabled", "next_run_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    description: Mapped[str] = mapped_column(Text)
+    scorecard_asset_id: Mapped[str] = mapped_column(ForeignKey("scorecard_definitions.id", ondelete="RESTRICT"), index=True)
+    validation_policy_id: Mapped[str] = mapped_column(ForeignKey("scorecard_validation_policies.id", ondelete="RESTRICT"), index=True)
+    training_dataset_id: Mapped[str] = mapped_column(ForeignKey("rule_center_replay_datasets.id", ondelete="RESTRICT"), index=True)
+    validation_dataset_id: Mapped[str | None] = mapped_column(ForeignKey("rule_center_replay_datasets.id", ondelete="RESTRICT"), nullable=True, index=True)
+    oot_dataset_id: Mapped[str | None] = mapped_column(ForeignKey("rule_center_replay_datasets.id", ondelete="RESTRICT"), nullable=True, index=True)
+    run_config_json: Mapped[dict] = mapped_column(JSON)
+    cadence: Mapped[str] = mapped_column(String(16), index=True)
+    timezone_name: Mapped[str] = mapped_column(String(64), default="Asia/Shanghai")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    owner: Mapped[str] = mapped_column(String(128), index=True)
+    last_scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_development_runs.id"), nullable=True, index=True)
+    last_run_key: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    last_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    updated_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardMonitoringSlaPolicy(Base):
+    __tablename__ = "scorecard_monitoring_sla_policies"
+    __table_args__ = (
+        UniqueConstraint("code", "version", name="uq_scorecard_monitoring_sla_policy_code_version"),
+        Index(
+            "uq_scorecard_monitoring_sla_policy_single_active",
+            "code", "is_active", unique=True,
+            sqlite_where=text("is_active = 1"),
+            postgresql_where=text("is_active = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    code: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    description: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    applicable_scorecard_codes: Mapped[list] = mapped_column(JSON, default=list)
+    applicable_event_types: Mapped[list] = mapped_column(JSON, default=list)
+    severity_rules_json: Mapped[dict] = mapped_column(JSON)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    change_reason: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(128), index=True)
+    created_by_name: Mapped[str] = mapped_column(String(128))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    reviewed_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardValidationMonitoringEvent(Base):
+    __tablename__ = "scorecard_validation_monitoring_events"
+    __table_args__ = (
+        UniqueConstraint("dedup_key", name="uq_scorecard_validation_monitoring_event_dedup"),
+        Index("ix_scorecard_validation_monitoring_event_queue", "status", "severity", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("scorecard_validation_monitoring_plans.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_development_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    severity: Mapped[str] = mapped_column(String(16), index=True)
+    metric_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    metric_label: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    metric_value: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    threshold_value: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    threshold_operator: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text)
+    details_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    dedup_key: Mapped[str] = mapped_column(String(512), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    assignee: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    sla_policy_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_monitoring_sla_policies.id", ondelete="RESTRICT"), nullable=True, index=True)
+    sla_policy_snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    sla_policy_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    sla_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    sla_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
+    last_escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    remediation_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remediation_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    remediated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    remediated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revalidation_run_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_development_runs.id", ondelete="RESTRICT"), nullable=True, index=True)
+    revalidation_evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    revalidation_conclusion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revalidated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    revalidated_by_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    revalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardMonitoringSavedView(Base):
+    __tablename__ = "scorecard_monitoring_saved_views"
+    __table_args__ = (
+        UniqueConstraint("owner_subject", "name", name="uq_scorecard_monitoring_saved_view_owner_name"),
+        Index(
+            "uq_scorecard_monitoring_saved_view_owner_default",
+            "owner_subject", unique=True,
+            sqlite_where=text("is_default = 1"),
+            postgresql_where=text("is_default = true"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_subject: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    filters_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    row_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": row_version}
+
+
+class ScorecardMonitoringSchedulerLease(Base):
+    __tablename__ = "scorecard_monitoring_scheduler_leases"
+
+    lease_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    run_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    actor: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    trigger_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ScorecardMonitoringSchedulerRun(Base):
+    __tablename__ = "scorecard_monitoring_scheduler_runs"
+    __table_args__ = (
+        UniqueConstraint("run_key", name="uq_scorecard_monitoring_scheduler_run_key"),
+        Index("ix_scorecard_monitoring_scheduler_run_status_started", "status", "started_at"),
+        Index("ix_scorecard_monitoring_scheduler_run_trigger_started", "trigger_type", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_key: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    trigger_type: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    actor: Mapped[str] = mapped_column(String(128), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    recovery_of_run_id: Mapped[str | None] = mapped_column(ForeignKey("scorecard_monitoring_scheduler_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    recovery_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    due_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    backlog_before: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    backlog_after: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    oldest_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class RuleDefinition(Base):

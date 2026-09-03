@@ -348,6 +348,10 @@ def _run_scoring_stage(context: dict) -> dict:
     config["strong_rules"] = []
 
     try:
+        if config.get("scorecard_binding"):
+            from rating.governed_scorecard import rate_governed_scorecard
+
+            return rate_governed_scorecard(counterparty, config)
         scorecard_type = config.get("scorecard_type", "")
         if scorecard_type == "corporate_credit_v2":
             from rating.corporate_credit_scorecard import rate_corporate_credit

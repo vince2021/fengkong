@@ -62,6 +62,15 @@ def rate_counterparty(counterparty: dict, config: dict) -> dict:
         if pipeline_result is not None:
             return _decorate_pipeline_result(pipeline_result, pipeline_context)
 
+    if config.get("scorecard_binding"):
+        from rating.governed_scorecard import rate_governed_scorecard
+        from rating.risk_screening_policy import apply_risk_screening_policy
+
+        result = rate_governed_scorecard(counterparty, config)
+        if not result.get("ok"):
+            return result
+        return apply_risk_screening_policy(counterparty, config, result)
+
     if config.get("scorecard_type") == "corporate_credit_v2":
         from rating.corporate_credit_scorecard import rate_corporate_credit
 

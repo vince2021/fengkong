@@ -4,10 +4,11 @@ import unittest
 import hashlib
 import io
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 import zipfile
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
@@ -16,11 +17,11 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 import backend.database as database
 from backend.authority_policy_repository import AuthorityPolicyRepository, BUILTIN_POLICY_VERSION, DEFAULT_AUTHORITY_POLICY_CONFIG, policy_config_hash, verify_authority_policy_anchor_receipt, verify_authority_policy_evidence_package
 from backend.credit_authority import build_credit_authority
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, DocumentRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord, SlaScanLeaseRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditFacilityRecord, CreditReportRecord, DocumentCorrectionRecord, DocumentRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, ModelReleaseRecord, NotificationRecord, RatingRunRecord, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot, SlaScanLeaseRecord
 from backend.dependencies import demo_repository, get_object_storage
 from backend.jobs.sla_scan import SlaScanExecutionConflict, SlaScanLeaseLost, _finish_scan_execution, _renew_scan_lease, _start_scan_execution, force_release_scan_lease, run_scheduled_sla_scan
 from backend.main import app
-from backend.repository import AuditRepository, ModelMonitoringRepository, RatingRunRepository, clear_persistent_data, content_hash
+from backend.repository import AuditRepository, ModelMonitoringRepository, RatingRunRepository, RuleCenterReplayDatasetRepository, clear_persistent_data, content_hash
 from backend.sla_monitor import _ensure_scan_write_transaction, sla_scan_scheduler_run_key
 from backend.storage import LocalObjectStorage
 from rating.scorecard import rate_counterparty
@@ -88,6 +89,46 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
+    def _bind_model_comparison(self, change: dict, headers: dict[str, str]) -> dict:
+        with database.SessionLocal() as session:
+            dataset = RuleCenterReplayDataset(
+                id=str(uuid4()), code=f"MODEL-CMP-{uuid4().hex[:8]}", name="模型候选比较样本",
+                description="模型治理发布门禁自动化测试样本", status="active",
+                created_by="test", created_by_name="自动化测试",
+            )
+            snapshot = RuleCenterReplayDatasetSnapshot(
+                id=str(uuid4()), dataset_id=dataset.id, version=1, source_name="test-suite",
+                schema_version="1.0", as_of_date=date(2026, 6, 30), evidence_reference="test://model-comparison",
+                data_classification="synthetic", field_mapping_json={}, label_field="label",
+                observed_at_field=None, sample_count=1,
+                samples_json=[{"sample": deepcopy(self.counterparty), "label": "good", "observed_at": None}],
+                coverage_json={}, source_hash="a" * 64, content_hash="pending",
+                created_by="test", created_by_name="自动化测试",
+            )
+            session.add_all([dataset, snapshot])
+            session.flush()
+            snapshot.content_hash = RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot)
+            snapshot_id = snapshot.id
+            session.commit()
+        response = self.client.post(
+            f"/api/v1/model-governance/changes/{change['id']}/comparison-evidence/run",
+            headers=headers,
+            json={
+                "expected_row_version": change["row_version"], "dataset_snapshot_id": snapshot_id,
+                "champion_pipeline_code": "LEGACY-SCORECARD", "challenger_pipeline_code": "LEGACY-SCORECARD",
+                "segment_field": "counterparty_type", "positive_labels": ["bad"],
+                "positive_admissions": ["reject", "禁入"], "sample_limit": 500,
+                "max_execution_failure_rate": 0, "max_psi": 100,
+                "max_rating_change_rate": 1, "max_admission_change_rate": 1,
+                "max_absolute_average_score_delta": 100,
+                "max_segment_absolute_score_delta": 100, "max_ks_drop": 1,
+                "require_labeled_evidence": False, "evidence_valid_days": 30,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["comparison_evidence"]["gate"]["passed"])
+        return response.json()
+
     def _seed_completed_report_case(self, case_id: str = "CASE-CREDIT-REPORT-001") -> dict:
         config = demo_repository.get_template("general")
         result = rate_counterparty(self.counterparty, config)
@@ -138,8 +179,8 @@ class ApiTest(unittest.TestCase):
         tech = self.client.get("/api/v1/models/tech_enterprise_basic", headers=model_admin)
 
         self.assertEqual(pool.status_code, 200)
-        self.assertEqual(pool.json()["result_count"], 185)
-        self.assertEqual(pool.json()["summary"]["indicator_count"], 185)
+        self.assertEqual(pool.json()["result_count"], 201)
+        self.assertEqual(pool.json()["summary"]["indicator_count"], 201)
         self.assertTrue(any(item["name"] == "股东变更" for item in searched.json()["indicators"]))
         self.assertGreaterEqual(len(tech.json()["editable_indicators"]), 19)
         self.assertGreaterEqual(len(tech.json()["indicator_selection"]), 3)
@@ -1122,10 +1163,11 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["row_version"], created.json()["row_version"] + 1)
+        bound = self._bind_model_comparison(updated.json(), model_admin)
 
         submitted = self.client.post(
             f"/api/v1/model-governance/changes/{created.json()['id']}/submit",
-            json={"expected_row_version": updated.json()["row_version"]},
+            json={"expected_row_version": bound["row_version"]},
             headers=model_admin,
         )
         self.assertEqual(submitted.status_code, 200)
@@ -1168,7 +1210,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/models/general", headers=risk).json()["version"], active["version"])
 
         audit = self.client.get(f"/api/v1/audit-events?aggregate_id={created.json()['id']}", headers=risk)
-        self.assertEqual([item["event_type"] for item in audit.json()], ["model_change_created", "model_change_updated", "model_change_submitted", "model_change_published"])
+        self.assertEqual([item["event_type"] for item in audit.json()], ["model_change_created", "model_change_updated", "model_change_comparison_evidence_bound", "model_change_submitted", "model_change_published"])
 
         tech = self.client.get("/api/v1/models/tech_enterprise_basic", headers=model_admin).json()
         chosen_indicators = [
@@ -1200,6 +1242,7 @@ class ApiTest(unittest.TestCase):
             json={**payload, "candidate_version": f"{active['version']}-SELF-REVIEW", "change_reason": "验证管理员也不能绕过模型审批职责分离"},
             headers=admin,
         ).json()
+        self_draft = self._bind_model_comparison(self_draft, admin)
         self_submitted = self.client.post(
             f"/api/v1/model-governance/changes/{self_draft['id']}/submit",
             json={"expected_row_version": self_draft["row_version"]},
@@ -1242,6 +1285,7 @@ class ApiTest(unittest.TestCase):
             },
             headers=model_admin,
         ).json()
+        change = self._bind_model_comparison(change, model_admin)
         submitted = self.client.post(
             f"/api/v1/model-governance/changes/{change['id']}/submit",
             json={"expected_row_version": change["row_version"]},

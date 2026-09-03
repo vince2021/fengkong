@@ -7,6 +7,8 @@ from backend.authority_policy_repository import AuthorityPolicyRepository
 from backend.database import get_db_session
 from backend.repository import ApprovalCaseRepository, AuditRepository, CreditFacilityRepository, CreditReportRepository, DecisionGovernanceRepository, DecisionPipelineRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, ModelMonitoringRepository, NotificationRepository, PortfolioRatingBatchRepository, RatingRunRepository, RuleCenterGovernanceRepository, RuleCenterReleasePackageRepository, RuleCenterReplayComparisonRepository, RuleCenterReplayDatasetRepository, RuleDefinitionRepository, RuleSetDefinitionRepository
 from backend.storage import ObjectStorage, build_object_storage
+from backend.scorecard_repository import ScorecardRepository
+from backend.credit_calibration_repository import CreditCalibrationRepository
 
 
 demo_repository = DemoRepository()
@@ -117,3 +119,15 @@ def get_rule_center_replay_comparison_repository(
     session: Session = Depends(get_db_session),
 ) -> RuleCenterReplayComparisonRepository:
     return RuleCenterReplayComparisonRepository(session)
+
+
+def get_scorecard_repository(
+    session: Session = Depends(get_db_session),
+) -> ScorecardRepository:
+    return ScorecardRepository(session)
+
+
+def get_credit_calibration_repository(
+    session: Session = Depends(get_db_session),
+) -> CreditCalibrationRepository:
+    return CreditCalibrationRepository(session)

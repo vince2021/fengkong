@@ -304,7 +304,7 @@ class TestSeedPoolJson(unittest.TestCase):
     def test_dry_run_maps_all_rows_without_persisting(self):
         report = dry_run_pool_json()
 
-        self.assertEqual(report["count"], 185)
+        self.assertEqual(report["count"], 201)
         self.assertTrue(report["pool_version"])
         self.assertEqual(
             self.session.query(IndicatorDefinition)
@@ -345,7 +345,7 @@ class TestSeedPoolJson(unittest.TestCase):
             .count()
         )
 
-        self.assertEqual(count, 185)
+        self.assertEqual(count, 201)
         self.assertEqual(active_count, count)
         self.assertEqual(change_count, count)
         self.assertEqual(audit_count, count)
@@ -357,7 +357,7 @@ class TestSeedPoolJson(unittest.TestCase):
 
         second = seed_from_pool_json(self.session)
 
-        self.assertEqual(first, 185)
+        self.assertEqual(first, 201)
         self.assertEqual(second, first)
         self.assertEqual(
             self.session.query(IndicatorDefinition).count(),
@@ -445,9 +445,9 @@ class TestSeedTechAndActivation(unittest.TestCase):
 
         result = evaluate_indicator_pool_v2({"id": "x"}, {})
 
-        self.assertEqual(pool_count, 185)
+        self.assertEqual(pool_count, 201)
         self.assertEqual(placeholder_count, 32)
-        self.assertEqual(self.session.query(IndicatorDefinition).count(), 217)
+        self.assertEqual(self.session.query(IndicatorDefinition).count(), 233)
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result["selected_count"], pool_count)

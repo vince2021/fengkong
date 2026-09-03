@@ -35,6 +35,11 @@ DEFAULT_MODEL_INDICATORS = {
         "债券违约",
         "票据违约",
         "近3年负面新闻",
+        "资产负债率",
+        "现金短债比",
+        "EBITDA利息保障倍数",
+        "债务EBITDA倍数",
+        "FFO债务覆盖率",
     ],
     "default": [
         "注册年限",
@@ -198,6 +203,11 @@ def evaluate_indicator_pool(counterparty: dict, config: dict) -> dict:
 def _evaluate_indicator(counterparty: dict, indicator: dict) -> dict:
     scoring = indicator["scoring"]
     actual = get_field_value(counterparty, indicator["field_path"])
+    if (
+        indicator["field_path"].startswith(("internal.", "financial."))
+        and get_field_value(counterparty, "data_quality.internal_transaction_complete") is False
+    ):
+        actual = None
     data_status = "已取得"
     if scoring["type"] == "composite_boolean":
         values = [get_field_value(counterparty, field) for field in scoring["input_fields"]]

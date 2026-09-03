@@ -208,11 +208,11 @@
     },
     "corporate_credit_v2": {
       "extends": "general",
-      "version": "CORP-20260714-001",
+      "version": "CORP-20260902-002",
       "decision_pipeline_code": "PIPELINE-CORPORATE",
       "name": "材料增强型工商企业信用模型",
       "scorecard_type": "corporate_credit_v2",
-      "change_reason": "融合工商企业评级、标普业务财务矩阵、投资风险模型及信控会议纪要，新增分层运算、缺失完整度与交易策略",
+      "change_reason": "在材料增强评级框架上补齐财务承债、交易履约、信用敞口、授信额度和账期强规则；当前阈值为演示基线，投产前必须完成机构样本校准与独立发布",
       "weights": {
         "business_financial_anchor": 0.65,
         "external_credit": 0.2,
@@ -225,7 +225,15 @@
         "revenue_decline_pct": -30,
         "profit_decline_pct": -30,
         "debt_to_assets_high_pct": 80,
-        "transaction_complete": 1
+        "transaction_complete": 1,
+        "overdue_rate_high": 0.15,
+        "limit_utilization_high": 0.9,
+        "invoice_match_rate_low": 0.85,
+        "delivery_fulfillment_rate_low": 0.9,
+        "admin_penalty_high": 3,
+        "short_cooperation_years": 1,
+        "large_requested_limit": 3000000,
+        "equity_freeze_count": 0
       },
       "strong_rules": [
         {
@@ -278,11 +286,106 @@
           "condition_relation": "all",
           "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": false, "label": "订单、应收、逾期或回款资料未完整接入"}],
           "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.2, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "重点监控", "severity": "数据质量"}
+        },
+        {
+          "id": "CR-202",
+          "name": "应收逾期率过高",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": true, "label": "内部交易资料已完整接入"}, {"field": "financial.overdue_rate", "operator": ">", "value_ref": "thresholds.overdue_rate_high", "label": "应收逾期率超过15%演示阈值"}],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.25, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "重点监控", "score_adjustment": -6, "severity": "高风险"}
+        },
+        {
+          "id": "CR-203",
+          "name": "额度使用率过高",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": true, "label": "内部交易资料已完整接入"}, {"field": "financial.limit_utilization_rate", "operator": ">", "value_ref": "thresholds.limit_utilization_high", "label": "额度使用率超过90%演示阈值"}],
+          "action": {"access_strategy": "限制准入", "limit_multiplier_cap": 0.5, "payment_term_days_cap": 30, "review_required": true, "risk_segment_override": "关注客商", "score_adjustment": -3, "severity": "中风险"}
+        },
+        {
+          "id": "CR-204",
+          "name": "发票匹配率偏低",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": true, "label": "内部交易资料已完整接入"}, {"field": "internal.invoice_match_rate", "operator": "<", "value_ref": "thresholds.invoice_match_rate_low", "label": "发票匹配率低于85%演示阈值"}],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.5, "payment_term_days_cap": 15, "review_required": true, "risk_segment_override": "重点监控", "score_adjustment": -3, "severity": "中风险"}
+        },
+        {
+          "id": "CR-205",
+          "name": "交付达成率偏低",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": true, "label": "内部交易资料已完整接入"}, {"field": "internal.delivery_fulfillment_rate", "operator": "<", "value_ref": "thresholds.delivery_fulfillment_rate_low", "label": "交付达成率低于90%演示阈值"}],
+          "action": {"access_strategy": "限制准入", "limit_multiplier_cap": 0.5, "payment_term_days_cap": 15, "review_required": true, "risk_segment_override": "重点监控", "score_adjustment": -3, "severity": "中风险"}
+        },
+        {
+          "id": "CR-206",
+          "name": "关联方高风险收紧",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "external.related_party_high_risk", "operator": "==", "value": true, "label": "股权穿透识别关联方高风险"}],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.3, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "高风险客商", "score_adjustment": -5, "severity": "高风险"}
+        },
+        {
+          "id": "CR-207",
+          "name": "历史坏账损失禁入",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "data_quality.internal_transaction_complete", "operator": "==", "value": true, "label": "内部交易资料已完整接入"}, {"field": "financial.bad_debt_flag", "operator": "==", "value": true, "label": "历史合作已形成确认坏账或核销损失"}],
+          "action": {"access_strategy": "禁入", "limit_multiplier_cap": 0, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "禁入客商", "score_adjustment": -15, "severity": "重大风险"}
+        },
+        {
+          "id": "CR-301",
+          "name": "重大诉讼敞口收紧",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "external.major_litigation_amount", "operator": ">", "value_ref": "thresholds.major_litigation_amount", "label": "重大诉讼金额超过500万元演示阈值"}],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.3, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "高风险客商", "score_adjustment": -5, "severity": "高风险"}
+        },
+        {
+          "id": "CR-302",
+          "name": "股权冻结收紧",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "external.equity_freeze_count", "operator": ">", "value_ref": "thresholds.equity_freeze_count", "label": "存在股权冻结记录"}],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.3, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "高风险客商", "score_adjustment": -5, "severity": "高风险"}
+        },
+        {
+          "id": "CR-303",
+          "name": "多次行政处罚收紧",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "external.admin_penalty_count", "operator": ">=", "value_ref": "thresholds.admin_penalty_high", "label": "行政处罚达到3次演示阈值"}],
+          "action": {"access_strategy": "限制准入", "limit_multiplier_cap": 0.5, "payment_term_days_cap": 15, "review_required": true, "risk_segment_override": "重点监控", "score_adjustment": -3, "severity": "中风险"}
+        },
+        {
+          "id": "CR-304",
+          "name": "纳税信用D级禁额",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [{"field": "external.tax_credit_level", "operator": "==", "value": "D", "label": "最新有效纳税信用等级为D"}],
+          "action": {"access_strategy": "不建议准入", "limit_multiplier_cap": 0, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "不予额度", "score_adjustment": -10, "severity": "重大风险"}
+        },
+        {
+          "id": "CR-401",
+          "name": "短合作期大额申请收紧",
+          "enabled": true,
+          "condition_relation": "all",
+          "conditions": [
+            {"field": "data_quality.internal_transaction_complete", "operator": "==", "value": true, "label": "内部交易资料已完整接入"},
+            {"field": "internal.cooperation_years", "operator": "<", "value_ref": "thresholds.short_cooperation_years", "label": "持续合作不足1年"},
+            {"field": "requested_limit", "operator": ">", "value_ref": "thresholds.large_requested_limit", "label": "申请额度超过300万元演示阈值"}
+          ],
+          "action": {"access_strategy": "人工复核", "limit_multiplier_cap": 0.2, "payment_term_days_cap": 0, "review_required": true, "risk_segment_override": "重点监控", "score_adjustment": -4, "severity": "中风险"}
         }
       ],
       "credit_policy": {
         "revenue_limit_pct_by_rating": {"AAA": 0.08, "AA": 0.06, "A": 0.04, "BBB": 0.025, "BB": 0.015, "B": 0.0, "D": 0.0},
         "order_amount_multiplier": 0.25,
+        "payment_term_days_by_rating": {"AAA": 60, "AA": 45, "A": 30, "BBB": 15, "BB": 15, "B": 0, "D": 0},
+        "limit_formula": "min(申请额度, 等级系数额度, 收入承载额度, 可用时近12月交易规模额度, 强规则上限)",
+        "policy_status": "演示基线，待机构样本校准、风险偏好审批和独立发布",
         "missing_request_policy": "未提供申请额度时不自动建议信用额度",
         "missing_transaction_policy": "内部交易数据不完整时仅允许人工复核并收紧账期"
       },

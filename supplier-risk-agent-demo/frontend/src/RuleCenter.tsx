@@ -8,6 +8,25 @@ type ValueDraft = { type: RuleAction["type"]; value: string };
 type RuleForm = { code: string; name: string; rule_type: RuleDefinition["rule_type"]; category: string; enabled: boolean; conditions: RuleCondition[]; condition_relation: RuleDefinition["condition_relation"]; actions: ValueDraft[]; priority: number };
 type RuleSetForm = { code: string; name: string; rule_codes: string[]; evaluation_strategy: RuleSetDefinition["evaluation_strategy"] };
 type PipelineForm = { code: string; name: string; stages: PipelineStage[] };
+type ReplayComparisonPayload = {
+  dataset_snapshot_id: string;
+  champion_model_key: string;
+  challenger_model_key: string;
+  champion_pipeline_code?: string;
+  challenger_pipeline_code?: string;
+  segment_field: string;
+  positive_labels: string[];
+  positive_admissions: string[];
+  sample_limit: number;
+  max_execution_failure_rate: number;
+  max_psi: number;
+  max_rating_change_rate: number;
+  max_admission_change_rate: number;
+  max_absolute_average_score_delta: number;
+  max_segment_absolute_score_delta: number;
+  max_ks_drop: number;
+  require_labeled_evidence: boolean;
+};
 
 const tabLabels: Record<AssetTab, string> = { rules: "规则", ruleSets: "规则集", pipelines: "决策管线" };
 const tabAssetTypes: Record<AssetTab, RuleCenterAssetType> = { rules: "rule", ruleSets: "rule_set", pipelines: "pipeline" };
@@ -353,13 +372,33 @@ export default function RuleCenter({ counterparties, currentSubject, canView, ca
     finally { setSaving(false); }
   }
 
-  async function runReplayComparison(payload: { dataset_snapshot_id: string; champion_model_key: string; challenger_model_key: string; champion_pipeline_code?: string; challenger_pipeline_code?: string; segment_field: string; positive_labels: string[]; positive_admissions: string[]; sample_limit: number; max_execution_failure_rate: number }) {
+  async function runReplayComparison(payload: { dataset_snapshot_id: string; champion_model_key: string; challenger_model_key: string; champion_pipeline_code?: string; challenger_pipeline_code?: string; segment_field: string; positive_labels: string[]; positive_admissions: string[]; sample_limit: number; max_execution_failure_rate: number; max_psi: number; max_rating_change_rate: number; max_admission_change_rate: number; max_absolute_average_score_delta: number; max_segment_absolute_score_delta: number; max_ks_drop: number; require_labeled_evidence: boolean }) {
     setSaving(true);
     try {
       const result = await api.runRuleCenterReplayComparison(payload);
       await loadAssets();
       onNotice({ kind: "success", text: `双模型回放完成，证据级别：${result.evidence_level === "labeled" ? "有标签监督验证" : "无标签稳定性验证"}` });
     } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "双模型回放失败" }); }
+    finally { setSaving(false); }
+  }
+
+  async function requestReplayComparisonException(comparisonId: string, payload: { reason: string; business_impact: string; compensating_controls: string; valid_until: string }) {
+    setSaving(true);
+    try {
+      await api.requestRuleCenterReplayComparisonException(comparisonId, payload);
+      await loadAssets();
+      onNotice({ kind: "success", text: "比较门禁例外已提交独立复核" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "例外申请提交失败" }); }
+    finally { setSaving(false); }
+  }
+
+  async function reviewReplayComparisonException(comparisonId: string, exceptionId: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) {
+    setSaving(true);
+    try {
+      await api.reviewRuleCenterReplayComparisonException(comparisonId, exceptionId, { expected_row_version: expectedRowVersion, decision, comment });
+      await loadAssets();
+      onNotice({ kind: "success", text: decision === "approve" ? "限期例外已批准，原门禁仍保留为失败" : "比较门禁例外已驳回" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "例外复核失败" }); }
     finally { setSaving(false); }
   }
 
@@ -401,7 +440,7 @@ export default function RuleCenter({ counterparties, currentSubject, canView, ca
       </main>
     </div>
     <GovernancePanel changes={changes.filter((item) => item.asset_type === tabAssetTypes[tab])} history={history} currentSubject={currentSubject} canManage={canManage} canReview={canReview} saving={saving} selectedCode={selectedCode} reviewingId={reviewingId} setReviewingId={setReviewingId} reviewComment={reviewComment} setReviewComment={setReviewComment} effectiveAt={effectiveAt} setEffectiveAt={setEffectiveAt} onEdit={editGovernanceDraft} onSubmit={submitChange} onReview={reviewChange} onScan={runActivationScan} onRestore={restoreVersion} />
-    <ReleasePackagePanel changes={changes} packages={packages} models={models} pipelines={pipelines} datasets={replayDatasets} snapshots={replaySnapshots} comparisons={replayComparisons} selectedIds={packageChangeIds} setSelectedIds={(ids) => { setPackageChangeIds(ids); setPackagePreview(null); }} name={packageName} setName={setPackageName} reason={packageReason} setReason={setPackageReason} preview={packagePreview} currentSubject={currentSubject} canManage={canManage} canReview={canReview} saving={saving} reviewingId={reviewingPackageId} setReviewingId={setReviewingPackageId} reviewComment={packageReviewComment} setReviewComment={setPackageReviewComment} onAnalyze={analyzePackage} onCreate={createPackage} onCreateDataset={createReplayDataset} onImportSnapshot={importReplaySnapshot} onCompare={runReplayComparison} onReplay={runPackageReplay} onSubmit={submitPackage} onReview={reviewPackage} />
+    <ReleasePackagePanel changes={changes} packages={packages} models={models} pipelines={pipelines} datasets={replayDatasets} snapshots={replaySnapshots} comparisons={replayComparisons} selectedIds={packageChangeIds} setSelectedIds={(ids) => { setPackageChangeIds(ids); setPackagePreview(null); }} name={packageName} setName={setPackageName} reason={packageReason} setReason={setPackageReason} preview={packagePreview} currentSubject={currentSubject} canManage={canManage} canReview={canReview} saving={saving} reviewingId={reviewingPackageId} setReviewingId={setReviewingPackageId} reviewComment={packageReviewComment} setReviewComment={setPackageReviewComment} onAnalyze={analyzePackage} onCreate={createPackage} onCreateDataset={createReplayDataset} onImportSnapshot={importReplaySnapshot} onCompare={runReplayComparison} onRequestComparisonException={requestReplayComparisonException} onReviewComparisonException={reviewReplayComparisonException} onReplay={runPackageReplay} onSubmit={submitPackage} onReview={reviewPackage} />
   </section>;
 }
 
@@ -451,7 +490,7 @@ function GovernancePanel({ changes, history, currentSubject, canManage, canRevie
   </section>;
 }
 
-function ReleasePackagePanel({ changes, packages, models, pipelines, datasets, snapshots, comparisons, selectedIds, setSelectedIds, name, setName, reason, setReason, preview, currentSubject, canManage, canReview, saving, reviewingId, setReviewingId, reviewComment, setReviewComment, onAnalyze, onCreate, onCreateDataset, onImportSnapshot, onCompare, onReplay, onSubmit, onReview }: {
+function ReleasePackagePanel({ changes, packages, models, pipelines, datasets, snapshots, comparisons, selectedIds, setSelectedIds, name, setName, reason, setReason, preview, currentSubject, canManage, canReview, saving, reviewingId, setReviewingId, reviewComment, setReviewComment, onAnalyze, onCreate, onCreateDataset, onImportSnapshot, onCompare, onRequestComparisonException, onReviewComparisonException, onReplay, onSubmit, onReview }: {
   changes: RuleCenterGovernanceChange[];
   packages: RuleCenterReleasePackage[];
   models: ModelSummary[];
@@ -478,7 +517,9 @@ function ReleasePackagePanel({ changes, packages, models, pipelines, datasets, s
   onCreate: () => void;
   onCreateDataset: (payload: { code: string; name: string; description: string }) => void;
   onImportSnapshot: (datasetId: string, payload: { source_name: string; schema_version: string; as_of_date: string; evidence_reference: string; data_classification: "deidentified" | "synthetic"; field_mapping: Record<string, string>; label_field?: string; observed_at_field?: string; records: Array<Record<string, unknown>> }) => void;
-  onCompare: (payload: { dataset_snapshot_id: string; champion_model_key: string; challenger_model_key: string; champion_pipeline_code?: string; challenger_pipeline_code?: string; segment_field: string; positive_labels: string[]; positive_admissions: string[]; sample_limit: number; max_execution_failure_rate: number }) => void;
+  onCompare: (payload: ReplayComparisonPayload) => void;
+  onRequestComparisonException: (comparisonId: string, payload: { reason: string; business_impact: string; compensating_controls: string; valid_until: string }) => void;
+  onReviewComparisonException: (comparisonId: string, exceptionId: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) => void;
   onReplay: (item: RuleCenterReleasePackage, payload: { dataset_snapshot_id: string; model_key: string; pipeline_code?: string; sample_limit: number; min_sample_count: number; max_decision_change_rate: number; max_execution_failure_rate: number }) => void;
   onSubmit: (item: RuleCenterReleasePackage) => void;
   onReview: (item: RuleCenterReleasePackage, decision: "publish" | "reject") => void;
@@ -516,7 +557,7 @@ function ReleasePackagePanel({ changes, packages, models, pipelines, datasets, s
   });
   return <section className="release-package-board">
     <header><div><span>ATOMIC RELEASE</span><h3>统一发布包</h3><p>锁定候选版本，分析依赖与下游影响，并按规则、规则集、决策管线顺序一次性发布。</p></div><aside><b>{packages.filter((item) => ["draft", "pending_review"].includes(item.status)).length}</b><small>处理中</small></aside></header>
-    <ReplayDatasetWorkbench datasets={datasets} snapshots={snapshots} models={models} pipelines={pipelines} comparisons={comparisons} canManage={canManage} saving={saving} onCreate={onCreateDataset} onImport={onImportSnapshot} onCompare={onCompare} />
+    <ReplayDatasetWorkbench datasets={datasets} snapshots={snapshots} models={models} pipelines={pipelines} comparisons={comparisons} currentSubject={currentSubject} canManage={canManage} canReview={canReview} saving={saving} onCreate={onCreateDataset} onImport={onImportSnapshot} onCompare={onCompare} onRequestComparisonException={onRequestComparisonException} onReviewComparisonException={onReviewComparisonException} />
     <div className="release-package-layout">
       <section className="package-builder">
         <header><strong>候选变更</strong><span>已选择 {selectedIds.length} / {drafts.length}</span></header>
@@ -562,17 +603,21 @@ function ReleasePackagePanel({ changes, packages, models, pipelines, datasets, s
   </section>;
 }
 
-function ReplayDatasetWorkbench({ datasets, snapshots, models, pipelines, comparisons, canManage, saving, onCreate, onImport, onCompare }: {
+function ReplayDatasetWorkbench({ datasets, snapshots, models, pipelines, comparisons, currentSubject, canManage, canReview, saving, onCreate, onImport, onCompare, onRequestComparisonException, onReviewComparisonException }: {
   datasets: RuleCenterReplayDataset[];
   snapshots: RuleCenterReplaySnapshot[];
   models: ModelSummary[];
   pipelines: DecisionPipelineDefinition[];
   comparisons: RuleCenterReplayComparison[];
+  currentSubject: string;
   canManage: boolean;
+  canReview: boolean;
   saving: boolean;
   onCreate: (payload: { code: string; name: string; description: string }) => void;
   onImport: (datasetId: string, payload: { source_name: string; schema_version: string; as_of_date: string; evidence_reference: string; data_classification: "deidentified" | "synthetic"; field_mapping: Record<string, string>; label_field?: string; observed_at_field?: string; records: Array<Record<string, unknown>> }) => void;
-  onCompare: (payload: { dataset_snapshot_id: string; champion_model_key: string; challenger_model_key: string; champion_pipeline_code?: string; challenger_pipeline_code?: string; segment_field: string; positive_labels: string[]; positive_admissions: string[]; sample_limit: number; max_execution_failure_rate: number }) => void;
+  onCompare: (payload: ReplayComparisonPayload) => void;
+  onRequestComparisonException: (comparisonId: string, payload: { reason: string; business_impact: string; compensating_controls: string; valid_until: string }) => void;
+  onReviewComparisonException: (comparisonId: string, exceptionId: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [mode, setMode] = useState<"create" | "import">("import");
@@ -599,6 +644,13 @@ function ReplayDatasetWorkbench({ datasets, snapshots, models, pipelines, compar
   const [segmentField, setSegmentField] = useState("counterparty_type");
   const [positiveLabels, setPositiveLabels] = useState("bad,default,reject");
   const [positiveAdmissions, setPositiveAdmissions] = useState("reject,禁入");
+  const [maxPsi, setMaxPsi] = useState(0.25);
+  const [maxRatingChangePercent, setMaxRatingChangePercent] = useState(25);
+  const [maxAdmissionChangePercent, setMaxAdmissionChangePercent] = useState(15);
+  const [maxAverageScoreDelta, setMaxAverageScoreDelta] = useState(10);
+  const [maxSegmentScoreDelta, setMaxSegmentScoreDelta] = useState(15);
+  const [maxKsDrop, setMaxKsDrop] = useState(0.05);
+  const [requireLabeledEvidence, setRequireLabeledEvidence] = useState(false);
   useEffect(() => {
     if (!datasets.some((item) => item.id === datasetId)) setDatasetId(datasets[0]?.id ?? "");
   }, [datasetId, datasets]);
@@ -643,22 +695,55 @@ function ReplayDatasetWorkbench({ datasets, snapshots, models, pipelines, compar
       <header><div><span>CHAMPION / CHALLENGER</span><strong>双模型并行验证</strong><small>同一不可变快照 · 已固化 {comparisons.length} 份比较证据</small></div><button type="button" className="secondary-button" onClick={() => setComparisonExpanded(!comparisonExpanded)}>{comparisonExpanded ? "收起验证配置" : "配置并行验证"}</button></header>
       {comparisonExpanded && canManage && <div className="comparison-form">
         <div className="comparison-fields"><Field label="数据集快照"><select value={comparisonSnapshotId} onChange={(event) => setComparisonSnapshotId(event.target.value)}><option value="">请选择快照</option>{snapshots.map((snapshot) => <option key={snapshot.id} value={snapshot.id}>v{snapshot.version} · {snapshot.as_of_date} · {snapshot.sample_count} 条</option>)}</select></Field><Field label="Champion 模型"><select value={championModelKey} onChange={(event) => setChampionModelKey(event.target.value)}>{models.map((model) => <option key={model.key} value={model.key}>{model.name} · {model.version}</option>)}</select></Field><Field label="Champion 管线"><select value={championPipelineCode} onChange={(event) => setChampionPipelineCode(event.target.value)}>{pipelines.map((pipeline) => <option key={pipeline.code} value={pipeline.code}>{pipeline.name} · v{pipeline.version}</option>)}</select></Field><Field label="Challenger 模型"><select value={challengerModelKey} onChange={(event) => setChallengerModelKey(event.target.value)}>{models.map((model) => <option key={model.key} value={model.key}>{model.name} · {model.version}</option>)}</select></Field><Field label="Challenger 管线"><select value={challengerPipelineCode} onChange={(event) => setChallengerPipelineCode(event.target.value)}>{pipelines.map((pipeline) => <option key={pipeline.code} value={pipeline.code}>{pipeline.name} · v{pipeline.version}</option>)}</select></Field><Field label="分群字段"><input value={segmentField} onChange={(event) => setSegmentField(event.target.value)} /></Field><Field label="正类标签"><input value={positiveLabels} onChange={(event) => setPositiveLabels(event.target.value)} placeholder="bad,default,reject" /></Field><Field label="预测正类准入"><input value={positiveAdmissions} onChange={(event) => setPositiveAdmissions(event.target.value)} placeholder="reject,禁入" /></Field></div>
-        <footer><button type="button" className="primary-button" disabled={saving || !comparisonSnapshotId || !championModelKey || !challengerModelKey || !championPipelineCode || !challengerPipelineCode || !segmentField.trim() || !positiveLabels.trim() || !positiveAdmissions.trim()} onClick={() => onCompare({ dataset_snapshot_id: comparisonSnapshotId, champion_model_key: championModelKey, challenger_model_key: challengerModelKey, champion_pipeline_code: championPipelineCode, challenger_pipeline_code: challengerPipelineCode, segment_field: segmentField.trim(), positive_labels: positiveLabels.split(",").map((item) => item.trim()).filter(Boolean), positive_admissions: positiveAdmissions.split(",").map((item) => item.trim()).filter(Boolean), sample_limit: 500, max_execution_failure_rate: 0 })}>运行并固化比较证据</button></footer>
+        <div className="comparison-thresholds"><Field label="PSI 上限"><input type="number" min="0" max="100" step="0.01" value={maxPsi} onChange={(event) => setMaxPsi(Number(event.target.value))} /></Field><Field label="评级变化率上限 %"><input type="number" min="0" max="100" step="1" value={maxRatingChangePercent} onChange={(event) => setMaxRatingChangePercent(Number(event.target.value))} /></Field><Field label="准入变化率上限 %"><input type="number" min="0" max="100" step="1" value={maxAdmissionChangePercent} onChange={(event) => setMaxAdmissionChangePercent(Number(event.target.value))} /></Field><Field label="平均分差上限"><input type="number" min="0" step="1" value={maxAverageScoreDelta} onChange={(event) => setMaxAverageScoreDelta(Number(event.target.value))} /></Field><Field label="分群分差上限"><input type="number" min="0" step="1" value={maxSegmentScoreDelta} onChange={(event) => setMaxSegmentScoreDelta(Number(event.target.value))} /></Field><Field label="KS 下降上限"><input type="number" min="0" max="1" step="0.01" value={maxKsDrop} onChange={(event) => setMaxKsDrop(Number(event.target.value))} /></Field><label className="comparison-label-requirement"><input type="checkbox" checked={requireLabeledEvidence} onChange={(event) => setRequireLabeledEvidence(event.target.checked)} /><span><b>必须提供标签证据</b><small>无标签样本将阻断，而非仅降级提示</small></span></label></div>
+        <footer><button type="button" className="primary-button" disabled={saving || !comparisonSnapshotId || !championModelKey || !challengerModelKey || !championPipelineCode || !challengerPipelineCode || !segmentField.trim() || !positiveLabels.trim() || !positiveAdmissions.trim()} onClick={() => onCompare({ dataset_snapshot_id: comparisonSnapshotId, champion_model_key: championModelKey, challenger_model_key: challengerModelKey, champion_pipeline_code: championPipelineCode, challenger_pipeline_code: challengerPipelineCode, segment_field: segmentField.trim(), positive_labels: positiveLabels.split(",").map((item) => item.trim()).filter(Boolean), positive_admissions: positiveAdmissions.split(",").map((item) => item.trim()).filter(Boolean), sample_limit: 500, max_execution_failure_rate: 0, max_psi: maxPsi, max_rating_change_rate: maxRatingChangePercent / 100, max_admission_change_rate: maxAdmissionChangePercent / 100, max_absolute_average_score_delta: maxAverageScoreDelta, max_segment_absolute_score_delta: maxSegmentScoreDelta, max_ks_drop: maxKsDrop, require_labeled_evidence: requireLabeledEvidence })}>运行并固化比较证据</button></footer>
       </div>}
-      {comparisons[0] ? <ComparisonEvidence comparison={comparisons[0]} /> : <div className="comparison-empty">尚无双模型比较证据</div>}
+      {comparisons[0] ? <ComparisonEvidence comparison={comparisons[0]} currentSubject={currentSubject} canManage={canManage} canReview={canReview} saving={saving} onRequestException={onRequestComparisonException} onReviewException={onReviewComparisonException} /> : <div className="comparison-empty">尚无双模型比较证据</div>}
     </section>
   </section>;
 }
 
-function ComparisonEvidence({ comparison }: { comparison: RuleCenterReplayComparison }) {
+function ComparisonEvidence({ comparison, currentSubject, canManage, canReview, saving, onRequestException, onReviewException }: {
+  comparison: RuleCenterReplayComparison;
+  currentSubject: string;
+  canManage: boolean;
+  canReview: boolean;
+  saving: boolean;
+  onRequestException: (comparisonId: string, payload: { reason: string; business_impact: string; compensating_controls: string; valid_until: string }) => void;
+  onReviewException: (comparisonId: string, exceptionId: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) => void;
+}) {
   const { metrics } = comparison;
+  const exception = comparison.latest_exception;
+  const [exceptionExpanded, setExceptionExpanded] = useState(false);
+  const [reason, setReason] = useState("");
+  const [businessImpact, setBusinessImpact] = useState("");
+  const [compensatingControls, setCompensatingControls] = useState("");
+  const [validUntil, setValidUntil] = useState(() => { const date = new Date(); date.setDate(date.getDate() + 30); return date.toISOString().slice(0, 10); });
+  const [reviewComment, setReviewComment] = useState("");
   const distribution = (values: Record<string, number>) => Object.entries(values).filter(([, count]) => count > 0).map(([label, count]) => `${label} ${count}`).join(" · ") || "无";
-  return <section className="comparison-evidence">
-    <header><div><strong>{comparison.evidence_level === "labeled" ? "监督验证证据" : "非监督稳定性证据"}</strong><small>快照 {comparison.dataset_snapshot_hash.slice(0, 12)} · {formatDate(comparison.created_at)}</small></div><code title={comparison.evidence_hash}>{comparison.evidence_hash.slice(0, 12)}</code></header>
+  const statusLabels: Record<RuleCenterReplayComparison["effective_status"], string> = { passed: "门禁通过", blocked: "门禁阻断", exception_pending: "待例外复核", exception_approved: "限期例外批准" };
+  const exceptionStatusLabels = { pending_review: "待独立复核", approved: "限期批准", rejected: "已驳回" } as const;
+  const formatGateValue = (key: string, value: number) => key.includes("rate") ? formatPercent(value) : key === "require_labeled_evidence" ? (value ? "是" : "否") : value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  const canRequest = canManage && !comparison.gate.passed && (!exception || exception.status === "rejected");
+  const canActOnReview = Boolean(exception && exception.status === "pending_review" && canReview && exception.requested_by !== currentSubject);
+  const submitException = () => {
+    if (reason.trim().length < 5 || businessImpact.trim().length < 5 || compensatingControls.trim().length < 5 || !validUntil) return;
+    onRequestException(comparison.id, { reason: reason.trim(), business_impact: businessImpact.trim(), compensating_controls: compensatingControls.trim(), valid_until: validUntil });
+  };
+  return <section className={`comparison-evidence ${comparison.effective_status}`}>
+    <header><div><strong>{comparison.evidence_level === "labeled" ? "监督验证证据" : "非监督稳定性证据"}</strong><small>快照 {comparison.dataset_snapshot_hash.slice(0, 12)} · {formatDate(comparison.created_at)}</small></div><span className={`comparison-gate-status ${comparison.effective_status}`}>{statusLabels[comparison.effective_status]}</span><code title={comparison.evidence_hash}>{comparison.evidence_hash.slice(0, 12)}</code></header>
+    <section className={`comparison-gate ${comparison.gate.passed ? "passed" : "blocked"}`}><header><div><strong>{comparison.gate.summary}</strong><small>确定性阈值校验 · {comparison.gate.violations.length} 项超限</small></div><b>{comparison.gate.passed ? "PASS" : "BLOCK"}</b></header>{comparison.gate.violations.length > 0 && <div className="comparison-violations">{comparison.gate.violations.map((violation) => <article key={violation.key}><span><strong>{violation.label}</strong><small>{violation.message}</small></span><b>{formatGateValue(violation.key, violation.actual)}</b><i>上限 {formatGateValue(violation.key, violation.threshold)}</i></article>)}</div>}{comparison.gate.warnings.map((warning) => <p className="replay-warning" key={warning}>{warning}</p>)}</section>
     {metrics.warning && <p className="replay-warning">{metrics.warning}</p>}
-    <div className="comparison-metrics"><span><small>样本 / 标签</small><b>{metrics.sample_count} / {metrics.labeled_sample_count}</b></span><span><small>平均分差</small><b>{metrics.average_score_delta === null ? "—" : formatSigned(metrics.average_score_delta)}</b></span><span><small>PSI</small><b>{metrics.psi.toFixed(4)}</b></span><span><small>评级变化</small><b>{formatPercent(metrics.rating_change_rate)}</b></span><span><small>准入变化</small><b>{formatPercent(metrics.admission_change_rate)}</b></span></div>
+    <div className="comparison-metrics"><span><small>样本 / 标签</small><b>{metrics.sample_count} / {metrics.labeled_sample_count}</b></span><span><small>标准分平均差</small><b>{metrics.average_score_delta === null ? "—" : formatSigned(metrics.average_score_delta)}</b></span><span><small>PSI</small><b>{metrics.psi.toFixed(4)}</b></span><span><small>评级变化</small><b>{formatPercent(metrics.rating_change_rate)}</b></span><span><small>准入变化</small><b>{formatPercent(metrics.admission_change_rate)}</b></span></div>
     <div className="comparison-sides">{(["champion", "challenger"] as const).map((side) => { const value = metrics[side]; return <article key={side}><header><strong>{side === "champion" ? "Champion" : "Challenger"}</strong><small>{comparison[`${side}_model_key`]} {comparison[`${side}_model_version`]} · {comparison[`${side}_pipeline_code`]} v{comparison[`${side}_pipeline_version`] ?? "legacy"}</small></header><div><span><small>均分 / 中位</small><b>{value.score_mean?.toFixed(2) ?? "—"} / {value.score_median?.toFixed(2) ?? "—"}</b></span><span><small>KS</small><b>{value.ks?.toFixed(4) ?? "—"}</b></span><span><small>失败率</small><b>{formatPercent(value.failure_rate)}</b></span></div><p><b>评级</b>{distribution(value.rating_distribution)}</p><p><b>准入</b>{distribution(value.admission_distribution)}</p>{value.confusion_matrix && <p><b>混淆矩阵</b>TP {value.confusion_matrix.tp} · FP {value.confusion_matrix.fp} · TN {value.confusion_matrix.tn} · FN {value.confusion_matrix.fn}</p>}</article>; })}</div>
-    <div className="comparison-segments"><strong>分群稳定性 · {comparison.segment_field}</strong><div><table><thead><tr><th>分群</th><th>样本</th><th>Champion 均分</th><th>Challenger 均分</th><th>平均差</th><th>评级变化</th><th>准入变化</th></tr></thead><tbody>{metrics.segments.map((row) => <tr key={row.segment}><th>{row.segment}</th><td>{row.sample_count}</td><td>{row.champion_score_mean?.toFixed(2) ?? "—"}</td><td>{row.challenger_score_mean?.toFixed(2) ?? "—"}</td><td>{row.average_score_delta === null ? "—" : formatSigned(row.average_score_delta)}</td><td>{formatPercent(row.rating_change_rate)}</td><td>{formatPercent(row.admission_change_rate)}</td></tr>)}</tbody></table></div></div>
+    <div className="comparison-segments"><strong>分群稳定性 · {comparison.segment_field} · 0–100 标准分</strong><div><table><thead><tr><th>分群</th><th>样本</th><th>Champion 均分</th><th>Challenger 均分</th><th>平均差</th><th>评级变化</th><th>准入变化</th></tr></thead><tbody>{metrics.segments.map((row) => <tr key={row.segment}><th>{row.segment}</th><td>{row.sample_count}</td><td>{row.champion_score_mean?.toFixed(2) ?? "—"}</td><td>{row.challenger_score_mean?.toFixed(2) ?? "—"}</td><td>{row.average_score_delta === null ? "—" : formatSigned(row.average_score_delta)}</td><td>{formatPercent(row.rating_change_rate)}</td><td>{formatPercent(row.admission_change_rate)}</td></tr>)}</tbody></table></div></div>
+    {!comparison.gate.passed && <section className="comparison-exception"><header><div><strong>门禁例外治理</strong><small>例外仅改变处置状态，不改写原始门禁证据。</small></div>{canRequest && <button type="button" className="secondary-button" disabled={saving} onClick={() => setExceptionExpanded(!exceptionExpanded)}>{exceptionExpanded ? "收起申请" : exception?.status === "rejected" ? "重新申请" : "申请限期例外"}</button>}</header>
+      {exception && <article className={`comparison-exception-record ${exception.status}`}><header><span><strong>{exceptionStatusLabels[exception.status]}</strong><small>申请人 {exception.requested_by_name} · 有效期至 {exception.valid_until}</small></span><code title={exception.request_hash}>{exception.request_hash.slice(0, 12)}</code></header><dl><div><dt>申请原因</dt><dd>{exception.reason}</dd></div><div><dt>业务影响</dt><dd>{exception.business_impact}</dd></div><div><dt>补偿控制</dt><dd>{exception.compensating_controls}</dd></div></dl>{exception.review_comment && <p><b>复核意见</b>{exception.review_comment}</p>}{exception.reviewed_by_name && <small>复核人 {exception.reviewed_by_name} · {formatDate(exception.reviewed_at)}</small>}</article>}
+      {exceptionExpanded && canRequest && <div className="comparison-exception-form"><label><span>例外原因</span><textarea value={reason} onChange={(event) => setReason(event.target.value)} maxLength={1000} placeholder="说明无法立即满足门禁的原因（至少 5 个字符）" /></label><label><span>业务影响</span><textarea value={businessImpact} onChange={(event) => setBusinessImpact(event.target.value)} maxLength={1000} placeholder="说明阻断上线带来的业务影响" /></label><label><span>补偿控制</span><textarea value={compensatingControls} onChange={(event) => setCompensatingControls(event.target.value)} maxLength={1000} placeholder="说明限期内的监控、抽检或回退措施" /></label><label><span>有效期（最长 180 天）</span><input type="date" value={validUntil} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setValidUntil(event.target.value)} /></label><footer><button type="button" className="primary-button" disabled={saving || reason.trim().length < 5 || businessImpact.trim().length < 5 || compensatingControls.trim().length < 5 || !validUntil} onClick={submitException}>提交独立复核</button></footer></div>}
+      {canActOnReview && exception && <div className="comparison-exception-review"><label><span>独立复核意见</span><textarea value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} maxLength={1000} placeholder="记录阈值偏离、补偿控制和限期判断（至少 5 个字符）" /></label><footer><button type="button" className="reject-button" disabled={saving || reviewComment.trim().length < 5} onClick={() => onReviewException(comparison.id, exception.id, exception.row_version, "reject", reviewComment.trim())}>驳回</button><button type="button" className="primary-button" disabled={saving || reviewComment.trim().length < 5} onClick={() => onReviewException(comparison.id, exception.id, exception.row_version, "approve", reviewComment.trim())}>批准限期例外</button></footer></div>}
+      {exception?.status === "pending_review" && exception.requested_by === currentSubject && <p className="comparison-exception-note">申请人与复核人必须分离，请由具备模型复核权限的其他人员处理。</p>}
+      {exception?.status === "approved" && <p className="comparison-exception-note strong">限期例外已批准，但原门禁结论仍为失败；后续发布与审计必须同时引用原证据和例外记录。</p>}
+    </section>}
   </section>;
 }
 

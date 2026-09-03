@@ -7,7 +7,7 @@ const money = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY
 
 type Notice = { kind: "error" | "success"; text: string };
 
-export default function ModelLab({ counterparties, canView, canSimulate, canManage, canReview, canManageIndicatorData, canReviewIndicatorData, onNotice }: { counterparties: Counterparty[]; canView: boolean; canSimulate: boolean; canManage: boolean; canReview: boolean; canManageIndicatorData: boolean; canReviewIndicatorData: boolean; onNotice: (notice: Notice | null) => void }) {
+export default function ModelLab({ focus, counterparties, canView, canSimulate, canManage, canReview, canManageIndicatorData, canReviewIndicatorData, onNotice }: { focus?: { modelKey: string; requestId: number } | null; counterparties: Counterparty[]; canView: boolean; canSimulate: boolean; canManage: boolean; canReview: boolean; canManageIndicatorData: boolean; canReviewIndicatorData: boolean; onNotice: (notice: Notice | null) => void }) {
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [modelKey, setModelKey] = useState("general");
   const [counterpartyId, setCounterpartyId] = useState(counterparties[0]?.id ?? "");
@@ -39,6 +39,10 @@ export default function ModelLab({ counterparties, canView, canSimulate, canMana
     }).catch((error: Error) => onNotice({ kind: "error", text: error.message }));
   }, [canView, onNotice]);
 
+  useEffect(() => {
+    if (focus?.modelKey) setModelKey(focus.modelKey);
+  }, [focus]);
+
   const loadAnalysis = useCallback(async () => {
     if (!canView || !modelKey || !counterpartyId) return;
     const requestId = ++analysisRequestId.current;
@@ -68,6 +72,10 @@ export default function ModelLab({ counterparties, canView, canSimulate, canMana
   }, [canView, counterpartyId, modelKey, onNotice]);
 
   useEffect(() => { void loadAnalysis(); }, [loadAnalysis]);
+  useEffect(() => {
+    if (!focus || focus.modelKey !== modelKey || !model) return;
+    window.setTimeout(() => document.getElementById("model-governance")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  }, [focus, model, modelKey]);
 
   const selectedCounterparty = counterparties.find((item) => item.id === counterpartyId);
   const selectedIndicator = model?.editable_indicators.find((item) => item.path === indicatorPath);
@@ -138,6 +146,7 @@ export default function ModelLab({ counterparties, canView, canSimulate, canMana
         <SummaryCard label="建议授信额度" value={(trace.result.suggested_limit / 10_000).toFixed(0)} suffix="万元" detail={`建议账期 ${trace.result.suggested_payment_term_days} 天`} tone="blue" />
         <SummaryCard label="强规则命中" value={String(trace.result.strong_rule_hits.length)} suffix="条" detail={trace.result.access_strategy} tone={trace.result.strong_rule_hits.length ? "red" : "green"} />
         </div>
+        {trace.result.scorecard_execution && <ScorecardExecutionEvidence result={trace.result} />}
       </section>
 
       <section id="model-explanation" className="model-zone explanation-zone">
@@ -190,6 +199,20 @@ function ModelZoneHeader({ index, eyebrow, title, description, tags }: { index: 
 }
 
 function SummaryCard({ label, value, suffix, detail, tone }: { label: string; value: string; suffix: string; detail: string; tone: string }) { return <div className={`model-summary-card ${tone}`}><span>{label}</span><strong>{value}<small>{suffix}</small></strong><p>{detail}</p></div>; }
+function ScorecardExecutionEvidence({ result }: { result: RatingTrace["result"] }) {
+  const execution = result.scorecard_execution;
+  if (!execution) return null;
+  return <div className="scorecard-runtime-evidence">
+    <header><div><span>GOVERNED SCORECARD</span><strong>{execution.code} @ v{execution.version}</strong></div><small>固定资产 {execution.scorecard_asset_id}</small></header>
+    <div>
+      <span><small>业务刻度分</small><strong>{execution.scaled_score.toFixed(2)}</strong><b>{execution.score_scale.min} - {execution.score_scale.max}</b></span>
+      <span><small>标准分</small><strong>{execution.normalized_score.toFixed(1)}</strong><b>用于评级与策略映射</b></span>
+      <span><small>分箱原始分</small><strong>{execution.raw_score.toFixed(2)}</strong><b>{execution.details.length} 项指标</b></span>
+      <span><small>缺失指标</small><strong>{execution.missing_count}</strong><b>明确命中缺失箱</b></span>
+      <span className="scorecard-runtime-hash"><small>评分卡配置哈希</small><code>{execution.config_hash}</code></span>
+    </div>
+  </div>;
+}
 function FlowNode({ index, label, detail, alert, final }: { index: string; label: string; detail: string; alert?: boolean; final?: boolean }) { return <div className={`flow-node ${alert ? "alert" : ""} ${final ? "final" : ""}`}><span>{index}</span><strong>{label}</strong><small>{detail}</small></div>; }
 function FlowArrow() { return <div className="flow-arrow">→</div>; }
 

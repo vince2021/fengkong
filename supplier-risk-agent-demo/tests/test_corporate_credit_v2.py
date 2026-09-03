@@ -134,3 +134,55 @@ def test_credit_limit_uses_minimum_capacity_and_rule_constraints() -> None:
     assert result["limit_calculation"]["规则调整后额度"] == 2_000_000
     assert result["suggested_limit"] == 2_000_000
     assert result["suggested_payment_term_days"] == 0
+
+
+def test_complete_transaction_data_activates_overdue_limit_and_term_controls() -> None:
+    counterparty, config = _fixtures()
+    candidate = deepcopy(counterparty)
+    candidate["requested_limit"] = 2_000_000
+    candidate["data_quality"]["internal_transaction_complete"] = True
+    candidate["internal"].update({
+        "delivery_fulfillment_rate": 0.99,
+        "invoice_match_rate": 0.99,
+        "cooperation_years": 3,
+        "order_amount_12m": 10_000_000,
+    })
+    candidate["financial"].update({
+        "overdue_rate": 0.2,
+        "limit_utilization_rate": 0.5,
+        "bad_debt_flag": False,
+    })
+
+    result = rate_counterparty(candidate, config)
+
+    hits = {item["rule_id"] for item in result["strong_rule_hits"]}
+    assert "CR-202" in hits
+    assert "CR-201" not in hits
+    assert result["suggested_limit"] <= 500_000
+    assert result["suggested_payment_term_days"] == 0
+    assert result["review_required"] is True
+
+
+def test_confirmed_bad_debt_blocks_limit_and_payment_term() -> None:
+    counterparty, config = _fixtures()
+    candidate = deepcopy(counterparty)
+    candidate["requested_limit"] = 2_000_000
+    candidate["data_quality"]["internal_transaction_complete"] = True
+    candidate["internal"].update({
+        "delivery_fulfillment_rate": 0.99,
+        "invoice_match_rate": 0.99,
+        "cooperation_years": 3,
+        "order_amount_12m": 10_000_000,
+    })
+    candidate["financial"].update({
+        "overdue_rate": 0,
+        "limit_utilization_rate": 0.5,
+        "bad_debt_flag": True,
+    })
+
+    result = rate_counterparty(candidate, config)
+
+    assert "CR-207" in {item["rule_id"] for item in result["strong_rule_hits"]}
+    assert result["access_strategy"] == "禁入"
+    assert result["suggested_limit"] == 0
+    assert result["suggested_payment_term_days"] == 0

@@ -10,9 +10,11 @@ import backend.database as database
 from backend.database import Base
 from backend.db_models import (
     DecisionPipelineDefinition,
+    ModelChangeRecord,
     RuleCenterReleasePackage,
     RuleCenterReleasePackageMember,
     RuleCenterReplayComparisonRun,
+    RuleCenterReplayComparisonException,
     RuleCenterReplayDataset,
     RuleCenterReplayDatasetSnapshot,
     RuleCenterReplayRun,
@@ -130,7 +132,21 @@ class TestRuleCenterModels(unittest.TestCase):
             "champion_pipeline_code", "champion_pipeline_version",
             "challenger_pipeline_code", "challenger_pipeline_version",
             "segment_field", "evidence_level", "config_json", "metrics_json",
-            "details_json", "evidence_hash", "created_by",
+            "details_json", "gate_json", "evidence_hash", "created_by",
+        }.issubset(columns))
+        self.assertIn("rule_center_replay_comparison_exceptions", insp.get_table_names())
+        exception_columns = {column.name for column in RuleCenterReplayComparisonException.__table__.columns}
+        self.assertTrue({
+            "comparison_run_id", "comparison_evidence_hash", "status", "reason",
+            "business_impact", "compensating_controls", "valid_until", "request_hash",
+            "requested_by", "reviewed_by", "review_comment", "row_version",
+        }.issubset(exception_columns))
+
+    def test_model_change_can_bind_calibration_evidence(self):
+        columns = {column.name for column in ModelChangeRecord.__table__.columns}
+        self.assertTrue({
+            "calibration_snapshot_id", "calibration_evidence_json",
+            "calibration_evidence_binding_hash",
         }.issubset(columns))
 
 

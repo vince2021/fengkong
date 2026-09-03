@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
-import type { EnterpriseRiskIndicator, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelValidationReport, MonitoringIssue, MonitoringSummary, RiskScreeningPolicy, RiskScreeningPolicyRule, StrongRule } from "./types";
+import type { CreditCalibrationCandidate, DecisionPipelineDefinition, EnterpriseRiskIndicator, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelValidationReport, MonitoringIssue, MonitoringSummary, RiskScreeningPolicy, RiskScreeningPolicyRule, RuleCenterReplaySnapshot, ScorecardAsset, ScorecardDevelopmentRun, StrongRule } from "./types";
 
 
 type Notice = { kind: "error" | "success"; text: string };
@@ -22,6 +22,17 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
   const [governanceNotifications, setGovernanceNotifications] = useState<ModelGovernanceNotification[]>([]);
   const [outcomeImports, setOutcomeImports] = useState<ModelOutcomeImport[]>([]);
   const [monitoringSchedules, setMonitoringSchedules] = useState<ModelMonitoringSchedule[]>([]);
+  const [replaySnapshots, setReplaySnapshots] = useState<RuleCenterReplaySnapshot[]>([]);
+  const [pipelines, setPipelines] = useState<DecisionPipelineDefinition[]>([]);
+  const [scorecards, setScorecards] = useState<ScorecardAsset[]>([]);
+  const [scorecardId, setScorecardId] = useState("");
+  const [scorecardValidationRuns, setScorecardValidationRuns] = useState<ScorecardDevelopmentRun[]>([]);
+  const [scorecardValidationRunId, setScorecardValidationRunId] = useState("");
+  const [comparisonSnapshotId, setComparisonSnapshotId] = useState("");
+  const [championPipeline, setChampionPipeline] = useState("");
+  const [challengerPipeline, setChallengerPipeline] = useState("");
+  const [evidenceValidDays, setEvidenceValidDays] = useState(30);
+  const [comparisonThresholds, setComparisonThresholds] = useState({ psi: 0.25, rating: 0.25, admission: 0.15, score: 10, segment: 15, ks: 0.05 });
   const [candidateVersion, setCandidateVersion] = useState("");
   const [changeReason, setChangeReason] = useState("");
   const [weights, setWeights] = useState<Record<string, number>>({});
@@ -53,7 +64,7 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [changeRows, releaseRows, validationReport, monitoring, outcomeRows, issueRows, runRows, governanceNoticeRows, importRows, scheduleRows, poolResponse] = await Promise.all([api.modelChanges(modelKey), api.modelReleases(modelKey), api.modelValidation(modelKey), api.modelMonitoringSummary(modelKey), api.modelOutcomes(modelKey), api.monitoringIssues(modelKey), api.modelMonitoringRuns(modelKey), api.governanceNotifications(), api.outcomeImports(modelKey), api.monitoringSchedules(modelKey), api.indicatorPool()]);
+      const [changeRows, releaseRows, validationReport, monitoring, outcomeRows, issueRows, runRows, governanceNoticeRows, importRows, scheduleRows, poolResponse, snapshotRows, pipelineRows, scorecardRows, scorecardDevelopmentRows] = await Promise.all([api.modelChanges(modelKey), api.modelReleases(modelKey), api.modelValidation(modelKey), api.modelMonitoringSummary(modelKey), api.modelOutcomes(modelKey), api.monitoringIssues(modelKey), api.modelMonitoringRuns(modelKey), api.governanceNotifications(), api.outcomeImports(modelKey), api.monitoringSchedules(modelKey), api.indicatorPool(), api.ruleCenterReplaySnapshots(), api.decisionPipelines(), api.scorecards(), api.scorecardDevelopmentRuns()]);
       setChanges(changeRows);
       setReleases(releaseRows);
       setValidation(validationReport);
@@ -65,6 +76,11 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
       setOutcomeImports(importRows);
       setMonitoringSchedules(scheduleRows);
       setIndicatorPool(poolResponse.indicators);
+      setReplaySnapshots(snapshotRows);
+      setPipelines(pipelineRows.filter((item) => item.is_active));
+      setScorecards(scorecardRows);
+      setScorecardValidationRuns(scorecardDevelopmentRows);
+      setComparisonSnapshotId((current) => current || snapshotRows[0]?.id || "");
       if (scheduleRows[0]) {
         setScheduleCadence(scheduleRows[0].cadence);
         setScheduleTimezone(scheduleRows[0].timezone_name);
@@ -84,6 +100,8 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     setRules(model.strong_rules.map((rule) => ({ ...rule, conditions: rule.conditions.map((condition) => ({ ...condition })), action: { ...rule.action } })));
     setIndicatorSelection(Object.fromEntries(model.indicator_selection.map((item) => [item.id, { weight: item.model_weight, enabled: item.enabled }])));
     setRiskPolicy(cloneRiskPolicy(model.risk_screening_policy));
+    setScorecardId(model.scorecard_binding?.scorecard_asset_id ?? "");
+    setScorecardValidationRunId("");
     setChangeReason("");
   }, [model]);
 
@@ -93,8 +111,8 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     try {
       const editing = changes.find((item) => item.id === editingId);
       const created = editing
-        ? await api.updateModelChange(editing.id, { expected_row_version: editing.row_version, change_reason: changeReason, weights, thresholds, strong_rules: rules, strategy_mapping: model.strategy_mapping, indicator_selection: serializeIndicatorSelection(indicatorSelection), risk_screening_policy: riskPolicy })
-        : await api.createModelChange({ template_key: modelKey, candidate_version: candidateVersion, change_reason: changeReason, weights, thresholds, strong_rules: rules, strategy_mapping: model.strategy_mapping, indicator_selection: serializeIndicatorSelection(indicatorSelection), risk_screening_policy: riskPolicy });
+        ? await api.updateModelChange(editing.id, { expected_row_version: editing.row_version, change_reason: changeReason, weights, thresholds, strong_rules: rules, strategy_mapping: model.strategy_mapping, indicator_selection: serializeIndicatorSelection(indicatorSelection), risk_screening_policy: riskPolicy, scorecard_id: scorecardId || null, scorecard_validation_run_id: scorecardValidationRunId || null })
+        : await api.createModelChange({ template_key: modelKey, candidate_version: candidateVersion, change_reason: changeReason, weights, thresholds, strong_rules: rules, strategy_mapping: model.strategy_mapping, indicator_selection: serializeIndicatorSelection(indicatorSelection), risk_screening_policy: riskPolicy, scorecard_id: scorecardId || null, scorecard_validation_run_id: scorecardValidationRunId || null });
       await reload();
       setEditingId("");
       onNotice({ kind: "success", text: `变更单 ${created.candidate_version} 已${editing ? "更新" : "创建"}，影响 ${created.impact.impacted_count}/${created.impact.sample_count} 个样本` });
@@ -112,12 +130,44 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     const configured = change.config.indicator_selection ?? model.indicator_selection.map((item) => ({ indicator_id: item.id, weight: item.model_weight, enabled: item.enabled }));
     setIndicatorSelection(Object.fromEntries(configured.map((item) => [item.indicator_id, { weight: item.weight, enabled: item.enabled }])));
     setRiskPolicy(cloneRiskPolicy(change.config.risk_screening_policy ?? model.risk_screening_policy));
+    setScorecardId(change.config.scorecard_binding?.scorecard_asset_id ?? "");
+    setScorecardValidationRunId(change.scorecard_validation_evidence.validation_run_id ?? "");
   }
 
   async function submit(change: ModelChangeRecord) {
     setBusy(change.id);
     try { await api.submitModelChange(change.id, change.row_version); await reload(); onNotice({ kind: "success", text: `${change.candidate_version} 已提交风控审核` }); }
     catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "提交审核失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function runComparisonEvidence(change: ModelChangeRecord) {
+    if (!comparisonSnapshotId) return onNotice({ kind: "error", text: "请先选择不可变回放快照" });
+    setBusy(`comparison-${change.id}`);
+    try {
+      const result = await api.runModelChangeComparisonEvidence(change.id, {
+        expected_row_version: change.row_version,
+        dataset_snapshot_id: comparisonSnapshotId,
+        champion_pipeline_code: championPipeline || undefined,
+        challenger_pipeline_code: challengerPipeline || undefined,
+        segment_field: "counterparty_type",
+        positive_labels: ["bad", "default", "reject"],
+        positive_admissions: ["reject", "禁入"],
+        sample_limit: 500,
+        max_execution_failure_rate: 0,
+        max_psi: comparisonThresholds.psi,
+        max_rating_change_rate: comparisonThresholds.rating,
+        max_admission_change_rate: comparisonThresholds.admission,
+        max_absolute_average_score_delta: comparisonThresholds.score,
+        max_segment_absolute_score_delta: comparisonThresholds.segment,
+        max_ks_drop: comparisonThresholds.ks,
+        require_labeled_evidence: false,
+        evidence_valid_days: evidenceValidDays,
+      });
+      await reload();
+      const gate = result.comparison_evidence.gate;
+      onNotice({ kind: gate?.passed ? "success" : "error", text: gate?.passed ? "候选比较证据已通过并绑定" : `${gate?.summary ?? "比较门禁阻断"}，可进入限期例外复核` });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "候选比较运行失败" }); }
     finally { setBusy(""); }
   }
 
@@ -241,6 +291,8 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     finally { setBusy(""); }
   }
 
+  const approvedScorecardValidations = scorecardValidationRuns.filter((run) => run.scorecard_asset_id === scorecardId && run.review_status === "approved" && run.integrity_valid && run.review_integrity_valid && run.report.validation_gate?.passed);
+
   return <section className="panel governance-panel">
     <div className="section-title"><div><span>MODEL LIFECYCLE</span><h2>模型变更、审核与发布治理</h2></div><span className="soft-chip">制作者与审批者分离</span></div>
     <div className="governance-guide"><div><b>01</b><span>配置草稿</span></div><i>→</i><div><b>02</b><span>全样本重算</span></div><i>→</i><div><b>03</b><span>提交风控审核</span></div><i>→</i><div><b>04</b><span>发布或回滚</span></div></div>
@@ -255,6 +307,11 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
         <div><h3>维度权重</h3><div className="config-field-grid">{Object.entries(weights).map(([key, value]) => <label key={key}><span>{dimensionLabels[key] ?? key}</span><div><input type="number" min="0" max="1" step="0.01" value={value} onChange={(event) => setWeights({ ...weights, [key]: Number(event.target.value) })} /><small>{(value * 100).toFixed(0)}%</small></div></label>)}</div><p>当前合计：{(Object.values(weights).reduce((sum, value) => sum + value, 0) * 100).toFixed(1)}%</p></div>
         <div><h3>评分阈值</h3><div className="config-field-grid thresholds">{Object.entries(thresholds).map(([key, value]) => <label key={key}><span>{thresholdLabels[key] ?? key}</span><input type="number" step={key.includes("rate") ? "0.01" : "1"} value={value} onChange={(event) => setThresholds({ ...thresholds, [key]: Number(event.target.value) })} /></label>)}</div></div>
       </div>
+      <section className="model-scorecard-binding">
+        <header><div><span>GOVERNED SCORECARD</span><h3>评分卡执行绑定</h3><p>模型候选固定已发布评分卡版本和配置哈希；不选择时继续使用当前模型评分逻辑。</p></div><label><span>评分卡资产</span><select value={scorecardId} onChange={(event) => { setScorecardId(event.target.value); setScorecardValidationRunId(""); }}><option value="">不绑定（沿用现有评分逻辑）</option>{scorecards.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · v{asset.version}{asset.is_active ? " · 当前生效" : " · 历史版本"}</option>)}</select></label></header>
+        {scorecardId && (() => { const asset = scorecards.find((item) => item.id === scorecardId); return asset ? <div className="model-scorecard-evidence"><div><span>固定资产</span><b>{asset.code} @ v{asset.version}</b></div><div><span>指标 / 分箱</span><b>{asset.config.indicators.length} / {asset.config.indicators.reduce((sum, item) => sum + item.bins.length, 0)}</b></div><div><span>业务刻度</span><b>{asset.config.score_scale.min} - {asset.config.score_scale.max}</b></div><div><span>配置哈希</span><code>{asset.config_hash.slice(0, 16)}</code></div></div> : null; })()}
+        {scorecardId && <div className="model-scorecard-validation-picker"><label><span>已批准开发验证</span><select value={scorecardValidationRunId} onChange={(event) => setScorecardValidationRunId(event.target.value)}><option value="">请选择 PASS 且已独立批准的证据</option>{approvedScorecardValidations.map((run) => <option key={run.id} value={run.id}>{run.created_at ? new Date(run.created_at).toLocaleDateString("zh-CN") : "固定运行"} · {run.report.validation_gate?.summary} · {run.evidence_hash.slice(0, 10)}</option>)}</select></label><span className={scorecardValidationRunId ? "pass" : "blocked"}>{scorecardValidationRunId ? "开发验证证据已选择" : approvedScorecardValidations.length ? "提交前必须选择" : "当前评分卡没有可绑定的批准证据"}</span></div>}
+      </section>
       <div className="rule-switches"><h3>强规则启停</h3>{rules.map((rule, index) => <label key={rule.id}><input type="checkbox" checked={rule.enabled} onChange={(event) => setRules(rules.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: event.target.checked } : item))} /><span><strong>{rule.id} · {rule.name}</strong><small>{rule.conditions.map((condition) => condition.label).join(rule.condition_relation === "all" ? " 且 " : " 或 ")}</small></span></label>)}</div>
       <div className="risk-policy-editor">
         <header><div><h3>企业风险贷策收紧层</h3><p>风险指标池命中后，按最严格动作调整评级、额度、账期与准入策略。</p></div><label><input type="checkbox" checked={riskPolicy.enabled} onChange={(event) => setRiskPolicy({ ...riskPolicy, enabled: event.target.checked })} />启用策略层</label></header>
@@ -274,13 +331,121 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
       </div>
     </div>}
 
+    {canManage && <section className="comparison-evidence-console">
+      <div className="governance-subhead"><div><strong>Champion / Challenger 发布证据</strong><span>固定基线、候选配置、快照和管线版本</span></div><small>运行后绑定至对应草稿</small></div>
+      <div className="comparison-evidence-fields">
+        <label><span>不可变数据快照</span><select value={comparisonSnapshotId} onChange={(event) => setComparisonSnapshotId(event.target.value)}><option value="">请选择快照</option>{replaySnapshots.map((item) => <option key={item.id} value={item.id}>v{item.version} · {item.as_of_date} · {item.sample_count} 条</option>)}</select></label>
+        <label><span>Champion 管线</span><select value={championPipeline} onChange={(event) => setChampionPipeline(event.target.value)}><option value="">沿用模型固定管线</option>{pipelines.map((item) => <option key={item.id} value={item.code}>{item.code} · v{item.version}</option>)}</select></label>
+        <label><span>Challenger 管线</span><select value={challengerPipeline} onChange={(event) => setChallengerPipeline(event.target.value)}><option value="">沿用候选固定管线</option>{pipelines.map((item) => <option key={item.id} value={item.code}>{item.code} · v{item.version}</option>)}</select></label>
+        <label><span>证据有效天数</span><input type="number" min="1" max="180" value={evidenceValidDays} onChange={(event) => setEvidenceValidDays(Number(event.target.value))} /></label>
+      </div>
+      <div className="comparison-threshold-grid">
+        <label><span>PSI 上限</span><input type="number" min="0" step="0.01" value={comparisonThresholds.psi} onChange={(event) => setComparisonThresholds({ ...comparisonThresholds, psi: Number(event.target.value) })} /></label>
+        <label><span>评级变化率</span><input type="number" min="0" max="1" step="0.01" value={comparisonThresholds.rating} onChange={(event) => setComparisonThresholds({ ...comparisonThresholds, rating: Number(event.target.value) })} /></label>
+        <label><span>准入变化率</span><input type="number" min="0" max="1" step="0.01" value={comparisonThresholds.admission} onChange={(event) => setComparisonThresholds({ ...comparisonThresholds, admission: Number(event.target.value) })} /></label>
+        <label><span>平均分绝对差</span><input type="number" min="0" step="1" value={comparisonThresholds.score} onChange={(event) => setComparisonThresholds({ ...comparisonThresholds, score: Number(event.target.value) })} /></label>
+        <label><span>分群分差上限</span><input type="number" min="0" step="1" value={comparisonThresholds.segment} onChange={(event) => setComparisonThresholds({ ...comparisonThresholds, segment: Number(event.target.value) })} /></label>
+        <label><span>KS 下降上限</span><input type="number" min="0" max="1" step="0.01" value={comparisonThresholds.ks} onChange={(event) => setComparisonThresholds({ ...comparisonThresholds, ks: Number(event.target.value) })} /></label>
+      </div>
+    </section>}
+
     {canReview && <label className="review-comment"><span>评审/回滚意见</span><input value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} /></label>}
 
     <div className="governance-history-grid">
-      <div><div className="governance-subhead"><div><strong>变更单</strong><span>{changes.length} 条治理记录</span></div></div>{loading ? <div className="governance-empty">正在加载治理记录…</div> : changes.length ? <div className="change-list">{changes.map((change) => <article className="change-card" key={change.id}><header><div><span className={`governance-status ${change.status}`}>{statusLabels[change.status]}</span><strong>{change.candidate_version}</strong>{change.validation.model_risk && <span className={`validation-mini ${change.validation.model_risk.release_gate.status}`}>{change.validation.model_risk.release_gate.passed ? "验证通过" : "发布阻断"}</span>}</div><small>v{change.row_version}</small></header><p>{change.change_reason}</p><div className="impact-stat-row"><span><b>{change.impact.impacted_count}</b>主模型影响</span><span><b>{change.impact.rating_changes}</b>评级迁移</span><span><b>{change.impact.strategy_changes}</b>策略变化</span><span><b>{change.impact.max_abs_score_delta}</b>主模型分差</span><span><b>{change.impact.risk_screening_impacted_count ?? 0}</b>筛查分影响</span></div><footer><span>{change.created_by_name} · {formatTime(change.created_at)}</span><div>{canManage && change.status === "draft" && <><button className="secondary" disabled={busy === change.id} onClick={() => editDraft(change)}>编辑</button><button disabled={busy === change.id || change.validation.model_risk?.release_gate.passed === false} title={change.validation.model_risk?.release_gate.passed === false ? change.validation.model_risk.release_gate.summary : undefined} onClick={() => void submit(change)}>提交审核</button></>}{canReview && change.status === "pending_review" && <><button className="reject" disabled={busy === change.id} onClick={() => void review(change, "reject")}>驳回</button><button disabled={busy === change.id || change.validation.model_risk?.release_gate.passed === false} onClick={() => void review(change, "publish")}>审核发布</button></>}</div></footer>{change.validation.model_risk?.release_gate.passed === false && <aside className="validation-blocker">发布阻断：{change.validation.model_risk.release_gate.summary}</aside>}{change.review_comment && <aside>评审意见：{change.review_comment}</aside>}</article>)}</div> : <div className="governance-empty">暂无模型变更单</div>}</div>
+      <div>
+        <div className="governance-subhead"><div><strong>变更单</strong><span>{changes.length} 条治理记录</span></div></div>
+        {loading ? <div className="governance-empty">正在加载治理记录…</div> : changes.length ? <div className="change-list">{changes.map((change) => {
+          const evidence = change.comparison_evidence;
+          const evidenceStatus = evidence.current_effective_status ?? evidence.effective_status;
+          const evidenceReady = evidenceStatus === "passed" || evidenceStatus === "exception_approved";
+          const scorecardValidationReady = !change.config.scorecard_binding || change.scorecard_validation_evidence.current_valid === true;
+          const calibrationReady = !change.calibration_evidence.analysis || change.calibration_evidence.current_valid === true;
+          const currentGate = evidence.current_gate ?? evidence.gate;
+          return <article className="change-card" key={change.id}>
+            <header><div><span className={`governance-status ${change.status}`}>{statusLabels[change.status]}</span><strong>{change.candidate_version}</strong>{change.validation.model_risk && <span className={`validation-mini ${change.validation.model_risk.release_gate.status}`}>{change.validation.model_risk.release_gate.passed ? "验证通过" : "发布阻断"}</span>}</div><small>v{change.row_version}</small></header>
+            <p>{change.change_reason}</p>
+            <div className="impact-stat-row"><span><b>{change.impact.impacted_count}</b>主模型影响</span><span><b>{change.impact.rating_changes}</b>评级迁移</span><span><b>{change.impact.strategy_changes}</b>策略变化</span><span><b>{change.impact.max_abs_score_delta}</b>主模型分差</span><span><b>{change.impact.risk_screening_impacted_count ?? 0}</b>筛查分影响</span></div>
+            <CalibrationEvidenceSummary change={change} />
+            <ScorecardBindingSummary change={change} />
+            <ScorecardValidationEvidenceSummary change={change} />
+            <ComparisonEvidenceSummary change={change} />
+            <footer><span>{change.created_by_name} · {formatTime(change.created_at)}</span><div>
+              {canManage && change.status === "draft" && <><button className="secondary" disabled={Boolean(busy)} onClick={() => editDraft(change)}>编辑</button><button className="secondary" disabled={Boolean(busy) || !comparisonSnapshotId || !calibrationReady} onClick={() => void runComparisonEvidence(change)}>{busy === `comparison-${change.id}` ? "比较运行中…" : evidence.comparison_run_id ? "重新运行比较" : "运行候选比较"}</button><button disabled={Boolean(busy) || change.validation.model_risk?.release_gate.passed === false || !evidenceReady || !scorecardValidationReady || !calibrationReady} title={!calibrationReady ? "校准来源证据已失效" : !scorecardValidationReady ? "缺少与固定评分卡匹配的已批准 PASS 验证证据" : !evidenceReady ? "缺少有效的候选比较证据" : change.validation.model_risk?.release_gate.summary} onClick={() => void submit(change)}>提交审核</button></>}
+              {canReview && change.status === "pending_review" && <><button className="reject" disabled={Boolean(busy)} onClick={() => void review(change, "reject")}>驳回</button><button disabled={Boolean(busy) || change.validation.model_risk?.release_gate.passed === false || !evidenceReady || !scorecardValidationReady || !calibrationReady} title={!calibrationReady ? "校准来源证据已失效" : !scorecardValidationReady ? "评分卡开发验证证据已失效" : !evidenceReady ? "比较证据无效、过期或尚未完成例外复核" : currentGate?.summary} onClick={() => void review(change, "publish")}>审核发布</button></>}
+            </div></footer>
+            {change.validation.model_risk?.release_gate.passed === false && <aside className="validation-blocker">发布阻断：{change.validation.model_risk.release_gate.summary}</aside>}
+            {change.review_comment && <aside>评审意见：{change.review_comment}</aside>}
+          </article>;
+        })}</div> : <div className="governance-empty">暂无模型变更单</div>}
+      </div>
       <div><div className="governance-subhead"><div><strong>发布版本</strong><span>生效指针与回滚入口</span></div></div>{releases.length ? <div className="release-list">{releases.map((release) => <div className={`release-row ${release.is_active ? "active" : ""}`} key={release.id}><div><span>{release.is_active ? "当前生效" : "历史版本"}</span><strong>{release.model_version}</strong><small>{release.published_by} · {formatTime(release.published_at)}</small><code>{release.config_hash.slice(0, 12)}</code></div>{canReview && !release.is_active && <button disabled={busy === release.id} onClick={() => void rollback(release)}>回滚至此版本</button>}</div>)}</div> : <div className="governance-empty">首次发布后将生成基线与版本历史</div>}</div>
     </div>
   </section>;
+}
+
+
+function CalibrationEvidenceSummary({ change }: { change: ModelChangeRecord }) {
+  const evidence = change.calibration_evidence;
+  const analysis = evidence.analysis;
+  if (!analysis) return null;
+  const changedParameters = calibrationParameterLabels.filter(([key]) => analysis.candidate_parameters[key] !== analysis.baseline_parameters[key]);
+  return <div className={`model-calibration-summary ${evidence.current_valid ? "passed" : "invalid"}`}>
+    <div><span>校准来源</span><strong>{evidence.current_valid ? "证据可复算" : "证据失效"}</strong><small>{evidence.plan_code ? `${evidence.plan_code} v${evidence.plan_version} · 已独立批准` : analysis.sample.evidence_level === "supervised" ? "监督校准证据" : "非监督降级证据"}</small></div>
+    <div><span>固定样本</span><strong>{analysis.snapshot.dataset_code} · v{analysis.snapshot.version}</strong><small>{analysis.sample.paired_success_count} 条成对成功</small></div>
+    <div><span>候选调整</span><strong>{changedParameters.length} 项参数</strong><small>{changedParameters.slice(0, 3).map(([, label]) => label).join("、") || "参数与基线一致"}</small></div>
+    <div><span>分析 / 配置哈希</span><code>{analysis.evidence_hash.slice(0, 10)} · {evidence.candidate_config_hash?.slice(0, 10)}</code><small>{evidence.calibration_run_id ? `运行 ${evidence.calibration_run_id.slice(0, 8)} · ${evidence.bound_by_name}` : evidence.bound_by_name}</small></div>
+    {evidence.current_error && <p>{evidence.current_error}</p>}
+  </div>;
+}
+
+const calibrationParameterLabels: Array<[keyof CreditCalibrationCandidate, string]> = [
+  ["score_threshold_shift", "评级门槛"], ["limit_multiplier_scale", "等级额度"], ["revenue_limit_scale", "收入承载"],
+  ["order_amount_scale", "交易承载"], ["payment_term_scale", "账期"], ["overdue_rate_high", "逾期阈值"],
+  ["limit_utilization_high", "额度使用"], ["invoice_match_rate_low", "发票匹配"], ["delivery_fulfillment_rate_low", "交付达成"],
+];
+
+
+function ScorecardBindingSummary({ change }: { change: ModelChangeRecord }) {
+  const binding = change.config.scorecard_binding;
+  if (!binding) return <div className="change-scorecard-summary legacy"><div><span>评分卡执行绑定</span><strong>沿用现有评分逻辑</strong></div><small>{change.impact.scorecard_binding_changed ? "本次候选已解除评分卡绑定" : "未启用治理评分卡运行时"}</small></div>;
+  const binCount = binding.config.indicators.reduce((total, item) => total + item.bins.length, 0);
+  return <div className="change-scorecard-summary">
+    <div><span>固定评分卡</span><strong>{binding.code} @ v{binding.version}</strong></div>
+    <div><span>执行资产</span><strong>{binding.config.indicators.length} 项指标 / {binCount} 个分箱</strong></div>
+    <div><span>业务刻度</span><strong>{binding.config.score_scale.min} - {binding.config.score_scale.max}</strong></div>
+    <div><span>配置哈希</span><code>{binding.config_hash}</code></div>
+    {change.impact.scorecard_binding_changed && <small>本次候选变更了评分卡执行绑定，旧比较证据必须重新生成。</small>}
+  </div>;
+}
+
+
+function ScorecardValidationEvidenceSummary({ change }: { change: ModelChangeRecord }) {
+  if (!change.config.scorecard_binding) return null;
+  const evidence = change.scorecard_validation_evidence;
+  if (!evidence.validation_run_id) return <div className="scorecard-validation-summary missing"><div><strong>评分卡开发验证待绑定</strong><span>必须选择与固定评分卡版本一致、门禁 PASS 且已独立批准的运行。</span></div></div>;
+  return <div className={`scorecard-validation-summary ${evidence.current_valid ? "passed" : "invalid"}`}>
+    <div><span>开发验证门禁</span><strong>{evidence.current_valid ? "PASS · 已批准" : "证据失效"}</strong><small>{evidence.validation_gate_summary}</small></div>
+    <div><span>固定评分卡</span><strong>{evidence.scorecard_code} @ v{evidence.scorecard_version}</strong><small>{evidence.report_schema_version}</small></div>
+    <div><span>三集合快照</span><strong>{evidence.dataset_snapshot_id ? "训练" : "-"} / {evidence.validation_snapshot_id ? "验证" : "-"} / {evidence.oot_snapshot_id ? "OOT" : "-"}</strong><small>{evidence.evidence_level === "labeled" ? "监督验证证据" : "降级证据"}</small></div>
+    <div><span>独立复核 / 双哈希</span><strong>{evidence.reviewed_by_name}</strong><code>{evidence.evidence_hash?.slice(0, 8)} · {evidence.review_hash?.slice(0, 8)}</code></div>
+    {evidence.current_error && <p>{evidence.current_error}</p>}
+  </div>;
+}
+
+
+function ComparisonEvidenceSummary({ change }: { change: ModelChangeRecord }) {
+  const evidence = change.comparison_evidence;
+  if (!evidence.comparison_run_id) return <div className="comparison-evidence-summary missing"><strong>候选比较证据待生成</strong><span>提交前必须固定基线、候选配置、快照与管线版本。</span></div>;
+  const gate = evidence.current_gate ?? evidence.gate;
+  const effectiveStatus = evidence.current_effective_status ?? evidence.effective_status;
+  const effectiveLabels: Record<string, string> = { passed: "可发布", blocked: "门禁阻断", exception_pending: "例外待复核", exception_approved: "限期例外有效", invalid: "证据失效" };
+  return <div className={`comparison-evidence-summary ${effectiveStatus ?? "invalid"}`}>
+    <div><span>原始比较门禁</span><strong>{gate?.passed ? "通过" : "失败"}</strong><small>{gate?.summary}</small></div>
+    <div><span>当前处置状态</span><strong>{effectiveLabels[effectiveStatus ?? "invalid"]}</strong><small>{evidence.latest_exception?.reviewed_by_name ? `独立复核：${evidence.latest_exception.reviewed_by_name}` : "未使用治理例外"}</small></div>
+    <div><span>固定版本</span><strong>{evidence.champion_model_version} → {evidence.challenger_model_version}</strong><small>{evidence.evidence_level === "labeled" ? "有标签监督证据" : "无标签，降级为非监督证据"}</small></div>
+    <div><span>有效期 / 证据哈希</span><strong>{evidence.valid_until}</strong><code>{evidence.comparison_evidence_hash?.slice(0, 12)}</code></div>
+    {evidence.current_error && <p>{evidence.current_error}</p>}
+  </div>;
 }
 
 
