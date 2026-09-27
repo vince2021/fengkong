@@ -503,9 +503,9 @@ def list_replay_datasets(
     repository: RuleCenterReplayDatasetRepository = Depends(
         get_rule_center_replay_dataset_repository
     ),
-    _: Principal = Depends(require_permissions("models:view")),
+    principal: Principal = Depends(require_permissions("models:view")),
 ) -> list[dict]:
-    return repository.list_datasets()
+    return repository.list_datasets(principal.tenant_id)
 
 
 @router.post("/governance/replay-datasets", status_code=status.HTTP_201_CREATED)
@@ -518,7 +518,7 @@ def create_replay_dataset(
 ) -> dict:
     try:
         return repository.create_dataset(
-            body.code, body.name, body.description, principal.subject, principal.name
+            principal.tenant_id, body.code, body.name, body.description, principal.subject, principal.name
         )
     except (ValueError, ConcurrentUpdateError) as exc:
         raise _governance_error(exc) from exc
@@ -529,9 +529,9 @@ def list_all_replay_dataset_snapshots(
     repository: RuleCenterReplayDatasetRepository = Depends(
         get_rule_center_replay_dataset_repository
     ),
-    _: Principal = Depends(require_permissions("models:view")),
+    principal: Principal = Depends(require_permissions("models:view")),
 ) -> list[dict]:
-    return repository.list_snapshots()
+    return repository.list_snapshots(principal.tenant_id)
 
 
 @router.get("/governance/replay-datasets/{dataset_id}/snapshots")
@@ -540,10 +540,10 @@ def list_replay_dataset_snapshots(
     repository: RuleCenterReplayDatasetRepository = Depends(
         get_rule_center_replay_dataset_repository
     ),
-    _: Principal = Depends(require_permissions("models:view")),
+    principal: Principal = Depends(require_permissions("models:view")),
 ) -> list[dict]:
     try:
-        return repository.list_snapshots(dataset_id)
+        return repository.list_snapshots(principal.tenant_id, dataset_id)
     except LookupError as exc:
         raise _governance_error(exc) from exc
 
@@ -559,7 +559,7 @@ def import_replay_dataset_snapshot(
 ) -> dict:
     try:
         return repository.import_snapshot(
-            dataset_id, body.model_dump(), principal.subject, principal.name
+            principal.tenant_id, dataset_id, body.model_dump(), principal.subject, principal.name
         )
     except (LookupError, ValueError, ConcurrentUpdateError) as exc:
         raise _governance_error(exc) from exc
@@ -570,9 +570,9 @@ def list_replay_comparisons(
     repository: RuleCenterReplayComparisonRepository = Depends(
         get_rule_center_replay_comparison_repository
     ),
-    _: Principal = Depends(require_permissions("models:view")),
+    principal: Principal = Depends(require_permissions("models:view")),
 ) -> list[dict]:
-    return repository.list_runs()
+    return repository.list_runs(principal.tenant_id)
 
 
 @router.post("/governance/replay-comparisons", status_code=status.HTTP_201_CREATED)
@@ -587,7 +587,7 @@ def run_replay_comparison(
 ) -> dict:
     try:
         return repository.run(
-            body.model_dump(), demo_repository, model_repository,
+            principal.tenant_id, body.model_dump(), demo_repository, model_repository,
             principal.subject, principal.name,
         )
     except (LookupError, ValueError, ConcurrentUpdateError) as exc:
@@ -600,10 +600,10 @@ def list_replay_comparison_exceptions(
     repository: RuleCenterReplayComparisonRepository = Depends(
         get_rule_center_replay_comparison_repository
     ),
-    _: Principal = Depends(require_permissions("models:view")),
+    principal: Principal = Depends(require_permissions("models:view")),
 ) -> list[dict]:
     try:
-        return repository.list_exceptions(comparison_run_id)
+        return repository.list_exceptions(principal.tenant_id, comparison_run_id)
     except LookupError as exc:
         raise _governance_error(exc) from exc
 
@@ -619,7 +619,7 @@ def request_replay_comparison_exception(
 ) -> dict:
     try:
         return repository.request_exception(
-            comparison_run_id, body.model_dump(), principal.subject, principal.name
+            principal.tenant_id, comparison_run_id, body.model_dump(), principal.subject, principal.name
         )
     except (LookupError, ValueError, ConcurrentUpdateError) as exc:
         raise _governance_error(exc) from exc
@@ -637,7 +637,7 @@ def review_replay_comparison_exception(
 ) -> dict:
     try:
         return repository.review_exception(
-            comparison_run_id, exception_id, body.expected_row_version,
+            principal.tenant_id, comparison_run_id, exception_id, body.expected_row_version,
             body.decision, body.comment, principal.subject, principal.name,
         )
     except (LookupError, PermissionError, ValueError, ConcurrentUpdateError) as exc:
@@ -655,6 +655,7 @@ def submit_release_package(
 ) -> dict:
     try:
         return repository.submit(
+            principal.tenant_id,
             package_id,
             body.expected_row_version,
             principal.subject,
@@ -671,10 +672,10 @@ def list_release_package_replays(
     repository: RuleCenterReleasePackageRepository = Depends(
         get_rule_center_release_package_repository
     ),
-    _: Principal = Depends(require_permissions("models:view")),
+    principal: Principal = Depends(require_permissions("models:view")),
 ) -> list[dict]:
     try:
-        return repository.list_replays(package_id)
+        return repository.list_replays(principal.tenant_id, package_id)
     except LookupError as exc:
         raise _governance_error(exc) from exc
 
@@ -697,6 +698,7 @@ def run_release_package_replay(
         if not config:
             raise LookupError("评分模型不存在")
         return repository.run_replay(
+            principal.tenant_id,
             package_id,
             body.dataset_snapshot_id,
             body.model_key,
@@ -726,6 +728,7 @@ def review_release_package(
 ) -> dict:
     try:
         return repository.review(
+            principal.tenant_id,
             package_id,
             body.expected_row_version,
             body.decision,

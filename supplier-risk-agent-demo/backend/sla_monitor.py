@@ -22,10 +22,11 @@ from backend.db_models import (
     SlaScanLeaseRecord,
 )
 from backend.document_correction_sla import ACTIVE_CORRECTION_STATUSES, correction_sla_snapshot
-from backend.repository import AuditRepository, CreditFacilityRepository, NotificationRepository, content_hash
+from backend.repository import AuditRepository, CreditFacilityRepository, NotificationRepository, audit_event_hash
 from backend.scorecard_repository import ScorecardRepository
 from backend.security import APPROVAL_STAGE_ROLES
 from backend.task_lease import assignment_expiry, assignment_is_active, assignment_is_expired, clear_assignment, lease_remaining_seconds
+from backend.tenant_registry import PLATFORM_INTERNAL_TENANT_ID
 from rating.approval_workflow import STAGE_SLA_HOURS, stage_label
 
 
@@ -46,6 +47,7 @@ SLA_SCAN_LEASE_KEY = "global-sla-scan"
 
 def run_sla_scan(
     session: Session,
+    tenant_id: str | None = None,
     now: datetime | None = None,
     actor: str = "sla-monitor",
     run_key: str | None = None,
@@ -55,6 +57,10 @@ def run_sla_scan(
     scan_time = _as_utc(now or datetime.now(timezone.utc))
     if trigger_type not in {"manual", "scheduler", "retry"}:
         raise ValueError("SLA 扫描触发类型必须为 manual、scheduler 或 retry")
+    if trigger_type == "manual" and tenant_id is None:
+        raise ValueError("人工 SLA 扫描必须指定租户")
+    if trigger_type in {"scheduler", "retry"} and tenant_id is not None:
+        raise ValueError("全域 SLA 调度不能限定单一租户")
     if trigger_type in {"scheduler", "retry"}:
         if trigger_type == "retry" and run_key is None:
             raise ValueError("人工重试必须指定原调度任务键")
@@ -69,18 +75,19 @@ def run_sla_scan(
             raise ValueError("人工 SLA 扫描不能指定调度任务键")
         scan_run_id = str(uuid4())
     _ensure_scan_write_transaction(session)
-    cases = session.scalars(
-        select(ApprovalCaseRecord).where(
-            ApprovalCaseRecord.status.in_(SLA_SCANNABLE_STATUSES),
-            ApprovalCaseRecord.stage_due_at.is_not(None),
-        )
-    ).all()
-    corrections = session.scalars(
-        select(DocumentCorrectionRecord).where(
-            DocumentCorrectionRecord.status.in_(ACTIVE_CORRECTION_STATUSES),
-            DocumentCorrectionRecord.sla_due_at.is_not(None),
-        )
-    ).all()
+    case_filters = [
+        ApprovalCaseRecord.status.in_(SLA_SCANNABLE_STATUSES),
+        ApprovalCaseRecord.stage_due_at.is_not(None),
+    ]
+    correction_filters = [
+        DocumentCorrectionRecord.status.in_(ACTIVE_CORRECTION_STATUSES),
+        DocumentCorrectionRecord.sla_due_at.is_not(None),
+    ]
+    if tenant_id is not None:
+        case_filters.append(ApprovalCaseRecord.tenant_id == tenant_id)
+        correction_filters.append(DocumentCorrectionRecord.tenant_id == tenant_id)
+    cases = session.scalars(select(ApprovalCaseRecord).where(*case_filters)).all()
+    corrections = session.scalars(select(DocumentCorrectionRecord).where(*correction_filters)).all()
     if lease_guard:
         lease_guard(False)
     notifications = NotificationRepository(session)
@@ -110,7 +117,7 @@ def run_sla_scan(
         roles = _recipient_roles(case, level)
         created_for_case = []
         for role in sorted(roles):
-            _, created = notifications.create_if_absent(_notification_payload(case, role, level))
+            _, created = notifications.create_if_absent(case.tenant_id, _notification_payload(case, role, level))
             if created:
                 created_count += 1
                 created_for_case.append(role)
@@ -137,7 +144,7 @@ def run_sla_scan(
             continue
         created_for_correction = []
         for role in sorted(_correction_recipient_roles(correction, level)):
-            _, created = notifications.create_if_absent(_correction_notification_payload(correction, role, level))
+            _, created = notifications.create_if_absent(correction.tenant_id, _correction_notification_payload(correction, role, level))
             if created:
                 created_count += 1
                 created_for_correction.append(role)
@@ -159,8 +166,17 @@ def run_sla_scan(
 
     if lease_guard:
         lease_guard(False)
-    post_credit_scan = CreditFacilityRepository(session).scan(actor, now=scan_time, commit=False)
-    scorecard_monitoring_scan = ScorecardRepository(session).scan_monitoring_event_sla(scan_time, actor, commit=False)
+    facility_repository = CreditFacilityRepository(session)
+    post_credit_scan = (
+        facility_repository.scan_all_tenants(actor, now=scan_time, commit=False)
+        if tenant_id is None
+        else facility_repository.scan(tenant_id, actor, now=scan_time, commit=False)
+    )
+    scorecard_monitoring_scan = (
+        ScorecardRepository(session).scan_monitoring_event_sla(scan_time, actor, commit=False)
+        if tenant_id is None
+        else {"events_scanned": 0, "due_soon": 0, "overdue": 0, "escalated": 0, "notifications_created": 0}
+    )
     failure_notifications_resolved = (
         _resolve_scan_failure_notifications(session, audit, actor, scan_time, scan_run_id)
         if trigger_type in {"scheduler", "retry"}
@@ -168,6 +184,7 @@ def run_sla_scan(
     )
     result = {
         "run_id": scan_run_id,
+        "tenant_id": tenant_id,
         "run_key": scan_run_id if trigger_type == "scheduler" else None,
         "run_at": scan_time.isoformat(),
         "trigger_type": trigger_type,
@@ -229,6 +246,8 @@ def sla_scan_scheduler_run_key(
 def _find_sla_scan_run(session: Session, run_id: str) -> AuditEventRecord | None:
     return session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan",
             AuditEventRecord.aggregate_id == run_id,
             AuditEventRecord.event_type == "sla_scan_completed",
@@ -255,6 +274,7 @@ def _resolve_scan_failure_notifications(
 ) -> int:
     records = session.scalars(
         select(NotificationRecord).where(
+            NotificationRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
             NotificationRecord.category == "sla_scan",
             NotificationRecord.level == "scan_failed",
             NotificationRecord.status != "resolved",
@@ -276,7 +296,7 @@ def _resolve_scan_failure_notifications(
     return len(records)
 
 
-def list_sla_scan_runs(session: Session, limit: int = 20, now: datetime | None = None) -> dict:
+def list_sla_scan_runs(session: Session, tenant_id: str, limit: int = 20, now: datetime | None = None) -> dict:
     generated_at = _as_utc(now or datetime.now(timezone.utc))
     execution_history = _list_sla_scan_executions(session, generated_at, limit)
     execution_lease = _sla_scan_lease_snapshot(session, generated_at)
@@ -287,10 +307,13 @@ def list_sla_scan_runs(session: Session, limit: int = 20, now: datetime | None =
                 and_(
                     AuditEventRecord.aggregate_type == "sla_scan",
                     AuditEventRecord.event_type == "sla_scan_completed",
+                    AuditEventRecord.tenant_id.in_((tenant_id, PLATFORM_INTERNAL_TENANT_ID)),
                 ),
                 and_(
                     AuditEventRecord.aggregate_type == "sla_scan_failure",
                     AuditEventRecord.event_type == "sla_scan_failed",
+                    AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+                    AuditEventRecord.scope_type == "platform",
                 ),
             )
         )
@@ -309,10 +332,14 @@ def list_sla_scan_runs(session: Session, limit: int = 20, now: datetime | None =
                 and_(
                     AuditEventRecord.aggregate_type == "sla_scan",
                     AuditEventRecord.event_type == "sla_scan_completed",
+                    AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+                    AuditEventRecord.scope_type == "platform",
                 ),
                 and_(
                     AuditEventRecord.aggregate_type == "sla_scan_failure",
                     AuditEventRecord.event_type == "sla_scan_failed",
+                    AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+                    AuditEventRecord.scope_type == "platform",
                 ),
             ),
             AuditEventRecord.payload["trigger_type"].as_string() == "scheduler",
@@ -440,6 +467,8 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
     starts = session.scalars(
         select(AuditEventRecord)
         .where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_execution",
             AuditEventRecord.event_type == "sla_scan_started",
         )
@@ -454,6 +483,8 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
     terminal_events = session.scalars(
         select(AuditEventRecord)
         .where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_execution",
             AuditEventRecord.aggregate_id.in_(execution_ids),
             AuditEventRecord.event_type.in_({
@@ -477,6 +508,8 @@ def _list_sla_scan_executions(session: Session, generated_at: datetime, limit: i
     execution_events = session.scalars(
         select(AuditEventRecord)
         .where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_execution",
             AuditEventRecord.aggregate_id.in_(execution_ids),
         )
@@ -725,15 +758,17 @@ def _inspect_scan_execution_evidence(events: list[AuditEventRecord]) -> tuple[li
 
 
 def _scan_execution_event_hash_valid(record: AuditEventRecord) -> bool:
-    return record.event_hash == content_hash({
-        "id": record.id,
-        "aggregate_type": record.aggregate_type,
-        "aggregate_id": record.aggregate_id,
-        "event_type": record.event_type,
-        "actor": record.actor,
-        "payload": record.payload,
-        "previous_hash": record.previous_hash,
-    })
+    return record.event_hash == audit_event_hash(
+        event_id=record.id,
+        tenant_id=record.tenant_id,
+        scope_type=record.scope_type,
+        aggregate_type=record.aggregate_type,
+        aggregate_id=record.aggregate_id,
+        event_type=record.event_type,
+        actor=record.actor,
+        payload=record.payload,
+        previous_hash=record.previous_hash,
+    )
 
 
 def _sla_scan_event_to_dict(record: AuditEventRecord) -> dict:
@@ -802,6 +837,8 @@ def _attach_sla_scan_retry_history(session: Session, runs: list[dict]) -> None:
     completed_ids = set(
         session.scalars(
             select(AuditEventRecord.aggregate_id).where(
+                AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+                AuditEventRecord.scope_type == "platform",
                 AuditEventRecord.aggregate_type == "sla_scan",
                 AuditEventRecord.aggregate_id.in_(failed_run_ids),
                 AuditEventRecord.event_type == "sla_scan_completed",
@@ -811,6 +848,8 @@ def _attach_sla_scan_retry_history(session: Session, runs: list[dict]) -> None:
     retry_events = session.scalars(
         select(AuditEventRecord)
         .where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_failure",
             AuditEventRecord.aggregate_id.in_(failed_run_ids),
             AuditEventRecord.event_type.in_({
@@ -916,7 +955,7 @@ def _release_expired_assignments(
             previous_expires_at,
         )
         if notification_payload:
-            notification, created = notifications.create_if_absent(notification_payload)
+            notification, created = notifications.create_if_absent(record.tenant_id, notification_payload)
             notification_id = notification["id"]
             notifications_created += int(created)
         clear_assignment(record)
@@ -965,7 +1004,7 @@ def _notify_due_assignment_leases(
         )
         if not payload:
             continue
-        notification, created = notifications.create_if_absent(payload)
+        notification, created = notifications.create_if_absent(record.tenant_id, payload)
         if not created:
             continue
         created_count += 1
@@ -1025,22 +1064,29 @@ def _assignment_notification_payload(
 
 def build_operations_summary(
     session: Session,
+    tenant_id: str,
     now: datetime | None = None,
     recipient_roles: tuple[str, ...] | None = None,
     recipient_subject: str | None = None,
     counterparty_id: str | None = None,
 ) -> dict:
     scan_time = _as_utc(now or datetime.now(timezone.utc))
-    cases = session.scalars(select(ApprovalCaseRecord)).all()
+    cases = session.scalars(select(ApprovalCaseRecord).where(ApprovalCaseRecord.tenant_id == tenant_id)).all()
     active_cases = [case for case in cases if case.status in ACTIVE_STATUSES]
     corrections = session.scalars(
-        select(DocumentCorrectionRecord).where(DocumentCorrectionRecord.status.in_(ACTIVE_CORRECTION_STATUSES))
+        select(DocumentCorrectionRecord).where(
+            DocumentCorrectionRecord.tenant_id == tenant_id,
+            DocumentCorrectionRecord.status.in_(ACTIVE_CORRECTION_STATUSES),
+        )
     ).all()
-    facility_statement = select(CreditFacilityRecord)
+    facility_statement = select(CreditFacilityRecord).where(CreditFacilityRecord.tenant_id == tenant_id)
     condition_statement = (
         select(FacilityControlConditionRecord)
         .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlConditionRecord.facility_id)
-        .where(FacilityControlConditionRecord.status == "pending")
+        .where(
+            FacilityControlConditionRecord.tenant_id == tenant_id,
+            FacilityControlConditionRecord.status == "pending",
+        )
     )
     extension_statement = (
         select(FacilityControlExtensionRecord)
@@ -1049,6 +1095,7 @@ def build_operations_summary(
         .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlExtensionRecord.facility_id)
         .where(
             FacilityControlExtensionRecord.status == "pending",
+            FacilityControlExtensionRecord.tenant_id == tenant_id,
             FacilityControlConditionRecord.status == "pending",
         )
     )
@@ -1076,7 +1123,10 @@ def build_operations_summary(
     for condition in control_conditions:
         level, _ = _facility_control_sla(condition, scan_time)
         control_sla_counts[level] += 1
-    unread_statement = select(NotificationRecord).where(NotificationRecord.status == "unread")
+    unread_statement = select(NotificationRecord).where(
+        NotificationRecord.tenant_id == tenant_id,
+        NotificationRecord.status == "unread",
+    )
     if recipient_roles is not None:
         broadcast_scope = and_(
             NotificationRecord.recipient_subject.is_(None),
@@ -1094,8 +1144,11 @@ def build_operations_summary(
     last_scan = session.scalars(
         select(AuditEventRecord)
         .where(
+            AuditEventRecord.tenant_id == tenant_id,
+            AuditEventRecord.scope_type == "tenant",
             AuditEventRecord.aggregate_type == "sla_scan",
             AuditEventRecord.event_type == "sla_scan_completed",
+            AuditEventRecord.payload["tenant_id"].as_string() == tenant_id,
         )
         .order_by(AuditEventRecord.payload["run_at"].as_string().desc())
         .limit(1)
@@ -1144,6 +1197,7 @@ def build_operations_summary(
 
 def build_personal_task_queue(
     session: Session,
+    tenant_id: str,
     roles: tuple[str, ...],
     counterparty_id: str | None = None,
     now: datetime | None = None,
@@ -1153,8 +1207,12 @@ def build_personal_task_queue(
     queue_time = _as_utc(now or datetime.now(timezone.utc))
     is_admin = "admin" in roles
     role_set = set(roles)
-    case_statement = select(ApprovalCaseRecord).where(ApprovalCaseRecord.status.in_(ACTIVE_STATUSES))
+    case_statement = select(ApprovalCaseRecord).where(
+        ApprovalCaseRecord.tenant_id == tenant_id,
+        ApprovalCaseRecord.status.in_(ACTIVE_STATUSES),
+    )
     correction_statement = select(DocumentCorrectionRecord).where(
+        DocumentCorrectionRecord.tenant_id == tenant_id,
         DocumentCorrectionRecord.status.in_(ACTIVE_CORRECTION_STATUSES)
     )
     if counterparty_id:
@@ -1275,6 +1333,7 @@ def build_personal_task_queue(
 
     _append_facility_control_tasks(
         session,
+        tenant_id,
         tasks,
         queue_time,
         role_set,
@@ -1367,6 +1426,7 @@ def build_personal_task_queue(
 
 def build_team_task_board(
     session: Session,
+    tenant_id: str,
     now: datetime | None = None,
     limit: int = 500,
     can_manage: bool = False,
@@ -1374,6 +1434,7 @@ def build_team_task_board(
     board_time = _as_utc(now or datetime.now(timezone.utc))
     queue = build_personal_task_queue(
         session,
+        tenant_id,
         ("admin",),
         now=board_time,
         actor_subject="__team_task_board__",
@@ -1445,6 +1506,7 @@ def build_team_task_board(
 
 def _append_facility_control_tasks(
     session: Session,
+    tenant_id: str,
     tasks: list[dict],
     queue_time: datetime,
     role_set: set[str],
@@ -1456,7 +1518,10 @@ def _append_facility_control_tasks(
         select(FacilityControlConditionRecord, CreditFacilityRecord)
         .select_from(FacilityControlConditionRecord)
         .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlConditionRecord.facility_id)
-        .where(FacilityControlConditionRecord.status == "pending")
+        .where(
+            FacilityControlConditionRecord.tenant_id == tenant_id,
+            FacilityControlConditionRecord.status == "pending",
+        )
     )
     extension_statement = (
         select(FacilityControlExtensionRecord, FacilityControlConditionRecord, CreditFacilityRecord)
@@ -1465,6 +1530,7 @@ def _append_facility_control_tasks(
         .join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityControlExtensionRecord.facility_id)
         .where(
             FacilityControlExtensionRecord.status == "pending",
+            FacilityControlExtensionRecord.tenant_id == tenant_id,
             FacilityControlConditionRecord.status == "pending",
         )
     )

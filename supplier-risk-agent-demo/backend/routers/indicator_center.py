@@ -105,13 +105,15 @@ def run_credit_calibration(
     demo_repository: DemoRepository = Depends(get_demo_repository),
     governance: ModelGovernanceRepository = Depends(get_model_governance_repository),
     datasets: RuleCenterReplayDatasetRepository = Depends(get_rule_center_replay_dataset_repository),
-    _: Principal = Depends(require_permissions("models:manage")),
+    principal: Principal = Depends(require_permissions("models:manage")),
 ) -> dict:
     config = governance.get_config(demo_repository, body.template_key)
     if not config:
         raise HTTPException(status_code=404, detail="模型模板不存在")
     try:
-        snapshot = datasets.get_snapshot_for_analysis(body.dataset_snapshot_id)
+        snapshot = datasets.get_snapshot_for_analysis(
+            principal.tenant_id, body.dataset_snapshot_id
+        )
         return analyze_credit_calibration(config, snapshot, body.model_dump())
     except (LookupError, ValueError) as exc:
         raise _error(exc) from exc
@@ -175,7 +177,9 @@ def run_credit_calibration_plan(
         base = governance.get_config(demo_repository, plan["template_key"])
         if not base:
             raise LookupError("模型模板不存在")
-        snapshot = datasets.get_snapshot_for_analysis(body.dataset_snapshot_id)
+        snapshot = datasets.get_snapshot_for_analysis(
+            principal.tenant_id, body.dataset_snapshot_id
+        )
         analysis = analyze_credit_calibration(base, snapshot, {
             "dataset_snapshot_id": body.dataset_snapshot_id, "template_key": plan["template_key"],
             "positive_labels": plan["positive_labels"], "sample_limit": plan["sample_limit"], "candidate": plan["candidate"],
@@ -236,7 +240,9 @@ def create_governed_credit_calibration_model_change(
         base = governance.get_config(demo_repository, plan["template_key"])
         if not base:
             raise LookupError("模型模板不存在")
-        snapshot = datasets.get_snapshot_for_analysis(run["dataset_snapshot_id"])
+        snapshot = datasets.get_snapshot_for_analysis(
+            principal.tenant_id, run["dataset_snapshot_id"]
+        )
         analysis = analyze_credit_calibration(base, snapshot, {
             "dataset_snapshot_id": run["dataset_snapshot_id"], "template_key": plan["template_key"],
             "positive_labels": plan["positive_labels"], "sample_limit": plan["sample_limit"], "candidate": plan["candidate"],
@@ -296,7 +302,10 @@ def update_scorecard_monitoring_plan(plan_id: str, body: ScorecardMonitoringPlan
 @router.post("/scorecard-monitoring-plans/{plan_id}/run")
 def run_scorecard_monitoring_plan(plan_id: str, body: ScorecardMonitoringPlanRunRequest, repository: ScorecardRepository = Depends(get_scorecard_repository), principal: Principal = Depends(require_permissions("models:manage"))) -> dict:
     try:
-        return repository.run_monitoring_plan(plan_id, body.expected_row_version, principal.subject, principal.name)
+        return repository.run_monitoring_plan(
+            plan_id, body.expected_row_version, principal.subject, principal.name,
+            tenant_id=principal.tenant_id,
+        )
     except (LookupError, ValueError, ConcurrentUpdateError) as exc:
         raise _error(exc) from exc
 
@@ -496,7 +505,9 @@ def review_validation_policy(policy_id: str, body: ScorecardChangeReview, reposi
 @router.post("/scorecard-development-runs", status_code=status.HTTP_201_CREATED)
 def create_scorecard_development_run(body: ScorecardDevelopmentRunCreate, repository: ScorecardRepository = Depends(get_scorecard_repository), principal: Principal = Depends(require_permissions("models:manage"))) -> dict:
     try:
-        return repository.create_development_run(body.model_dump(), principal.subject, principal.name)
+        return repository.create_development_run(
+            principal.tenant_id, body.model_dump(), principal.subject, principal.name
+        )
     except (LookupError, ValueError) as exc:
         raise _error(exc) from exc
 

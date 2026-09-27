@@ -3,12 +3,123 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 
 class RatingRequest(BaseModel):
     counterparty_id: str
     template_key: str = "general"
+
+
+DecisionIdentifier = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=4,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+    ),
+]
+
+TenantAssetVersion = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=9,
+        max_length=128,
+        pattern=r"^tenant-v[1-9][0-9]*$",
+    ),
+]
+PlatformAssetVersion = Annotated[int, Field(ge=1)]
+RuntimeAssetVersion = PlatformAssetVersion | TenantAssetVersion
+
+
+class DecisionAssetSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=64)] = "general"
+    model_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] | None = None
+    pipeline_code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)] | None = None
+    pipeline_version: RuntimeAssetVersion | None = None
+    rule_set_versions: dict[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)], RuntimeAssetVersion] = Field(default_factory=dict, max_length=50)
+    rule_versions: dict[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)], RuntimeAssetVersion] = Field(default_factory=dict, max_length=500)
+
+
+class DecisionRequestMetadata(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    source_system: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] = "sandbox"
+    scenario: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] = "enterprise_credit"
+
+
+class DecisionExecuteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: DecisionIdentifier
+    counterparty_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] | None = None
+    input: dict[str, Any] | None = None
+    assets: DecisionAssetSelection = Field(default_factory=DecisionAssetSelection)
+    metadata: DecisionRequestMetadata = Field(default_factory=DecisionRequestMetadata)
+
+    @model_validator(mode="after")
+    def validate_input_source(self):
+        if (self.counterparty_id is None) == (self.input is None):
+            raise ValueError("counterparty_id 与 input 必须且只能提供一个")
+        return self
+
+
+class DecisionJobCallback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["none", "sandbox"] = "none"
+    endpoint_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] = ""
+    secret_reference: Annotated[str, StringConstraints(strip_whitespace=True, max_length=256)] = ""
+    simulate_status_sequence: list[int] = Field(default_factory=lambda: [200], min_length=1, max_length=10)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def validate_callback(self):
+        if self.mode == "sandbox":
+            if not self.endpoint_url.startswith("sandbox://"):
+                raise ValueError("沙箱回调地址必须使用 sandbox:// 协议")
+            if not self.secret_reference:
+                raise ValueError("沙箱回调必须提供 secret_reference")
+        if any(status < 100 or status > 599 for status in self.simulate_status_sequence):
+            raise ValueError("模拟状态码必须在 100 到 599 之间")
+        return self
+
+
+class DecisionJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_key: DecisionIdentifier
+    requests: list[DecisionExecuteRequest] = Field(min_length=1, max_length=100)
+    callback: DecisionJobCallback = Field(default_factory=DecisionJobCallback)
+
+    @model_validator(mode="after")
+    def validate_unique_request_ids(self):
+        request_ids = [item.request_id for item in self.requests]
+        if len(request_ids) != len(set(request_ids)):
+            raise ValueError("同一批次内 request_id 不允许重复")
+        return self
+
+
+class DecisionFieldMappingItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_field: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    target_path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
+    enum_mapping: dict[str, str] = Field(default_factory=dict, max_length=200)
+    multiplier: float = Field(default=1, ge=-1_000_000, le=1_000_000)
+    default_value: Any | None = None
+    required: bool = False
+
+
+class DecisionFieldMappingPreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: dict[str, Any]
+    mappings: list[DecisionFieldMappingItem] = Field(min_length=1, max_length=500)
 
 
 class ModelImpactRequest(RatingRequest):
@@ -391,6 +502,206 @@ class ModelChangeUpdate(VersionedActionRequest):
 class ModelReviewRequest(VersionedActionRequest):
     decision: Literal["publish", "reject"]
     comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=1000)]
+
+
+class SupervisedValidationAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attachment_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=36, max_length=36)] | None = None
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=255)]
+    reference: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=1000)]
+    sha256: Annotated[str, StringConstraints(strip_whitespace=True, min_length=64, max_length=64)]
+
+
+class SupervisedValidationReview(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_binding_hash: Annotated[str, StringConstraints(strip_whitespace=True, min_length=64, max_length=64)]
+    decision: Literal["approve", "reject"]
+    risk_level: Literal["low", "medium", "high"]
+    opinion: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    report_template_version: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)] = "supervised-model-validation-v2"
+    attachments: list[SupervisedValidationAttachment] = Field(default_factory=list, max_length=20)
+
+
+class ModelValidationIssuanceAction(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
+
+
+class ModelValidationAttachmentScan(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    scan_status: Literal["pending", "passed", "rejected"]
+    scan_engine: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
+    result_reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=1000)]
+
+
+class ModelRiskPolicyLevelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=32)]
+    level: Literal["low", "medium", "high"]
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=64)]
+    basis: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=200)]] = Field(min_length=1, max_length=10)
+    acceptance_roles: list[Literal["model_owner", "risk_manager", "model_risk_committee"]] = Field(min_length=1, max_length=3)
+    review_days: int = Field(ge=30, le=730)
+    regulatory_mapping: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]] = Field(default_factory=list, max_length=20)
+    required_evidence: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]] = Field(min_length=1, max_length=20)
+
+
+class ModelRiskPolicyCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=255)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    levels: list[ModelRiskPolicyLevelConfig] = Field(min_length=3, max_length=3)
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskPolicyReview(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["publish", "reject"]
+    comment: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskPolicySubmit(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskAcceptanceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rationale: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+
+
+class ModelRiskAcceptanceSign(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    acceptance_role: Literal["model_owner", "risk_manager", "model_risk_committee"]
+    note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskAcceptanceRevoke(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
+
+
+class ModelRiskReacceptanceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rationale: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=2000)]
+    observed_from: date
+    observed_to: date
+    evidence_reference: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=512)]
+    evidence_summary: Annotated[str, StringConstraints(strip_whitespace=True, min_length=20, max_length=4000)]
+    monitoring_run_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=36)] | None = None
+    monitoring_evidence_hash: Annotated[str, StringConstraints(strip_whitespace=True, min_length=64, max_length=64)] | None = None
+    label_evidence_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=128)] | None = None
+    supervised_evaluation_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=36, max_length=36)] | None = None
+    supervised_evidence_hash: Annotated[str, StringConstraints(strip_whitespace=True, min_length=64, max_length=64)] | None = None
+
+    @model_validator(mode="after")
+    def check_observation_window(self) -> "ModelRiskReacceptanceCreate":
+        if self.observed_to < self.observed_from:
+            raise ValueError("运行观察结束日期不能早于开始日期")
+        if (self.observed_to - self.observed_from).days > 730:
+            raise ValueError("运行观察窗口不能超过 730 天")
+        return self
+
+
+class ModelRiskReacceptanceSign(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    acceptance_role: Literal["model_owner", "risk_manager", "model_risk_committee"]
+    note: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskReacceptanceRevoke(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=1000)]
+
+
+class ModelRiskReviewSavedViewCreate(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    filters: dict = Field(default_factory=dict)
+    is_default: bool = False
+
+
+class ModelRiskReviewSavedViewUpdate(ModelRiskReviewSavedViewCreate, VersionedActionRequest):
+    pass
+
+
+class ModelRiskReviewBulkAssignmentItem(BaseModel):
+    item_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=192)]
+    expected_assignment_version: int = Field(default=0, ge=0)
+    expected_source_version: int | None = Field(default=None, ge=1)
+
+
+class ModelRiskReviewBulkAssignment(BaseModel):
+    items: list[ModelRiskReviewBulkAssignmentItem] = Field(min_length=1, max_length=50)
+    assignee: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] | None = None
+    assignee_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)] | None = None
+    assigned_role: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=64)]
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskReviewDelegationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    principal_subject: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    delegate_subject: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
+    assigned_role: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=64)]
+    starts_at: datetime
+    ends_at: datetime
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class ModelRiskReviewDelegationRevoke(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5, max_length=1000)]
+
+
+class TenantNotificationChannelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=128)]
+    delivery_mode: Literal["sandbox", "live"] = "sandbox"
+    endpoint_url: Annotated[str, StringConstraints(strip_whitespace=True, min_length=6, max_length=2000)]
+    secret_reference: Annotated[str, StringConstraints(strip_whitespace=True, min_length=7, max_length=256)]
+    subscribed_categories: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]] = Field(min_length=1, max_length=50)
+    recipient_roles: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]] = Field(default_factory=list, max_length=20)
+    minimum_severity: Literal["info", "warning", "critical"] = "warning"
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    timeout_seconds: int = Field(default=5, ge=1, le=30)
+    require_receipt: bool = True
+    sandbox_status_sequence: list[int] = Field(default_factory=lambda: [200], min_length=1, max_length=10)
+    status: Literal["active", "disabled"] = "active"
+
+
+class TenantNotificationChannelCreate(TenantNotificationChannelConfig):
+    pass
+
+
+class TenantNotificationChannelUpdate(TenantNotificationChannelConfig, VersionedActionRequest):
+    pass
+
+
+class TenantNotificationDispatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class TenantNotificationDeliveryAction(VersionedActionRequest):
+    model_config = ConfigDict(extra="forbid")
 
 
 class ModelRollbackRequest(BaseModel):

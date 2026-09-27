@@ -47,8 +47,15 @@ From the repository root:
 
 ```bash
 cd supplier-risk-agent-demo
+../.venv/bin/alembic upgrade head
+../.venv/bin/python -m scripts.seed_tenant_registry
+../.venv/bin/python -m scripts.seed_counterparties
 ../.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
+
+现有 `data/platform.db` 是早期自动建表演示库，其 Alembic 版本标记与实际表结构存在漂移。不要对该库直接执行 `alembic upgrade head`：先做备份和 schema 差异核对，在副本上制定补齐/迁移方案并完成恢复演练。全新隔离库可以从空库正常升级到当前 head。
+
+开发种子命令可重复执行，只创建缺失的演示租户、成员关系和 API 客户端。生产环境不得执行该命令，应由租户开户流程写入正式身份映射。所有 OIDC 令牌必须包含已登记的 `tenant_id`，客户端标识取 `client_id`，未提供时兼容标准 `azp` 声明；租户、成员关系或客户端停用后，访问会在进入业务接口前被拒绝。
 
 启动后访问：
 
@@ -56,9 +63,48 @@ cd supplier-risk-agent-demo
 - 健康检查：`http://127.0.0.1:8000/api/v1/health`
 - API 根路径：`http://127.0.0.1:8000/api/v1`
 
+平台租户控制面使用 `/api/v1/tenant-admin/tenants`。仅平台管理员可以分页查看和开户租户、暂停/恢复租户、维护成员授权、创建/停用 API 客户端及调整配额；更新操作必须提交当前 `row_version` 和变更原因，所有前后值写入哈希审计链。接口不接收明文密钥，只允许保存密钥服务引用和不可逆指纹，并保护当前平台租户、当前管理员成员关系及当前登录客户端不被自我停用。
+
+商业产品包与租户授权使用 `/api/v1/tenant-admin/product-packages` 和 `/api/v1/tenant-admin/entitlements`。平台管理员可将指标、评分卡、模型、规则、规则集和管线组合为带环境范围、调用配额及到期阻断策略的版本化产品包；产品包发布和客户授权开通分别执行四眼复核。授权激活会原子初始化或更新租户资产目录、暂停包外目录、同步 API 客户端 QPS/并发任务/日处理量配额，并冻结产品包、目录与配额快照及激活哈希。升级、降级和续期通过新授权替代旧授权保留完整台账；暂停、终止、到期、环境不匹配或请求包外资产时，运行时解析会明确拒绝。尚无任何授权历史的存量演示租户暂时保留 `implicit_compatibility`，可通过 `TENANT_ENTITLEMENT_STRICT_MODE=true` 关闭兼容。
+
+租户用量账本位于“租户与产品 → 用量与对账”。平台从封存的同步决策、异步任务、组合评级、回放和文档记录重复聚合 UTC 日账，而非使用前端展示统计；异步任务按提交时 `total_count` 计量，避免其执行产生的决策记录被重复计费。`POST /api/v1/tenant-admin/usage/refresh` 刷新指定租户日账，`GET /api/v1/tenant-admin/usage/summary` 返回月度汇总与逐日证据，`POST /api/v1/tenant-admin/usage/statements` 生成不可覆盖的版本化月度对账快照，`GET /api/v1/tenant-admin/usage/statements/{id}/export.csv` 导出固定证据。该快照明确为对账证据而非税务发票；当前异步任务已实际执行日项目数、并发和 QPS 门禁，同步 Decision API 的全局日限额仍只计量、尚未强制。
+
+授权生命周期由独立后台任务自动处理。任务按 UTC 五分钟窗口生成稳定键，将已到开始时间的排期授权激活，将到期授权持久归档为 `expired`，并在同一租户存在多个逾期排期时只保留最新一项、终止旧排期。每次执行写入 `tenant_entitlement_lifecycle_runs`，保存触发来源、逐租户动作、成功/失败计数和稳定证据哈希；单租户失败使用嵌套事务隔离，不会阻断其他客户。失败运行会向平台管理员和目标租户模型管理员发送严重通知，必须先在“租户与产品 → 运行控制”确认异常，才能发起补偿重试；恢复后原故障事实保留，相关通知自动闭环。授权有效期门禁不依赖调度任务：即使后台任务尚未把状态归档为 `expired`，运行时仍会立即阻断已过期授权。
+
+本地手工运行授权生命周期调度：
+
+```bash
+cd supplier-risk-agent-demo
+../.venv/bin/python -m backend.jobs.tenant_entitlement_lifecycle
+```
+
+生产环境可由 Kubernetes CronJob、systemd timer 或 Celery Beat 每 5 分钟调用同一命令；存在未隔离失败时命令以退出码 `2` 通知基础设施。运行控制 API 为 `GET /api/v1/tenant-admin/entitlement-lifecycle/status`、`POST /api/v1/tenant-admin/entitlement-lifecycle/scan`、`GET /api/v1/tenant-admin/entitlement-runs`、`POST /api/v1/tenant-admin/entitlement-runs/{id}/acknowledge` 和 `POST /api/v1/tenant-admin/entitlement-runs/{id}/retry`。
+
+租户模型与规则资产目录使用 `/api/v1/tenant-assets`。指标、评分卡、模型、规则、规则集和决策管线继续保留为只读平台基线；每个租户可建立显式目录，选择跟随平台活动版本或固定已发布版本。开启租户覆盖后，模型管理员可从固定平台基线创建私有 JSON 配置草稿，由不同的风控经理或审批人独立复核，批准后以 `tenant-vN` 优先解析。目录暂停会直接阻断解析；没有授权历史和显式目录的存量租户暂时使用 `implicit_platform_default` 兼容回退。目录清单返回 `governed`、`blocked` 或 `implicit_compatibility` 授权模式；每次解析返回来源作用域、资产编号、版本、配置哈希和独立解析哈希，目录与覆盖生命周期写入目标租户自己的审计链。
+
+在线单笔评级、审批选模与评分、组合批量评级、同步 Decision API、异步 Decision Job 和 Champion/Challenger 治理回放已统一使用租户运行时资产解析器。模型内评分卡绑定会替换为当前租户解析后的评分卡，管线依赖的规则集与规则也按同一租户目录解析；显式请求的平台版本与租户有效版本不一致时返回 `ASSET_VERSION_NOT_ALLOWED`，不能绕过固定目录或租户覆盖。运行前会冻结模型、评分卡、管线、规则集和规则的版本、来源、目录/覆盖编号及 `resolution_hash`，评级运行、组合批次、同步执行、异步任务、双模型比较和发布包回放均保存完整资产证据与 `assets_hash`；异步任务执行时只读取入队快照，不受后续发布影响。`GET /api/v1/decisions/contract` 与沙箱示例按认证租户返回当前可执行版本，并支持将 `tenant-vN` 版本原样用于管线和规则版本请求。
+
+历史回放数据集、不可变快照、发布包回放、双模型比较和比较例外均按认证租户隔离。接口不接受客户端指定租户；相同数据集编码和相同源数据可以由不同租户独立固化，跨租户列表、快照、比较和例外统一按不存在处理。快照、比较与例外使用租户复合外键约束所有权，证据哈希包含租户和冻结资产图；模型变更、评分卡开发及信用校准通过快照编号读取时也会复核租户归属。Alembic `20260915_0090` 负责历史归属回填、证据重封印和结构升级，有跨租户重复编码时会阻止有损降级。
+
+租户级 Champion/Challenger 灰度发布使用 `/api/v1/model-governance/rollouts`。模型管理员只能从已通过门禁或已获有效例外的固定快照双模型比较创建策略，平台同时冻结比较证据哈希以及双侧模型、评分卡、管线、规则集和规则资产图；策略须由另一名风控复核人批准后才能进入排期或生效。在线评级、组合评级、同步 Decision API 和异步 Decision Job 使用 `SHA-256(tenant_id + policy_id + counterparty_id) % 10000` 稳定分桶，并为每笔请求保存策略哈希、脱敏分流键哈希、桶位、选边、固定资产和结果证据。显式指定模型、管线或规则版本时绕过灰度，异步任务在入队时完成选边，运行时不因策略变化重新路由。观察窗口按 Challenger 失败率、相对延迟增幅、评分分布 PSI 和准入分布偏移执行自动保护，越过阈值会将策略切回 Champion；在线样本没有成熟结果标签时证据等级明确为 `unlabeled_online`，不生成虚假的 KS 或混淆矩阵结论。
+
+灰度周期扫描使用 `../.venv/bin/python -m backend.jobs.tenant_rollout_scan`，生产环境应每五分钟由 CronJob、systemd timer 或 Celery Beat 调用。任务按租户和 UTC 五分钟窗口生成幂等键，自动激活排期策略、评估新增在线样本，并在观察期结束后停止 Challenger；未达到最低样本量会明确标记“在线证据不足”，不会宣称候选模型验证通过。每租户运行记录保存于 `tenant_rollout_scans`，扫描失败以退出码 `2` 提醒调度基础设施，并向本租户模型管理员和风控经理发送站内严重通知。自动熔断同样发送两类角色通知；事故执行“确认 → 提交整改 → 不同人员独立复核关闭”，保留原策略 `rolled_back` 状态与评估证据，关闭事故不会自动恢复候选流量，重新上线必须创建并复核新策略。租户端 API 为 `GET /api/v1/model-governance/rollouts/scans`、`POST /api/v1/model-governance/rollouts/scan` 和 `POST /api/v1/model-governance/rollouts/{id}/incident`。
+
+租户监控快照生成使用 `../.venv/bin/python -m backend.jobs.tenant_monitoring_snapshot`，生产环境建议在灰度周期扫描完成后每小时调用，或由事件调度器在标签批次核验完成后触发。任务只处理当前生效且未过期的灰度策略，自动选择租户当前已发布标签口径，为 Champion/Challenger 各生成一条由已封存路由与已核验结果标签推导的幂等快照；无足够成熟事件/非事件样本时证据等级保持 `non_supervised`，不会虚构 AUC、KS 或混淆矩阵。自动快照先进入 `draft`，提交人和独立复核人必须分离，审批发布后才可绑定监督评估；发布快照可由非原审批人撤回，撤回会保留原哈希和原因。任务按租户隔离身份运行，单租户失败不会污染其他租户，存在失败时退出码为 `2`。人工补证可调用 `POST /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/generate`，但必须具备 `models:review` 权限并指定冻结标签口径和截止时间；查询仍使用 `GET /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs`。
+
+监控门禁使用 `../.venv/bin/python -m backend.jobs.tenant_monitoring_gate_scan` 定时扫描每个租户、策略和模型版本的最新已发布或已撤回快照，也可由复核人员在治理页手工触发。门禁基于策略冻结的 Challenger 失败率、延迟增幅、评分 PSI、准入分布偏移阈值，并可配置最低 AUC/KS，输出 `accepted`、`at_risk`、`blocked`、`evidence_stale`。无标签、样本不足或指标不可测统一保持 `at_risk`，不会提升为正式监督证据；超阈值、运行失败或快照撤回为 `blocked`；证据哈希变化为 `evidence_stale`。异常按模型管理员和风控经理去重通知，状态恢复或新快照替代后自动闭环。正式模型再接受只允许绑定 `accepted` 的租户监控门禁，历史未固化门禁字段的记录仍可读取，但每次读取都会重新计算当前门禁。
+
+监控差异可从快照台账登记为独立处置工单。工单冻结比较双方、证据哈希、差异载荷和 `diff_hash`，按门禁状态自动分为一般、关注或重大，并设置责任角色和处置期限。负责人执行重算时，系统使用原快照的观察截止时间、标签定义、模型版本和策略资产重新读取租户路由与已核验标签，只生成新的 `draft` 快照，不覆盖原证据；重算人不能提交最终处置结论，须由具备 `models:review` 权限的独立人员选择接受变化、数据问题、计算问题、模型漂移、调整阈值政策或新证据替代。未关闭的重大工单会阻止关联原快照或重算快照发布。无标签重算仍保持 `non_supervised`，只能支持诊断结论，不能因人工处置升级为监督证据。
+
+模型治理页通过 `GET /api/v1/model-governance/risk-review-queue?template_key={model_key}` 提供统一风险复核队列。队列不新增可漂移状态表，而是实时汇总风险接受到期、在役再接受续期、每个策略/模型版本的最新监控门禁异常和未关闭监控差异工单；按 `P0` 证据失效、`P1` 门禁阻断或重大差异、`P2` 逾期、`P3` 待独立处置/临期/诊断观察、`P4` 计划处理稳定排序。每项返回责任人或责任角色、模型版本、期限、证据等级和页面操作锚点；差异证据被篡改会实时升级为 `P0`，工单关闭或门禁恢复后自动离队。`non_supervised` 项在界面明确显示为非监督诊断证据，不代表正式验证通过。
+
+监控差异工单 SLA 由 `GET /api/v1/model-governance/rollouts/monitoring-diff-cases/sla-dashboard` 实时计算，并在模型治理页以跨策略、跨模型运营看板展示待办总数、临期、逾期、严重升级、未分派、待独立处置和重大工单，以及按策略/模型版本的工作量和优先处置队列。SLA 分层不新增状态表：重大工单临期阈值 6 小时、逾期 4 小时升级；关注工单临期 24 小时、逾期 12 小时升级；一般工单临期 48 小时、逾期 24 小时升级。`POST /api/v1/model-governance/rollouts/monitoring-diff-cases/sla-scan` 会按阶段向责任人/责任角色、风控经理和平台管理员逐级发送去重通知，状态变化或工单关闭后自动结案旧通知。生产环境可每小时调用 `../.venv/bin/python -m backend.jobs.tenant_monitoring_diff_sla_scan`；任务逐租户隔离，任一租户失败返回退出码 `2`，建议使用 CronJob、systemd timer 或 Celery Beat 调度。
+
 当前 API 覆盖：
 
-- 客商列表、详情，以及材料样本原始数据与来源追踪（`GET /counterparties/{id}/raw-profile`）；
+- 租户客商主数据的列表、正式分页检索、活动/归档筛选、创建、乐观锁更新、逻辑归档和变更历史（`GET /counterparties/{id}/history`），以及材料样本原始数据与来源追踪（`GET /counterparties/{id}/raw-profile`）；
+- 客商 JSON/CSV 两阶段批量导入：`POST /counterparties/imports/precheck` 冻结原文、字段映射、重复策略和逐行回执，`POST /counterparties/imports/{id}/commit` 复验哈希及存量版本后原子提交；单批最多 500 行、2MB，任一错误会阻断整批写入；`GET /counterparties/imports/{id}/receipt.csv` 下载中文行级回执，`GET /counterparties/imports/{id}/correction-draft` 将阻断批次安全复制为新修正草稿。
+- 客商导入字段映射模板通过 `/counterparties/import-mapping-templates` 新建、查询、乐观锁更新和逻辑归档；模板按租户隔离并将前后快照写入哈希审计链，企业客户身份不可见。
 - 企业数据按批次幂等接入，拆分为字段级不可变事实，保存值哈希、来源优先级、证据定位、时效状态和冲突状态，并形成当前有效值视图与字段血缘。
 - 字段冲突支持“提议候选值 → 独立审核 → 生效/驳回 → 新证据自动重开”的治理闭环，裁决不会修改或删除原始导入事实。
 - 治理字段按版本化映射规则转换为模型输入，提供覆盖率、必需字段、超期/冲突、内部交易完整度和自动决策门禁，并把字段 ID、运算公式及输入快照哈希固化到每次评级运行。
@@ -91,6 +137,7 @@ cd supplier-risk-agent-demo
 - 风控经理或审计人员可将某一时点的完整策略证据包签发到服务端可信锚点台账。平台冻结原始 JSON，封印策略版本、schema、包哈希、原始完整性结论、签发主体与时间；同一策略同一包哈希幂等登记。后续实时审计链变化不会覆盖历史快照，而锚点元数据或冻结包被改动时会立即显示登记失效。
 - 可信锚点支持不可逆撤销，不通过删除或覆盖历史记录实现。撤销人与原签发人必须分离，撤销原因、主体、时间及前后哈希进入同一审计链；平台分别展示“登记技术完整”和“当前可作为可信来源”，已撤销锚点仍可下载追溯，但不得继续用作外部可信哈希。
 - 每个可信锚点均可下载带独立 SHA-256 封印的核验回执。回执冻结核验时点、锚点可信资格、撤销元数据和审计链终端检查点，并可与冻结证据包离线交叉复验；已撤销或登记异常的锚点即使回执本身未被改动，也不能通过可信资格门禁。回执只证明生成时点的状态，后续使用前仍须复查最新撤销状态。
+- 通用审计事件具有强制租户归属和显式 `tenant/platform` 作用域。业务事件只能从载荷、复合业务编号或已落库业务对象解析唯一租户，归属冲突或无法判定时拒绝写入；模型、评分卡、规则、授权策略、租户管理和全域调度事件归入平台内部租户。租户、作用域与事件正文共同参与 SHA-256 链式封印，同一聚合编号可由不同租户建立互不相连的链，审计查询始终按登录租户过滤。
 - 已撤销锚点在冻结包技术完整且原始业务完整性通过时，可由区别于原签发人和撤销人的第三名授权人员显式换发。换发创建新的活动锚点，不恢复或覆盖旧记录；新锚点封印替代来源与换发原因，旧记录反向显示替代锚点。同一策略同一证据包始终只允许一个活动锚点，普通重复签发不能绕过换发治理。
 - 模型草稿编辑、全样本影响评估、独立审核、版本发布与回滚。
 - 模型目标样本验证、等级偏差、高风险召回、风险排序、数据完整度、发布硬门槛和 PSI 待测状态（`GET /model-governance/validation`）。
@@ -106,7 +153,7 @@ cd supplier-risk-agent-demo
 - 续授信同时冻结发起时未结预警、严重预警、活跃风险事件及前三项风险事实，形成独立风险复核基线。贷后台账和审批页会明确区分“历史未捕获、未见未结风险、存在一般风险、存在重大风险”四种状态，并在重新评分后并列展示本次评级，避免续期动作掩盖原授信风险。
 - 续授信进入模型选择后必须由风控经理形成独立风险复核结论，可选择风险已排除、落实控制措施后推进或建议拒绝，并留存复核依据、控制措施、责任人、时间与风险快照哈希。评分及最终策略提交都会重新读取来源授信的最新风险状态；复核后如有新增或处置风险，原结论自动失效。若在最终策略阶段重新复核，已完成的授权会签同步重置，审批人必须基于最新风险重新签署。
 - 续授信风险结论现已贯穿授权、最终策略、信用报告和贷后执行：要求落实控制措施的申请至少升级加强授权，建议拒绝的申请强制升级委员会授权；最终审批若偏离拒绝建议，必须登记特别审批理由和补偿措施。批准时承接的每项措施会在同一事务内生成贷后控制条件，进入任务雷达并由风控经理逐项登记执行证据、完成时间和审计轨迹；拒绝申请不会误生成贷后任务。
-- 贷后控制条件具备独立 SLA 与分级升级：截止后自动形成专项预警，逾期 1—6 天由风控经理督办，逾期 7 天升级授信审批人，逾期 30 天升级平台管理员，并向当前督办角色发送可直达贷后台账的去重通知。专项预警不能绕过条件台账单独关闭；条件完成后，关联预警在同一事务内自动闭环。任务雷达可按逾期控制条件筛选，并展示剩余天数、逾期天数、升级层级和责任边界。
+- 贷后控制条件具备独立 SLA 与分级升级：截止后自动形成专项预警，逾期 1—6 天由风控经理督办，逾期 7 天升级授信审批人，逾期 30 天升级当前业务租户运营人员，并向当前督办角色发送可直达贷后台账的去重通知。专项预警不能绕过条件台账单独关闭；条件完成后，关联预警在同一事务内自动闭环。任务雷达可按逾期控制条件筛选，并展示剩余天数、逾期天数、升级层级和责任边界。
 - 控制条件无法按原计划完成时，风控经理可申请 3—30 天受控延期，单项最多批准 2 次且累计不超过 60 天。申请冻结原截止日、拟延期日、业务原因和申请人身份，并通知授信审批人独立审批；申请人不能审批自己的申请。批准后原子更新截止日、重置当前升级层级并闭环原逾期预警，驳回则保持原时限和预警不变；待审批延期不会阻止条件提前完成，条件完成时申请自动取消。申请、批准、驳回、取消及关联通知全部持久化并进入审计轨迹。
 - 贷后管理将授信、预警、复评、到期和使用率统一转换为任务雷达，支持按企业、审批单、授信状态和任务范围筛选，并按严重预警、状态异常、复评/到期、高使用率和最近任务日期排序；每笔授信明确列示当前风险、责任角色、下一动作、完成条件及当前身份可用操作。
 - 多来源风险事件幂等接入、预警处置，以及授信冻结、解冻、压降和关闭控制。
@@ -120,6 +167,8 @@ cd supplier-risk-agent-demo/frontend
 npm install
 npm run dev
 ```
+
+客商中心提供正式的单户新建、编辑和逻辑归档工作台，展示资料完整度、数据来源、乐观版本、画像哈希与最近变更；保存发生并发冲突时自动加载最新版本，避免覆盖他人修改。另提供 JSON/CSV 文件读取、字段映射、重复策略、逐行预检、双哈希证据和显式原子提交工作台；预检失败不会写入部分客商。
 
 访问 `http://127.0.0.1:5173/`。当前前端包含风险总览、客商中心、八阶段授信审批、模型实验室、可信资料中心、运营监控和贷后管理。客商中心支持按模型和客户/供应商范围运行组合批量评级，回看历史批次的评级分布、待复核、禁入、贷策收紧、建议额度与跳过样本，并把逐户策略结论映射到客商清单；还可展开材料样本，查看三年财务原始值、外部基准、数据缺口、风险命中和逐份材料来源。缺失的内部订单、应收和逾期数据明确标为“待接入”，不会被解释为零风险。模型实验室既支持原有“指标扣分 → 维度得分 → 权重汇总”链路，也支持“指标分箱 → 分层子模型 → 业务财务矩阵 → 风险规则调整 → 额度约束”的工商企业模型，支持单指标影响模拟，以及模型草稿、组合重算、审核发布和回滚。模型治理看板按目标行业样本计算覆盖率、标签覆盖、等级偏差、高风险召回、风险排序一致率和数据完整度；样本量、计算覆盖、标签量或计算完整性未达到硬门槛时，候选版本只能保存草稿，不能提交发布。跨期看板计算 PSI、AUC、KS、Brier Score 和实际/预期事件率偏差，并展示基线期、观察期、样本量和证据等级；演示代理标签始终附带限制说明，正式上线必须替换为真实逾期、违约或损失观察数据。贷后工作台展示授信余额、使用率、额度流水、复评计划、风险事件和预警处置，可按权限冻结、解冻、压降或关闭授信。运营监控展示环节分布、SLA 分级、扫描状态和按角色隔离的站内催办通知。本地开发可在页面右上角切换角色，后端仍会独立执行 RBAC、客商范围与审批环节权限校验。
 
@@ -157,7 +206,7 @@ curl -H 'Authorization: Bearer dev-risk' http://127.0.0.1:8000/api/v1/auth/me
 
 审批流转按当前环节校验角色，操作人只取自已认证身份；客户端提交 `expected_row_version`，过期版本返回 HTTP 409。每次创建申请都会生成独立申请编号，同一客商可以发起多次授信申请。
 
-审批、模型快照、评级运行和审计事件均已通过 SQLAlchemy 持久化。本地未设置 `DATABASE_URL` 时使用 `data/platform.db`；生产环境应使用 PostgreSQL 并通过 Alembic 管理结构变更。
+审批、模型快照、评级运行和审计事件均已通过 SQLAlchemy 持久化；审计表以强制租户键隔离查询与哈希父链，平台治理事件使用独立内部租户。本地未设置 `DATABASE_URL` 时使用 `data/platform.db`；生产环境应使用 PostgreSQL 并通过 Alembic 管理结构变更。
 
 ### PostgreSQL 与数据库迁移
 
@@ -180,8 +229,14 @@ export DATABASE_URL='postgresql+psycopg://risk_user:risk_password@127.0.0.1:5432
 
 当前持久化表：
 
+- `tenants`：租户主体、SaaS/专有部署模式、数据地域、启停状态和乐观版本；
+- `tenant_memberships`：OIDC 用户主体与租户、允许角色、有效期和启停状态的映射；
+- `api_clients`：租户客户端、密钥指纹与密钥引用、调用配额、CIDR 策略、轮换时间和启停状态；
+- `counterparties`：租户客商主数据、业务编号与统一信用代码复合唯一键、模型输入 JSON、主数据哈希、逻辑归档和乐观版本；
+- `counterparty_import_batches`：客商导入批次、原始文件、字段映射、重复策略、规范化快照、逐行回执、原文/预检哈希及两阶段提交证据；
+- `counterparty_import_mapping_templates`：租户级 JSON/CSV 字段映射模板、映射哈希、适用说明、生命周期和乐观版本；
 - `approval_cases`：审批主单、当前环节、表单数据、个人认领租约和乐观版本号；
-- `audit_events`：只追加审计事件及前后哈希链；
+- `audit_events`：带强制租户与业务/平台作用域的只追加审计事件；租户、作用域、事件正文和父级哈希共同封印，父节点唯一约束限定在租户聚合链内；
 - `model_snapshots`：完整模型配置及配置哈希；
 - `model_changes`：模型治理变更单、校验结果、样本组合影响与评审状态；
 - `model_releases`：已发布模型版本、生效指针和配置哈希；
@@ -190,32 +245,97 @@ export DATABASE_URL='postgresql+psycopg://risk_user:risk_password@127.0.0.1:5432
 - `model_monitoring_issues`：监控异常、证据等级、责任人、整改、复验、SLA 和乐观版本号；
 - `model_monitoring_runs`：周期监控运行键、触发来源、证据与指标快照、问题清单及运行结果；
 - `model_monitoring_schedules`：模型监控频率、时区、启停、下次执行时间、最近运行与乐观版本号；
+- `tenant_rollout_policies`：租户灰度策略、固定回放比较、双侧完整资产图、流量比例、观察窗口、保护阈值、四眼复核、生命周期和乐观版本号；
+- `tenant_routing_decisions`：逐笔稳定分桶、选边结果、固定资产、耗时、评分/评级/准入摘要、失败码、结果哈希和证据哈希；
+- `tenant_rollout_evaluations`：人工或自动观察窗口评估、非监督证据等级、双侧分布与性能指标、门禁结论、熔断动作和证据哈希；
+- `tenant_outcome_label_definitions`：租户结果标签口径代码与版本、事件类型、观察/宽限期、来源优先级、适用模型、损失/暴露必填约束、四眼发布状态和不可变定义哈希；
+- `tenant_outcome_import_batches`：租户结果标签批次键、来源与标签口径、声明/实收数量、逐行新增/幂等/拒绝回执、批次状态和证据哈希；
+- `tenant_outcome_labels`：租户结果标签、历史灰度路由/Decision API 执行强关联、冻结预测与模型版本、观察截止、事件/损失事实、四眼核验、批次归属，以及不覆盖原事实的冲正替代版本链；
+- `tenant_monitoring_runs`：租户原生监控运行快照，绑定灰度策略、模型/版本、观察窗口、数据集、监督/非监督证据级别、标签口径和结果水位、监控指标及证据哈希；另保存草稿、待复核、发布、驳回、撤回状态、四眼审批和乐观版本号；不与平台共享 `model_monitoring_runs` 混用；
+- `tenant_supervised_evaluations`：延迟监督评估截止日、冻结标签口径、成熟标签水位、可选租户原生监控运行绑定、双侧 AUC/KS/混淆矩阵、事件率及置信区间、损失率与风险暴露、统计可靠性、评级与准入分群表现、降级原因、不可覆盖证据哈希和四眼结论审批；
+- `tenant_supervised_upgrade_decisions`：已批准监督结论到模型变更草稿的幂等决策证据，冻结标签口径、灰度资产、Champion 基线、Challenger 配置、模型变更编号和证据哈希；
+- `supervised_validation_attachments`：租户隔离的验证附件对象键、文件指纹、扫描状态、上传/撤销主体与生命周期元数据；下载前重新读取对象并核验 SHA-256；
+- `model_validation_report_issuances`：模型验证报告冻结签发包、监督证据绑定哈希、签名算法、签名密钥版本/公钥、签发签名、撤销主体、换发来源及乐观版本；同一有效报告幂等签发，撤销和换发执行人员分离；
+- `tenant_model_risk_policies`：租户模型风险政策版本、三级目录、接受席位、复核周期、配置哈希、四眼发布与唯一生效指针；
+- `model_risk_acceptances`：模型变更单与监督证据绑定的风险接受台账、逐席签署、定期复核到期日、撤销历史及乐观版本；
+- `model_risk_reacceptances`：已发布在役模型的独立运行证据快照、政策/发布配置哈希、逐席再接受、到期与撤销历史；
+- `model_risk_reacceptances` 可绑定已批准的同租户监督评估，冻结标签口径、评估哈希、租户监控运行及灰度资产版本；平台共享 `model_monitoring_runs` 仅附作 PSI/KS/AUC/Brier 诊断，不能单独完成正式再接受签署；
+- 新接入的租户结果标签使用 `tenant-outcome-label-v4` 规范证据载荷：金额、预测分值、风险分值和 UTC 时间先规范化后写入 `canonical_evidence_json`，并以 `evidence_hash` 封印；历史 v3 标签保持兼容，不做未经复核的批量重算。
+- 生产迁移前可在数据库副本执行 `../.venv/bin/python -m scripts.audit_label_evidence_normalization --tenant-id <tenant> --output label-evidence-audit.json --fail-on-review`。命令只读扫描并输出 `canonical_valid`、`legacy_reconstructable`、`legacy_manual_review`、`evidence_invalid` 分类，任何待人工复核或失效证据都会返回非零，不会更新标签。
+- 验证报告不单独复制业务事实：由 `tenant_supervised_evaluations` 的不可变快照实时生成 JSON/CSV，报告哈希覆盖评估、口径、双侧指标、覆盖率、模型资产和治理边界。
 - `credit_reports`：审批报告版本、业务快照、对象存储键、快照哈希、PDF 文件指纹和归档操作人；
-- `decision_variances`：模型建议、最终决策、差异幅度、偏差方向、重要性、调整原因、补偿措施及决策人；
+- `decision_variances`：租户内审批、正式客商与评级运行强关联的模型建议、最终决策、差异幅度、偏差方向、重要性、调整原因、补偿措施及决策人；
 - `credit_authority_policies`：授信授权策略版本、基线版本、额度与风险边界、会签席位模板、组合影响评估及其指纹、四眼审核、恢复来源、预约/实际生效时间、排期取消记录、唯一生效及待生效指针、乐观版本号；
 - `authority_policy_activation_runs`：策略扫描幂等键、触发方式、到期策略、生效前后版本、空跑/激活/阻断状态、错误原因、异常确认/关闭状态、重试来源、关闭运行、处置人与乐观版本号；
 - `authority_policy_evidence_anchors`：策略证据包冻结快照、包哈希、锚点哈希、原始完整性结论、签发主体、签发时间、撤销状态、撤销主体、替代来源、换发原因及乐观版本号；
-- `enterprise_data_imports`：企业数据导入任务、主体、来源、载荷哈希、质量结果、冲突/超期数量和幂等键；
-- `enterprise_data_fields`：字段级不可变值、值哈希、来源优先级、证据定位、观测日期、时效和冲突状态；
-- `enterprise_data_resolutions`：字段冲突候选快照、提议值、裁决依据、独立审核结论、乐观版本号和裁决历史；
+- `enterprise_data_imports`：租户内正式客商强关联的企业数据导入任务、来源、载荷哈希、质量结果、冲突/超期数量和租户内幂等键；
+- `enterprise_data_fields`：与同租户导入任务、正式客商绑定的字段级不可变值、值哈希、来源优先级、证据定位、观测日期、时效和冲突状态；
+- `enterprise_data_resolutions`：与同租户客商、候选字段绑定的字段冲突快照、提议值、裁决依据、独立审核结论、乐观版本号和裁决历史；
 - `model_governance_notifications`：按角色隔离的模型异常通知、去重键与已读状态；
 - `rating_runs`：评级输入、结果、模型快照引用及结果哈希。
-- `portfolio_rating_batches`：组合评级幂等键、模型快照、范围、逐户评级运行引用、分布汇总、跳过样本及结果哈希。
+- `portfolio_rating_batches`：租户内组合评级幂等键、平台模型快照、当前租户客商范围、逐户评级运行引用、分布汇总、跳过样本及结果哈希。
 - `documents`：资料元数据、对象键、上传人、文件大小及 SHA-256。
 - `document_corrections`：补件版本链、失败检查项、当前责任角色、个人认领租约、SLA 起止时间、催办/延期次数、累计延期时长、处理状态及最终处理人。
 - `notifications`：按审批环节、补件任务、角色或个人主体投递的事件/SLA/租约通知、结构化任务入口、去重键及已读时间。
 - `sla_scan_leases`：全域扫描唯一运行租约，保存当前执行编号、任务键、来源、处理人、获取时间、最近心跳、续租次数和硬过期时间；原子更新用于跨页面、跨进程互斥，后台执行每 60 秒独立续租，结束时按执行编号条件释放，避免旧进程误释放新租约。运行 10 分钟进入预警但只要心跳持续就保持保护；心跳中断 30 分钟才允许自动接管。运营管理角色可在预警后填写核验原因受控释放，操作人、原因和原租约快照写入同一审计链。
-- `credit_facilities`：最终批准额度、已用额度、账期、有效期、复评计划及乐观版本号；
-- `credit_usage_transactions`：不可变的额度占用/归还流水和交易幂等键；
-- `facility_alerts`：高使用率、复评到期、授信临期/到期预警及闭环状态。
-- `risk_events`：外部/内部风险事件、来源域幂等键、原始载荷、关联预警和解决状态。
+- `credit_facilities`：租户内审批和正式客商强关联的最终批准额度、已用额度、账期、有效期、复评计划及乐观版本号；
+- `credit_usage_transactions`：租户内交易号幂等、且与同租户授信复合关联的不可变额度占用/归还流水；
+- `facility_alerts`：租户内去重的高使用率、复评到期、授信临期/到期预警及闭环状态；
+- `risk_events`：租户内按“来源 + 外部事件号”幂等的风险事件、原始载荷、关联预警和解决状态；
+- `facility_control_conditions`：租户内审批决策生成的贷后控制条件、执行证据、SLA 升级和关联预警；
+- `facility_control_extensions`：与同租户控制条件、授信绑定的受控延期申请、独立审批结论和乐观版本。
+
+验证报告签发支持离线验签包：`GET /api/v1/model-governance/validation-issuances/{issuance_id}/offline-package` 返回冻结业务包、包哈希、签名算法、密钥标识、公钥及逐项核验结果。`registry_valid` 是整体可信结论，必须同时满足包哈希和签名校验；`signature_valid` 仅表示签名密码学验证通过，包内容变化时仍需以 `registry_valid=false` 为准。
+
+签名配置：
+
+```bash
+# 默认历史兼容模式，仅提供规范 JSON 的 SHA-256 完整性封印
+export MODEL_VALIDATION_SIGNATURE_ALGORITHM=SHA-256-CANONICAL-JSON
+
+# 开发/隔离环境可使用 Ed25519；私钥必须是 32 字节原始私钥的标准 Base64
+export MODEL_VALIDATION_SIGNATURE_ALGORITHM=ED25519-SHA256-CANONICAL-JSON
+export MODEL_VALIDATION_ED25519_PRIVATE_KEY='...'
+export MODEL_VALIDATION_SIGNING_KEY_ID='kms-dev-v1'
+
+# 非敏感密钥生命周期元数据；轮换时切换 key_id/rotation_id，不覆盖历史报送
+export MODEL_VALIDATION_SIGNING_KEY_STATUS=active       # active | retiring | revoked
+export MODEL_VALIDATION_SIGNING_KEY_ISSUER='enterprise-kms'
+export MODEL_VALIDATION_SIGNING_KEY_ROTATION_ID='2026-Q3'
+export MODEL_VALIDATION_SIGNING_KEY_NOT_BEFORE='2026-07-01T00:00:00+00:00'
+export MODEL_VALIDATION_SIGNING_KEY_NOT_AFTER='2027-01-01T00:00:00+00:00'
+export MODEL_VALIDATION_TRUST_DIRECTORY_ID='institution-kms-2026-q3'
+export MODEL_VALIDATION_SIGNING_KEY_REVOCATION_REFERENCE='kms://enterprise/revocations/2026-q3'
+```
+
+生产环境不得把本地 Ed25519 私钥写入数据库、镜像、普通日志或前端配置。应由 KMS/HSM 或等价密钥服务托管私钥，通过受控签名适配器提供密钥版本、轮换、权限审计和可信时间戳；平台数据库只保存 `key_id`、公钥（如适用）和签名结果。`SHA-256-CANONICAL-JSON` 仅用于历史兼容和开发隔离，不应被当作机构数字签名。
+
+再接受监管报送视图下载后可脱离数据库和网络验签：
+
+```bash
+../.venv/bin/python scripts/verify_model_risk_reacceptance_regulatory_report.py regulatory-report.json \
+  --expected-hash '<report_hash>' \
+  --expected-package-hash '<package_hash>' \
+  --trusted-key-directory institution-trust-directory.json \
+  --expected-directory-hash '<directory_hash>'
+```
+
+验签器会复算 `report_hash`，核对底层审计包哈希，比较签名主体并使用报送文件内公钥验证签名；提供机构目录时，改用目录中的公钥并核对 `key_id`、算法、指纹、状态、有效期和撤销回执引用，不再单独信任文件内公钥。`--expected-directory-hash` 应来自独立配置或交付清单，避免只依赖目录自身哈希。`active` 和 `retiring` 可验签，`revoked`、过期或尚未生效的密钥会被标记为不具备信任资格。成功返回退出码 `0`，篡改或签名不可信返回 `1`，文件读取/JSON 格式错误返回 `2`。签名主体不包含动态 `generated_at`，因此相同证据视图的签名可稳定复验。
+
+模型风险政策默认沿用平台三级目录；租户可调整各级定期复核周期和接受席位，生成草稿并由不同人员复核发布。租户一旦发布政策，监督验证变更必须创建风险接受台账，按模型所有者、风控经理、模型风险委员会对应席位独立签署；不同席位不能由同一人代签。风险接受与监督证据哈希、政策版本绑定，签发包冻结当时的政策和接受快照。接受逾期、政策换版或监督证据变化时，签发与发布门禁阻断；原签发登记需撤销后按当前政策重新签发。未发布租户政策的存量租户仍使用平台默认目录兼容路径。
+
+定期复核队列展示未来 30 天与已逾期的有效接受结论及原签署人/台账发起人；风控复核人可手动扫描全租户。生产环境应每天由 CronJob、systemd timer 或 Celery Beat 调用 `../.venv/bin/python -m backend.jobs.model_risk_review_scan`，按 30 天、7 天和逾期阶段发送租户内站内提醒。通知唯一键包含台账、到期日、阶段和接收人，重复扫描不重复投递；进入新阶段、撤销或证据/政策失效后的旧提醒在下次扫描中自动结案。扫描不会改变到期日或重新签署旧结论，受控再接受须建立新证据和新签署周期。调度器未实际部署前，自动提醒不会发生。
+
+已发布模型进入在役运行后，若原风险接受逾期，运行解析会阻断该租户继续使用受治理的平台版本。模型管理员需在治理页填写观察窗口、证据引用和运行摘要，生成独立再接受快照，再由当前政策要求的模型所有者、风控经理和模型风险委员会逐席签署；再接受通过后才恢复在役门禁。再接受不会修改原变更单、原签发包或原接受到期日；发布配置、监督证据或政策发生变化时自动失效。
+治理页选择当前活动发布版本对应、已批准的租户监督评估，并提交评估证据哈希；服务端重新核对租户、模型版本、冻结资产、标签口径与水位及双臂监督门槛，签署和运行读取时重复校验。已完成的平台监控运行仍可附作辅助诊断，但其结果样本没有租户归属，不具备独立正式签署资格。审计包导出原接受、发布版本、租户监督评估、可选监控快照、签署人和哈希链；通过 `?format=regulatory` 可下载稳定监管报送视图，明确监督/非监督证据降级、四眼状态和运行影响。每次导出均写入租户审计事件，下载事件不会改变包哈希。
+在役再接受的复核队列展示未来 30 天及已逾期结论、责任人和运行影响。可提前创建待签续期，旧结论在新结论签完前保持有效；最后一席签署时旧结论原子撤销并保留替代审计链。手工摘要与共享监控运行只能存档为非监督证据，不能新签为正式再接受。已有历史签署记录保留原状，但续期须绑定租户监督评估。每日调度命令 `../.venv/bin/python -m backend.jobs.model_risk_review_scan` 同时扫描初始接受和在役再接受，按 30 天、7 天、逾期阶段去重推送定向站内提醒；生产调度器仍需部署。
 
 评级接口返回 `rating_run_id`、`model_snapshot_id` 和 `result_hash`，用于复算、审计和结果一致性核验。
 审批编排会把评级运行绑定到 `case_id`：模型选择前先校验适用性，评分时在同一事务中固化输入、模型快照和结果哈希，额度建议生成前再次校验审批单归属与结果完整性。模型选择、评分和额度建议环节禁止通过普通表单手工伪造结果。
 
 ### 组合批量评级与风险驾驶舱
 
-组合评级使用业务批次号保证幂等；同一批次号和同一输入重复请求直接返回原结果，同一批次号携带不同模型、范围或输入时拒绝覆盖。每个成功样本都会生成独立 `rating_run`，批次结果引用其运行编号并固化模型快照；组合层汇总评级、准入策略和风险分层分布，识别待人工复核、禁入、贷策收紧和强规则影响样本。输入门禁失败或模型不适用的企业保留在跳过清单，不会被误计为低风险或零分。
+组合评级在当前租户内使用业务批次号保证幂等；不同租户可以复用相同批次号，同一租户的相同批次号和相同输入重复请求直接返回原结果，携带不同模型、范围或输入时拒绝覆盖。候选范围来自当前租户的正式客商主数据，每个成功样本都会生成同租户独立 `rating_run`，批次结果引用其运行编号并固化平台模型快照；组合层汇总评级、准入策略和风险分层分布，识别待人工复核、禁入、贷策收紧和强规则影响样本。输入门禁失败或模型不适用的企业保留在跳过清单，不会被误计为低风险或零分。
 
 主要 API：
 
@@ -238,6 +358,71 @@ export DATABASE_URL='postgresql+psycopg://risk_user:risk_password@127.0.0.1:5432
 评级接口和新审批选模只读取当前已发布版本；审批单选定模型后会冻结具体版本，即使评分前又发布了新版本，在途审批仍按选模时版本计算。
 
 授信授权策略采用独立于评分模型的生命周期，模型管理员或有权审批人可维护候选策略，风控经理或其他独立有权审批人复核发布。发布不会回写已形成额度建议的申请；在途申请继续按其冻结的策略版本和席位完成会签。
+
+租户 Champion/Challenger 灰度 API：
+
+- `GET/POST /api/v1/model-governance/outcome-label-definitions`
+- `PUT /api/v1/model-governance/outcome-label-definitions/{id}`
+- `POST /api/v1/model-governance/outcome-label-definitions/{id}/submit`
+- `POST /api/v1/model-governance/outcome-label-definitions/{id}/review`
+- `GET/POST /api/v1/model-governance/rollouts`
+- `POST /api/v1/model-governance/rollouts/{id}/submit`
+- `POST /api/v1/model-governance/rollouts/{id}/review`
+- `POST /api/v1/model-governance/rollouts/{id}/status`
+- `GET /api/v1/model-governance/rollouts/{id}/routes`
+- `GET /api/v1/model-governance/rollouts/{id}/evaluations`
+- `POST /api/v1/model-governance/rollouts/{id}/evaluate`
+- `GET/POST /api/v1/model-governance/rollouts/{id}/outcomes`
+- `GET/POST /api/v1/model-governance/rollouts/{id}/outcome-imports`
+- `POST /api/v1/model-governance/rollouts/{id}/outcome-imports/csv`（UTF-8、512KB、500 行上限，文件哈希与逐行回执）
+- `POST /api/v1/model-governance/rollouts/{id}/outcomes/{label_id}/verify`
+- `POST /api/v1/model-governance/rollouts/{id}/outcomes/{label_id}/correct`
+- `GET /api/v1/model-governance/rollouts/{id}/supervised-evaluations`
+- `GET/POST /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs`
+- `POST /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/generate`
+- `POST /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/{run_id}/submit`
+- `POST /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/{run_id}/review`
+- `POST /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/{run_id}/retract`
+- `GET /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/{run_id}/diff`
+- `GET /api/v1/model-governance/rollouts/{id}/tenant-monitoring-runs/{run_id}/gate`
+- `GET/POST /api/v1/model-governance/rollouts/{id}/monitoring-diff-cases`
+- `POST /api/v1/model-governance/rollouts/{id}/monitoring-diff-cases/{case_id}/assign`
+- `POST /api/v1/model-governance/rollouts/{id}/monitoring-diff-cases/{case_id}/recompute`
+- `POST /api/v1/model-governance/rollouts/{id}/monitoring-diff-cases/{case_id}/dispose`
+- `POST /api/v1/model-governance/rollouts/monitoring-gates/scan`
+- `GET /api/v1/model-governance/rollouts/{id}/supervised-evaluations/{evaluation_id}/verification-report`
+- `GET /api/v1/model-governance/rollouts/{id}/supervised-evaluations/{evaluation_id}/verification-report.csv`
+- `POST /api/v1/model-governance/rollouts/{id}/supervised-evaluate`
+- `POST /api/v1/model-governance/rollouts/{id}/supervised-evaluations/{evaluation_id}/submit`
+- `POST /api/v1/model-governance/rollouts/{id}/supervised-evaluations/{evaluation_id}/review`
+- `POST /api/v1/model-governance/rollouts/{id}/supervised-evaluations/{evaluation_id}/create-change-draft`
+- `POST /api/v1/model-governance/changes/{change_id}/supervised-validation/review`
+- `GET /api/v1/model-governance/risk-catalog`
+- `GET /api/v1/model-governance/release-approval-dashboard`
+- `GET/POST /api/v1/model-governance/changes/{change_id}/supervised-validation/attachments`
+- `GET /api/v1/model-governance/supervised-validation/attachments/{attachment_id}/download`
+- `POST /api/v1/model-governance/supervised-validation/attachments/{attachment_id}/revoke`
+- `POST /api/v1/model-governance/supervised-validation/attachments/{attachment_id}/scan`（扫描器回写 `pending/passed/rejected`；服务端重新核验对象 SHA-256）
+- `GET/POST /api/v1/model-governance/changes/{change_id}/validation-issuances`
+- `GET /api/v1/model-governance/validation-issuances/{issuance_id}`
+- `POST /api/v1/model-governance/validation-issuances/{issuance_id}/revoke`
+- `POST /api/v1/model-governance/validation-issuances/{issuance_id}/reissue`
+- `GET /api/v1/model-governance/validation-issuances/{issuance_id}/offline-package`（下载离线验签包）
+- `GET /api/v1/model-governance/risk-catalog`（返回租户生效政策或平台默认目录）
+- `GET/POST /api/v1/model-governance/risk-policies`、`POST /risk-policies/{id}/submit`、`POST /risk-policies/{id}/review`（租户政策四眼发布）
+- `GET /api/v1/model-governance/risk-acceptances`、`POST /changes/{id}/risk-acceptances`、`POST /risk-acceptances/{id}/accept`、`POST /risk-acceptances/{id}/revoke`（风险接受台账）
+- `GET /api/v1/model-governance/risk-acceptances/review-queue`、`POST /api/v1/model-governance/risk-acceptances/review-scan`（临期/逾期队列、租户内手动扫描）
+- `GET /api/v1/model-governance/risk-reacceptances`、`POST /releases/{id}/risk-reacceptances`、`POST /risk-reacceptances/{id}/accept`、`POST /risk-reacceptances/{id}/revoke`、`GET /releases/{id}/in-service-risk`（在役模型再接受与运行门禁）
+- `GET /api/v1/model-governance/risk-reacceptances/{id}/audit-package?format=full|regulatory`（再接受完整内审包或监管报送视图，包含稳定 `package_hash`/`report_hash`，并记录下载留痕）
+- `GET /api/v1/model-governance/risk-reacceptances/review-queue`、`POST /risk-reacceptances/review-scan`（在役再接受续期责任队列和分阶段提醒）
+- `GET /api/v1/model-governance/risk-review-queue?template_key={model_key}`（统一风险复核队列，实时汇总接受、续期、监控门禁和差异工单）
+- `POST /api/v1/model-governance/rollouts/{id}/restart-after-release`
+
+灰度结果回流只接收逾期、违约、损失等结果事实，不允许调用方重新填报预测分值或模型版本。新标签必须引用当前已发布的标签口径；事件定义、观察/宽限期、来源优先级、适用模型以及损失金额/风险暴露约束会随标签永久冻结。平台从决策当时的冻结路由读取选边、模型、分值、评级、准入和资产哈希；Decision API 样本还必须与同租户历史执行、企业、模型版本和结果哈希一致。批量导入按租户内批次键和载荷哈希幂等，保存来源数量对账与逐行回执，单行拒绝不撤销同批有效行。标签需由录入人以外的复核人核验，且观察截止时间到达后才进入监督评估；错误标签通过“旧版本已替代 + 新版本待核验”的版本链冲正，禁止覆盖原始事实。
+
+一次监督评估只允许使用同一冻结口径，混合口径会被拒绝。只有 Champion 与 Challenger 两侧的事件/非事件样本均达到配置门槛时才计算 AUC 和 KS；事件率使用 Wilson 95% 区间，同时保存损失金额、风险暴露、损失率及区间，并把结论明确标记为 `statistically_reliable` 或 `directional`。评估可配置 200—5000 次固定种子的分层 bootstrap，封存 AUC/KS 95% 区间、双模型差异区间及 `significant_challenger_better`、`significant_champion_better`、`directional_only` 等信号；信号只提供统计验证线索，不替代独立验证和业务审批。快照同时输出按月稳定性趋势、评级/准入分群样本与事件率差异；由于当前标签未绑定受保护属性，分群结果明确标记为“非公平性结论”。样本不足时保留 `insufficient_maturity` 或 `insufficient_labels` 降级证据。完整监督证据可提交四眼结论审批；只有 `approved + promote_candidate + promotion_readiness=ready` 才能显式生成一个幂等模型变更草稿。生成前会再次校验口径、灰度资产、Champion 基线和 Challenger 配置，且不会自动提交、发布、恢复灰度或切换流量。
+
+监督晋级草稿会自动绑定验证报告哈希、报告模板版本、风险分级建议和附件清单；模型制作者不能批准自己的独立验证意见。附件进入租户隔离对象存储并在下载和报告签发前重新核验内容哈希。扫描器通过最小权限 `models:scan` 回写扫描引擎、状态、原因、主体和时间；对象缺失或哈希漂移时回写会被拒绝。独立验证通过后还必须形成与当前监督绑定哈希一致的有效可信签发记录，且所有绑定附件必须为 `passed`，未扫描或扫描拒绝都会阻断签发、提交与发布。治理页的发布审批看板统一呈现监督报告、独立验证、风险等级、可信签发、发布版本和灰度重启阻断原因。发布审核通过后才允许使用“发布后重启观察”动作创建新的灰度草稿；该动作只复制固定比较资产和观察参数，不恢复旧策略、不直接切换流量，新的灰度计划仍需单独提交和四眼批准。
 
 授权策略 API：
 
@@ -303,6 +488,29 @@ cd supplier-risk-agent-demo
 ```
 
 如已通过审计邮件、档案系统或其他独立渠道保存回执哈希，可再传入 `--expected-receipt-hash "<sha256>"`。工具会同时要求证据包有效、回执未被修改、包哈希与锚点一致、登记技术完整且回执时点仍具可信资格；已撤销回执返回退出码 `2`。单独持有回执文件仍属于自封印证据，且无法感知回执生成后的撤销，因此正式使用前应从平台重新取得最新回执或查询最新状态。
+
+### 单户治理证据包
+
+客商中心可按当前认证租户内的一家企业生成治理证据包。包内聚合客商主数据、企业数据和字段血缘、指标观测、评级运行、审批与偏差、资料及补件、信用报告哈希、授信与额度流水、贷后预警/风险事件/控制条件、通知闭环和相关业务审计链。平台共享模型、评分卡、规则和管线不复制成租户私有数据，只记录固定版本、配置哈希及可关联的平台审计终端检查点。
+
+证据包明确列出缺失域并给出 `complete`、`partial` 或 `limited` 等级；等级只表示当前已归档范围，不会把缺失评级、报告或授信虚构为完整证据。文档正文、对象存储内部路径、API 密钥和密钥引用不会进入包内。生成时间不参与包级 SHA-256，因此同一业务状态可以稳定复验。
+
+主要接口：
+
+- `GET /api/v1/governance-evidence/counterparties/{counterparty_id}`：在线生成并查看；
+- `GET /api/v1/governance-evidence/counterparties/{counterparty_id}/download`：下载 JSON；
+- `POST /api/v1/governance-evidence/verify`：复验包级封印、租户边界、记录摘要与内嵌审计链。
+
+下载后也可完全离线执行：
+
+```bash
+cd supplier-risk-agent-demo
+../.venv/bin/python scripts/verify_counterparty_evidence.py \
+  "/path/to/counterparty-governance-evidence.json" \
+  --expected-hash "<independently-saved-sha256>"
+```
+
+未提供独立哈希时结果为 `self_sealed`；同时提供并通过外部哈希比对时为 `externally_anchored`。复验通过返回退出码 `0`，证据被修改或范围不一致返回 `1`，文件无法读取或 JSON 无效返回 `2`。
 
 主要 API：
 
@@ -393,7 +601,7 @@ cd supplier-risk-agent-demo
 
 审批完成页会集中展示最终决策、批准额度与账期、模型建议到人工决策的偏差、封印报告状态、授信台账状态和首次贷后复评日期。具备权限的用户可从交付清单直接定位归档报告，或跳转并自动选中由当前审批生成的授信台账；拒绝和撤回申请仅展示关闭原因，不误导为已形成授信。
 
-贷后工作台会将严重预警、冻结/到期、复评临期、授信临期和高使用率转换为可筛选的风险信号，并按业务紧急程度自动排列授信队列。授信详情根据当前状态给出下一最佳动作，明确客户经理、风控经理、授信审批人或运营值班的责任边界，同时显示当前登录身份实际拥有的额度交易、复评、风险事件、预警处置和授信控制能力。
+贷后工作台会将严重预警、冻结/到期、复评临期、授信临期和高使用率转换为可筛选的风险信号，并按业务紧急程度自动排列授信队列。授信详情根据当前状态给出下一最佳动作，明确客户经理、风控经理、授信审批人或运营值班的责任边界，同时显示当前登录身份实际拥有的额度交易、复评、风险事件、预警处置和授信控制能力。所有授信、交易、事件、预警和控制条件接口都从认证主体取得租户，不接收客户端指定租户；跨租户对象统一返回不存在。页面发起的扫描只处理当前租户，后台全域 SLA 调度使用不暴露为业务 API 的系统扫描入口。
 
 客户经理可以从非关闭授信直接发起续授信。平台沿用主体注册信息，将流程定位到资料上传环节，并在审批单中冻结来源授信、原审批、发起时额度余额、申请额度、账期和业务原因。数据库部分唯一索引保证同一来源授信最多只有一个处理中或待补件的续授信申请；完全相同的重试返回原申请，不同参数的重复发起会明确提示在途申请。
 
@@ -403,7 +611,7 @@ cd supplier-risk-agent-demo
 
 授信金额与交易金额使用 `NUMERIC(18,2)` 定点数。额度交易通过业务交易号保证幂等，并使用台账版本号防止并发超额占用；达到 90% 使用率自动生成严重预警，额度释放后自动闭环。扫描任务识别复评逾期、30 天内到期和已到期授信，已到期台账会立即禁止继续用信。
 
-风险事件以“来源 + 外部事件号”作为幂等键，兼容企查查、ERP、回款监控等多个数据源使用各自编号空间。事件接入后自动形成关联预警；处置时风险事件、预警状态和授信控制在同一事务中更新。运营角色可确认或持续监控闭环，冻结、解冻、额度压降和关闭授信仅开放给风控/审批角色。目标额度不能低于已用额度，存在额度余额时禁止关闭授信。
+风险事件在租户内以“来源 + 外部事件号”作为幂等键，兼容企查查、ERP、回款监控等多个数据源使用各自编号空间，也允许不同租户复用外部系统编号。事件接入后自动形成租户内关联预警；处置时风险事件、预警状态和授信控制在同一事务中更新。运营角色可确认或持续监控闭环，冻结、解冻、额度压降和关闭授信仅开放给风控/审批角色。目标额度不能低于已用额度，存在额度余额时禁止关闭授信。
 
 主要 API：
 

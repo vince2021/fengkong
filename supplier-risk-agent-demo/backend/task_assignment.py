@@ -51,7 +51,7 @@ def change_task_assignment(
     expected_row_version: int,
     principal: Principal,
 ) -> dict:
-    record = _get_task_record(session, task_type, task_id)
+    record = _get_task_record(session, principal.tenant_id, task_type, task_id)
     _ensure_task_is_active(task_type, record)
     _ensure_role_is_eligible(task_type, record, principal)
     if record.row_version != expected_row_version:
@@ -147,7 +147,7 @@ def release_task_as_supervisor(
     reason: str,
     principal: Principal,
 ) -> dict:
-    record = _get_task_record(session, task_type, task_id)
+    record = _get_task_record(session, principal.tenant_id, task_type, task_id)
     _ensure_task_is_active(task_type, record)
     if record.row_version != expected_row_version:
         raise TaskAssignmentConflict(f"任务版本已变化，当前版本为 {record.row_version}")
@@ -200,7 +200,7 @@ def remind_task_as_supervisor(
             reason,
             principal,
         )
-    record = _get_task_record(session, task_type, task_id)
+    record = _get_task_record(session, principal.tenant_id, task_type, task_id)
     _ensure_task_is_active(task_type, record)
     if record.row_version != expected_row_version:
         raise TaskAssignmentConflict(f"任务版本已变化，当前版本为 {record.row_version}")
@@ -213,6 +213,7 @@ def remind_task_as_supervisor(
     dedup_prefix = f"task-supervisor-reminder:{task_type}:{task_id}:{record.assigned_to}:"
     recent = session.scalars(
         select(NotificationRecord).where(
+            NotificationRecord.tenant_id == principal.tenant_id,
             NotificationRecord.category == "task_assignment",
             NotificationRecord.level == "supervisor_reminder",
             NotificationRecord.recipient_subject == record.assigned_to,
@@ -244,7 +245,7 @@ def remind_task_as_supervisor(
     }
     notifications = NotificationRepository(session)
     audit = AuditRepository(session)
-    notification, _ = notifications.create_if_absent(notification_payload)
+    notification, _ = notifications.create_if_absent(principal.tenant_id, notification_payload)
     audit.append(
         "approval_case" if task_type == "approval" else "document_correction",
         task_id,
@@ -272,7 +273,10 @@ def _remind_direct_task_as_supervisor(
     principal: Principal,
 ) -> dict:
     if task_type == "facility_control":
-        condition = session.get(FacilityControlConditionRecord, task_id)
+        condition = session.scalars(select(FacilityControlConditionRecord).where(
+            FacilityControlConditionRecord.tenant_id == principal.tenant_id,
+            FacilityControlConditionRecord.id == task_id,
+        )).first()
         if not condition:
             raise TaskAssignmentNotFound("贷后控制任务不存在")
         if condition.status != "pending":
@@ -284,14 +288,20 @@ def _remind_direct_task_as_supervisor(
         extension_id = None
         record_version = condition.row_version
     else:
-        extension = session.get(FacilityControlExtensionRecord, task_id)
+        extension = session.scalars(select(FacilityControlExtensionRecord).where(
+            FacilityControlExtensionRecord.tenant_id == principal.tenant_id,
+            FacilityControlExtensionRecord.id == task_id,
+        )).first()
         if not extension:
             raise TaskAssignmentNotFound("控制条件延期审批任务不存在")
         if extension.status != "pending":
             raise TaskAssignmentConflict("控制条件延期审批已经结束，无需继续催办")
         if extension.row_version != expected_row_version:
             raise TaskAssignmentConflict(f"任务版本已变化，当前版本为 {extension.row_version}")
-        condition = session.get(FacilityControlConditionRecord, extension.condition_id)
+        condition = session.scalars(select(FacilityControlConditionRecord).where(
+            FacilityControlConditionRecord.tenant_id == principal.tenant_id,
+            FacilityControlConditionRecord.id == extension.condition_id,
+        )).first()
         if not condition or condition.status != "pending":
             raise TaskAssignmentConflict("关联控制条件已经结束，无需继续催办延期审批")
         if extension.facility_id != condition.facility_id:
@@ -301,13 +311,17 @@ def _remind_direct_task_as_supervisor(
         extension_id = extension.id
         record_version = extension.row_version
 
-    facility = session.get(CreditFacilityRecord, condition.facility_id)
+    facility = session.scalars(select(CreditFacilityRecord).where(
+        CreditFacilityRecord.tenant_id == principal.tenant_id,
+        CreditFacilityRecord.id == condition.facility_id,
+    )).first()
     if not facility:
         raise TaskAssignmentNotFound("关联授信台账不存在")
     now = datetime.now(timezone.utc)
     dedup_prefix = f"task-role-reminder:{task_type}:{task_id}:{recipient_role}:"
     recent = session.scalars(
         select(NotificationRecord).where(
+            NotificationRecord.tenant_id == principal.tenant_id,
             NotificationRecord.category == "task_assignment",
             NotificationRecord.level == "supervisor_reminder",
             NotificationRecord.recipient_role == recipient_role,
@@ -340,7 +354,7 @@ def _remind_direct_task_as_supervisor(
     }
     notifications = NotificationRepository(session)
     audit = AuditRepository(session)
-    notification, _ = notifications.create_if_absent(notification_payload)
+    notification, _ = notifications.create_if_absent(principal.tenant_id, notification_payload)
     audit.append(
         "facility_control_condition",
         condition.id,
@@ -364,13 +378,20 @@ def _remind_direct_task_as_supervisor(
 
 def _get_task_record(
     session: Session,
+    tenant_id: str,
     task_type: str,
     task_id: str,
 ) -> ApprovalCaseRecord | DocumentCorrectionRecord:
     if task_type == "approval":
-        record = session.get(ApprovalCaseRecord, task_id)
+        record = session.scalars(select(ApprovalCaseRecord).where(
+            ApprovalCaseRecord.tenant_id == tenant_id,
+            ApprovalCaseRecord.case_id == task_id,
+        )).first()
     elif task_type == "correction":
-        record = session.get(DocumentCorrectionRecord, task_id)
+        record = session.scalars(select(DocumentCorrectionRecord).where(
+            DocumentCorrectionRecord.tenant_id == tenant_id,
+            DocumentCorrectionRecord.id == task_id,
+        )).first()
     else:
         raise ValueError("不支持的任务类型")
     if not record:

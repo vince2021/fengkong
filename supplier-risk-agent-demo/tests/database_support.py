@@ -30,6 +30,12 @@ class IsolatedTestDatabase:
         database.Base.metadata.create_all(bind=self.engine)
         database.engine = self.engine
         database.SessionLocal = self.session_factory
+        from scripts.seed_counterparties import seed_development_counterparties
+        from backend.tenant_registry import seed_development_tenant_registry
+
+        with self.session_factory() as session:
+            seed_development_tenant_registry(session)
+            seed_development_counterparties(session)
 
     def stop(self) -> None:
         database.engine = self.original_engine

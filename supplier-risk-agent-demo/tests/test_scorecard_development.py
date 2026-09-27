@@ -16,6 +16,8 @@ from backend.sla_monitor import build_personal_task_queue
 from tests.database_support import IsolatedTestDatabase
 from tests.test_scorecard_center import scorecard
 
+TENANT_ID = "tenant-demo-hengxin"
+
 
 class TestScorecardDevelopment(unittest.TestCase):
     @classmethod
@@ -44,7 +46,7 @@ class TestScorecardDevelopment(unittest.TestCase):
 
     def _snapshot(self, labeled: bool = True, code: str = "SC_DEV", id_prefix: str = "sample", shift: bool = False) -> dict:
         repository = RuleCenterReplayDatasetRepository(self.session)
-        dataset = repository.create_dataset(code, "评分卡开发样本", "脱敏历史表现样本", "maker", "模型管理员")
+        dataset = repository.create_dataset(TENANT_ID, code, "评分卡开发样本", "脱敏历史表现样本", "maker", "模型管理员")
         records = []
         for index in range(8):
             event = index >= 4
@@ -58,7 +60,7 @@ class TestScorecardDevelopment(unittest.TestCase):
             if labeled:
                 record["outcome"] = "bad" if event else "good"
             records.append(record)
-        return repository.import_snapshot(dataset["id"], {
+        return repository.import_snapshot(TENANT_ID, dataset["id"], {
             "source_name": "历史表现样本", "schema_version": "1.0", "as_of_date": date(2026, 6, 30),
             "evidence_reference": "test://scorecard-development", "data_classification": "synthetic",
             "field_mapping": {}, "label_field": "outcome" if labeled else None,
@@ -205,7 +207,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         repository = ScorecardRepository(self.session)
         policy = self._publish_policy()
         empty_dataset = RuleCenterReplayDatasetRepository(self.session).create_dataset(
-            "SCHED_EMPTY", "尚无快照的数据集", "用于验证调度失败恢复", "maker", "模型管理员"
+            TENANT_ID, "SCHED_EMPTY", "尚无快照的数据集", "用于验证调度失败恢复", "maker", "模型管理员"
         )
         due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         repository.create_monitoring_plan(self._monitoring_plan(
@@ -256,7 +258,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         oot = self._snapshot(code="MON_BLOCK_OOT", id_prefix="mon-block-oot")
         revalidation_payload = self._payload(training)
         revalidation_payload.update({"validation_snapshot_id": validation["id"], "oot_snapshot_id": oot["id"], "validation_policy_id": policy["id"]})
-        revalidation = repository.create_development_run(revalidation_payload, "maker", "模型管理员")
+        revalidation = repository.create_development_run(TENANT_ID, revalidation_payload, "maker", "模型管理员")
         submitted = repository.action_monitoring_event(remediating["id"], remediating["row_version"], {
             "action": "submit_revalidation", "remediation_result": "补充三套样本后验证门禁已全部通过",
             "revalidation_run_id": revalidation["id"],
@@ -441,9 +443,9 @@ class TestScorecardDevelopment(unittest.TestCase):
 
         due_soon = repository.scan_monitoring_event_sla(now, "sla-monitor")
         self.assertEqual(due_soon["due_soon"], 1)
-        self.assertEqual(due_soon["notifications_created"], 1)
+        self.assertEqual(due_soon["notifications_created"], 2)
         self.assertEqual(repository.scan_monitoring_event_sla(now, "sla-monitor")["notifications_created"], 0)
-        queue = build_personal_task_queue(self.session, ("model_admin",), now=now, actor_subject="model-demo")
+        queue = build_personal_task_queue(self.session, "tenant-demo-hengxin", ("model_admin",), now=now, actor_subject="model-demo")
         self.assertGreaterEqual(queue["summary"]["scorecard_monitoring"], 1)
         task = next(item for item in queue["tasks"] if item["action"].get("monitoring_event_id") == event.id)
         self.assertEqual(task["task_type"], "scorecard_monitoring")
@@ -454,13 +456,13 @@ class TestScorecardDevelopment(unittest.TestCase):
         self.session.commit()
         overdue = repository.scan_monitoring_event_sla(now, "sla-monitor")
         self.assertEqual(overdue["overdue"], 1)
-        self.assertEqual(overdue["notifications_created"], 2)
+        self.assertEqual(overdue["notifications_created"], 4)
         event = self.session.get(ScorecardValidationMonitoringEvent, event.id)
         event.sla_due_at = now - timedelta(hours=5)
         self.session.commit()
         escalated = repository.scan_monitoring_event_sla(now, "sla-monitor")
         self.assertEqual(escalated["escalated"], 1)
-        self.assertEqual(escalated["notifications_created"], 1)
+        self.assertEqual(escalated["notifications_created"], 2)
         self.assertEqual(self.session.get(ScorecardValidationMonitoringEvent, event.id).escalation_level, 2)
 
     def test_governed_default_policy_overrides_inline_thresholds_and_is_frozen(self):
@@ -473,7 +475,7 @@ class TestScorecardDevelopment(unittest.TestCase):
 
         payload = self._payload(self._snapshot())
         payload["validation_thresholds"] = {**DEFAULT_VALIDATION_THRESHOLDS, "require_validation_snapshot": False, "require_oot_snapshot": False, "min_auc": 0}
-        run = repository.create_development_run(payload, "maker", "模型管理员")
+        run = repository.create_development_run(TENANT_ID, payload, "maker", "模型管理员")
 
         self.assertEqual(run["validation_policy"]["id"], published["id"])
         self.assertEqual(run["validation_policy"]["config_hash"], published["config_hash"])
@@ -487,7 +489,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         payload = self._payload(self._snapshot())
         payload["validation_policy_id"] = policy["id"]
         with self.assertRaisesRegex(ValueError, "不适用于评分卡"):
-            ScorecardRepository(self.session).create_development_run(payload, "maker", "模型管理员")
+            ScorecardRepository(self.session).create_development_run(TENANT_ID, payload, "maker", "模型管理员")
 
     def test_new_default_policy_deactivates_previous_default(self):
         first = self._publish_policy()
@@ -508,8 +510,8 @@ class TestScorecardDevelopment(unittest.TestCase):
             "predicted_probability_field": "predicted_pd", "segment_fields": ["region"],
             "min_segment_sample_count": 2,
         })
-        valid = repository.create_development_run(payload, "maker", "模型管理员")
-        invalid = repository.create_development_run({**payload, "dataset_snapshot_id": self._snapshot(code="TREND_TAMPERED", id_prefix="tampered")["id"]}, "maker", "模型管理员")
+        valid = repository.create_development_run(TENANT_ID, payload, "maker", "模型管理员")
+        invalid = repository.create_development_run(TENANT_ID, {**payload, "dataset_snapshot_id": self._snapshot(code="TREND_TAMPERED", id_prefix="tampered")["id"]}, "maker", "模型管理员")
         invalid_record = self.session.get(ScorecardDevelopmentRun, invalid["id"])
         invalid_record.report_json = {**invalid_record.report_json, "evidence_level": "unlabeled"}
         self.session.commit()
@@ -617,7 +619,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         self.assertTrue(listed.json()[0]["is_active"])
 
     def test_labeled_snapshot_generates_bin_woe_iv_and_frozen_evidence(self):
-        run = ScorecardRepository(self.session).create_development_run(self._payload(self._snapshot()), "maker", "模型管理员")
+        run = ScorecardRepository(self.session).create_development_run(TENANT_ID, self._payload(self._snapshot()), "maker", "模型管理员")
         report = run["report"]
         indicator = report["indicators"][0]
         self.assertEqual(run["evidence_level"], "labeled")
@@ -630,14 +632,14 @@ class TestScorecardDevelopment(unittest.TestCase):
         self.assertNotEqual(indicator["bins"][0]["calculated_woe"], indicator["bins"][0]["configured_woe"])
 
     def test_unlabeled_snapshot_is_explicitly_degraded(self):
-        run = ScorecardRepository(self.session).create_development_run(self._payload(self._snapshot(labeled=False)), "maker", "模型管理员")
+        run = ScorecardRepository(self.session).create_development_run(TENANT_ID, self._payload(self._snapshot(labeled=False)), "maker", "模型管理员")
         self.assertEqual(run["evidence_level"], "unlabeled")
         self.assertEqual(run["report"]["summary"]["eligible_sample_count"], 0)
         self.assertIsNone(run["report"]["indicators"][0]["bins"][0]["calculated_woe"])
         self.assertIn("没有可用标签", run["report"]["warnings"][0])
 
     def test_tampered_report_fails_integrity_check(self):
-        created = ScorecardRepository(self.session).create_development_run(self._payload(self._snapshot()), "maker", "模型管理员")
+        created = ScorecardRepository(self.session).create_development_run(TENANT_ID, self._payload(self._snapshot()), "maker", "模型管理员")
         record = self.session.get(ScorecardDevelopmentRun, created["id"])
         record.report_json = {**record.report_json, "evidence_level": "unlabeled"}
         self.session.commit()
@@ -671,7 +673,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         payload = self._payload(training)
         payload.update({"validation_snapshot_id": validation["id"], "oot_snapshot_id": oot["id"], "subject_id_field": "id", "predicted_probability_field": "predicted_pd"})
 
-        run = ScorecardRepository(self.session).create_development_run(payload, "maker", "模型管理员")
+        run = ScorecardRepository(self.session).create_development_run(TENANT_ID, payload, "maker", "模型管理员")
         performance = run["report"]["performance"]
         self.assertEqual(run["report"]["schema_version"], "scorecard-development-report-v4")
         self.assertEqual(performance["training"]["auc"], 1.0)
@@ -690,7 +692,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         payload = self._payload(training)
         payload["validation_snapshot_id"] = validation["id"]
         with self.assertRaisesRegex(ValueError, "主体泄漏"):
-            ScorecardRepository(self.session).create_development_run(payload, "maker", "模型管理员")
+            ScorecardRepository(self.session).create_development_run(TENANT_ID, payload, "maker", "模型管理员")
 
     def test_segment_fairness_reports_coverage_disparities_and_missing_sensitive_attribute(self):
         training = self._snapshot(code="SC_FAIR_TRAIN", id_prefix="fair-train")
@@ -705,7 +707,7 @@ class TestScorecardDevelopment(unittest.TestCase):
             "classification_threshold": 0.5,
         })
 
-        run = ScorecardRepository(self.session).create_development_run(payload, "maker", "模型管理员")
+        run = ScorecardRepository(self.session).create_development_run(TENANT_ID, payload, "maker", "模型管理员")
         fairness = run["report"]["fairness"]
         region = fairness["splits"]["training"]["region"]
         self.assertEqual(run["report"]["schema_version"], "scorecard-development-report-v4")
@@ -725,7 +727,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         payload = self._payload(self._snapshot(code="SC_FAIR_POLICY", id_prefix="fair-policy"))
         payload["sensitive_attribute_fields"] = ["region"]
         with self.assertRaisesRegex(ValueError, "必须同时包含在分群字段"):
-            ScorecardRepository(self.session).create_development_run(payload, "maker", "模型管理员")
+            ScorecardRepository(self.session).create_development_run(TENANT_ID, payload, "maker", "模型管理员")
 
     def test_validation_gate_generates_structured_violations(self):
         training = self._snapshot(code="SC_GATE_TRAIN", id_prefix="gate-train")
@@ -734,7 +736,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         payload = self._payload(training)
         payload.update({"validation_snapshot_id": validation["id"], "oot_snapshot_id": oot["id"], "predicted_probability_field": "predicted_pd"})
 
-        run = ScorecardRepository(self.session).create_development_run(payload, "maker", "模型管理员")
+        run = ScorecardRepository(self.session).create_development_run(TENANT_ID, payload, "maker", "模型管理员")
         gate = run["report"]["validation_gate"]
         self.assertFalse(gate["passed"])
         self.assertEqual(gate["summary"], "1 项验证门槛未通过")
@@ -749,7 +751,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         payload = self._payload(training)
         payload.update({"validation_snapshot_id": validation["id"], "oot_snapshot_id": oot["id"], "predicted_probability_field": "predicted_pd"})
         repository = ScorecardRepository(self.session)
-        run = repository.create_development_run(payload, "maker", "模型管理员")
+        run = repository.create_development_run(TENANT_ID, payload, "maker", "模型管理员")
         self.assertTrue(run["report"]["validation_gate"]["passed"])
         with self.assertRaisesRegex(PermissionError, "不能复核自己的证据"):
             repository.review_development_run(run["id"], run["row_version"], "approve", "本人尝试批准验证", "maker", "模型管理员")
@@ -759,7 +761,7 @@ class TestScorecardDevelopment(unittest.TestCase):
         self.assertTrue(approved["review_hash"])
 
         failed_payload = self._payload(self._snapshot(code="SC_REJECT_TRAIN", id_prefix="reject-train"))
-        failed = repository.create_development_run(failed_payload, "maker", "模型管理员")
+        failed = repository.create_development_run(TENANT_ID, failed_payload, "maker", "模型管理员")
         with self.assertRaisesRegex(ValueError, "门禁未通过"):
             repository.review_development_run(failed["id"], failed["row_version"], "approve", "尝试批准失败门禁证据", "reviewer", "风控经理")
         rejected = repository.review_development_run(failed["id"], failed["row_version"], "reject", "缺少独立验证和时间外证据", "reviewer", "风控经理")

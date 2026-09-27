@@ -1,9 +1,16 @@
-import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionPipelineDefinition, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilityControlCondition, FacilityControlExtension, FacilitySummary, IndicatorCatalogItem, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelSummary, ModelValidationReport, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PipelineSimulationResult, PipelineStage, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskReview, RiskEvent, RiskScreeningPolicy, RuleAction, RuleCenterActivationResult, RuleCenterAssetType, RuleCenterGovernanceChange, RuleCenterPackagePreview, RuleCenterReleasePackage, RuleCenterReplayDataset, RuleCenterReplayRun, RuleCenterReplaySnapshot, RuleCenterVersionHistory, RuleCondition, RuleDefinition, RuleSetDefinition, RuleTestResult, ScorecardAsset, ScorecardChange, ScorecardDefinitionPayload, ScorecardDevelopmentExclusionRule, ScorecardDevelopmentRun, ScorecardDevelopmentTrends, ScorecardMonitoringBulkAssignResult, ScorecardMonitoringEvent, ScorecardMonitoringEventFilters, ScorecardMonitoringExecution, ScorecardMonitoringPlan, ScorecardMonitoringRunConfig, ScorecardMonitoringSavedView, ScorecardMonitoringSchedulerExecution, ScorecardMonitoringSchedulerHealth, ScorecardMonitoringSlaPolicy, ScorecardPortfolioStability, ScorecardValidationPolicy, ScorecardValidationThresholds, SlaScanHistory, SlaScanResult, SlaScanRetryResult, StrongRule, TeamTaskBoard } from "./types";
+import type { ApiErrorShape, ApprovalAction, ApprovalCase, AuthorityPolicyActivationRun, AuthorityPolicyActivationScan, AuthorityPolicyActivationStatus, AuthorityPolicyConfig, AuthorityPolicyEvidence, AuthorityPolicyEvidenceAnchor, AuthorityPolicyEvidenceAnchorReceipt, AuthorityPolicyEvidenceComparison, AuthorityPolicyImpact, AuthorityPolicyRecord, AuthorityPolicyScenarioComparison, AuthorityPolicySnapshot, Counterparty, CounterpartyGovernanceEvidence, CounterpartyGovernanceEvidenceVerification, CounterpartyHistoryEvent, CounterpartyImportBatch, CounterpartyImportCorrectionDraft, CounterpartyImportMappingTemplate, CounterpartyImportPage, CounterpartyPage, CreditFacility, CreditFacilityDetail, CreditReport, CreditReportIntegrity, DecisionGovernanceSummary, DecisionPipelineDefinition, DecisionVariance, DocumentChecklist, DocumentCheckResult, DocumentCorrection, DocumentCorrectionTask, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, EnterpriseIndicatorObservation, FacilityAlert, FacilityControlCondition, FacilityControlExtension, FacilitySummary, IndicatorCatalogItem, IndicatorPoolResponse, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelImpact, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseApprovalDashboard, ModelReleaseRecord, ModelRiskCatalog, ModelSummary, ModelValidationAttachment, ModelValidationReport, ModelValidationReportIssuance, MonitoringIssue, MonitoringSchedulerTick, MonitoringSummary, NotificationRecord, OperationsSummary, PersonalTaskAssignment, PersonalTaskQueue, PipelineSimulationResult, PipelineStage, PortfolioRatingBatch, Principal, RatingReadiness, RatingResult, RatingTrace, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskReview, RiskEvent, RiskScreeningPolicy, RuleAction, RuleCenterActivationResult, RuleCenterAssetType, RuleCenterGovernanceChange, RuleCenterPackagePreview, RuleCenterReleasePackage, RuleCenterReplayDataset, RuleCenterReplayRun, RuleCenterReplaySnapshot, RuleCenterVersionHistory, RuleCondition, RuleDefinition, RuleSetDefinition, RuleTestResult, SalesDemoChampionChallenger, SalesDemoOverview, SalesDemoPostCreditAlert, SalesDemoRun, SalesDemoValueDashboard, ScorecardAsset, ScorecardChange, ScorecardDefinitionPayload, ScorecardDevelopmentExclusionRule, ScorecardDevelopmentRun, ScorecardDevelopmentTrends, ScorecardMonitoringBulkAssignResult, ScorecardMonitoringEvent, ScorecardMonitoringEventFilters, ScorecardMonitoringExecution, ScorecardMonitoringPlan, ScorecardMonitoringRunConfig, ScorecardMonitoringSavedView, ScorecardMonitoringSchedulerExecution, ScorecardMonitoringSchedulerHealth, ScorecardMonitoringSlaPolicy, ScorecardPortfolioStability, ScorecardValidationPolicy, ScorecardValidationThresholds, SlaScanHistory, SlaScanResult, SlaScanRetryResult, StrongRule, TeamTaskBoard } from "./types";
 import type { RuleCenterReplayComparison, RuleCenterReplayComparisonException } from "./types";
 import type { CreditCalibrationAnalyzeRequest, CreditCalibrationComparison, CreditCalibrationConfig, CreditCalibrationPlan, CreditCalibrationRun, CreditCalibrationResult } from "./types";
+import type { DecisionClientProfile, DecisionContract, DecisionExecution, DecisionFieldMappingPayload, DecisionFieldMappingResult, DecisionJob, DecisionRequestPayload, DecisionSandboxPackage, DecisionWebhook } from "./types";
+import type { TenantAssetBinding, TenantAssetCatalog, TenantAssetOverride, TenantAssetResolution, TenantAssetType } from "./types";
+import type { EntitlementLifecycleRun, EntitlementLifecycleStatus, EntitlementPreview, ProductPackage, ProductPackageAsset, ProductPackageQuotas, TenantEntitlement, TenantSummary, TenantUsageDailyRecord, TenantUsageStatement, TenantUsageSummary } from "./types";
+import type { MonitoringDiffSlaDashboard, TenantMonitoringDiffCase, TenantMonitoringRun, TenantOutcomeImport, TenantOutcomeLabel, TenantOutcomeLabelDefinition, TenantRolloutEvaluation, TenantRolloutPolicy, TenantRolloutScan, TenantRoutingDecision, TenantSupervisedEvaluation, TenantSupervisedUpgradeDecision, TenantSupervisedVerificationReport } from "./types";
+import type { ModelRiskAcceptance, ModelRiskAcceptanceRole, ModelRiskCatalogResponse, ModelRiskPolicy, ModelRiskReacceptance, ModelRiskReacceptanceAuditPackage, ModelRiskReacceptanceRegulatoryReport, ModelRiskReacceptanceReviewQueueItem, ModelRiskReviewQueueItem, ModelRiskReviewSavedView, ModelRiskReviewSlaTrend, ModelRiskReviewWorkbench, ModelRiskUnifiedReviewQueueItem } from "./types";
+import type { NotificationDeliveryOperations, TenantNotificationChannel, TenantNotificationChannelPayload, TenantNotificationChannelTestResult, TenantNotificationDelivery, TenantNotificationDeliveryLedger, TenantNotificationDeliveryStatus, TenantNotificationDispatchResult } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1";
 const TOKEN_KEY = "risk-platform.dev-token";
+export const API_STATUS_EVENT = "risk-platform:api-status";
 type ModelOutcomePayload = { external_observation_id: string; source: string; template_key: string; model_version: string; counterparty_id: string; population_period: string; predicted_score: number; predicted_pd: number; observed_event: boolean; prediction_at: string; observation_end: string; evidence_reference: string };
 
 export const devIdentities = [
@@ -15,7 +22,9 @@ export const devIdentities = [
   { token: "dev-model-admin", label: "模型管理员", description: "模型治理与配置" },
   { token: "dev-auditor", label: "审计人员", description: "审计追溯与可信锚点签发" },
   { token: "dev-operations", label: "运营值班", description: "运行 SLA 扫描与升级催办" },
+  { token: "dev-integration", label: "集成管理员", description: "配置固定版本并验证 Decision API" },
   { token: "dev-admin", label: "平台管理员", description: "本地演示全权限" },
+  { token: "dev-admin-reviewer", label: "平台复核人", description: "独立复核产品包与租户授权" },
 ] as const;
 
 export function getToken(): string {
@@ -26,20 +35,54 @@ export function setToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
 }
 
+function reportApiStatus(connected: boolean): void {
+  window.dispatchEvent(new CustomEvent(API_STATUS_EVENT, { detail: { connected } }));
+}
+
+function apiUnavailableError(): Error {
+  return new Error("无法连接业务服务，请确认 API 已启动后重试");
+}
+
+export class ApiRequestError extends Error {
+  constructor(message: string, public readonly status: number, public readonly code?: string) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
+async function fetchApi(path: string, init: RequestInit = {}): Promise<Response> {
+  try {
+    const response = await fetch(`${API_BASE}${path}`, init);
+    reportApiStatus(true);
+    return response;
+  } catch {
+    reportApiStatus(false);
+    throw apiUnavailableError();
+  }
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${getToken()}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  const response = await fetch(`${API_BASE}${path}`, { ...init, headers });
+  const response = await fetchApi(path, { ...init, headers });
   if (!response.ok) {
     let message = `请求失败（${response.status}）`;
+    let code: string | undefined;
     try {
       const error = (await response.json()) as ApiErrorShape;
-      if (error.detail) message = error.detail;
+      if (error.error?.message) {
+        code = error.error.code;
+        message = `${error.error.code}：${error.error.message}`;
+      } else if (typeof error.detail === "string") message = error.detail;
+      else if (error.detail?.message) {
+        code = error.detail.code;
+        message = `${error.detail.code ? `${error.detail.code}：` : ""}${error.detail.message}`;
+      }
     } catch {
       // Non-JSON gateway errors keep the status-based message.
     }
-    throw new Error(message);
+    throw new ApiRequestError(message, response.status, code);
   }
   return response.json() as Promise<T>;
 }
@@ -51,16 +94,23 @@ function queryString(values: object): string {
   return query ? `?${query}` : "";
 }
 
-async function download(path: string): Promise<void> {
-  const response = await fetch(`${API_BASE}${path}`, { headers: { Authorization: `Bearer ${getToken()}` } });
+async function download(path: string, fallbackFilename = "scorecard-monitoring-events.csv"): Promise<void> {
+  const response = await fetchApi(path, { headers: { Authorization: `Bearer ${getToken()}` } });
   if (!response.ok) {
     let message = `下载失败（${response.status}）`;
-    try { message = ((await response.json()) as ApiErrorShape).detail ?? message; } catch { /* Keep status message. */ }
+    try {
+      const detail = ((await response.json()) as ApiErrorShape).detail;
+      if (typeof detail === "string") message = detail;
+      else if (detail?.message) message = detail.message;
+    } catch { /* Keep status message. */ }
     throw new Error(message);
   }
   const blobUrl = URL.createObjectURL(await response.blob());
   const disposition = response.headers.get("Content-Disposition") ?? "";
-  const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? "scorecard-monitoring-events.csv";
+  const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/)?.[1];
+  const filename = encodedFilename
+    ? decodeURIComponent(encodedFilename)
+    : disposition.match(/filename="?([^";]+)"?/)?.[1] ?? fallbackFilename;
   const link = document.createElement("a");
   link.href = blobUrl; link.download = filename; document.body.appendChild(link); link.click(); link.remove();
   URL.revokeObjectURL(blobUrl);
@@ -68,7 +118,52 @@ async function download(path: string): Promise<void> {
 
 export const api = {
   me: () => request<Principal>("/auth/me"),
+  decisionContract: () => request<DecisionContract>("/decisions/contract"),
+  decisionSandbox: () => request<DecisionSandboxPackage>("/decisions/sandbox"),
+  runDecision: (payload: DecisionRequestPayload) => request<DecisionExecution>("/decisions", { method: "POST", body: JSON.stringify(payload) }),
+  decisionExecution: (requestId: string) => request<DecisionExecution>(`/decisions/${encodeURIComponent(requestId)}`),
+  decisionJobs: () => request<DecisionJob[]>("/decision-jobs"),
+  createDecisionJob: (payload: { job_key: string; requests: DecisionRequestPayload[]; callback: { mode: "none" | "sandbox"; endpoint_url: string; secret_reference: string; simulate_status_sequence: number[]; max_attempts: number } }) => request<DecisionJob>("/decision-jobs", { method: "POST", body: JSON.stringify(payload) }),
+  runDecisionJob: (jobId: string) => request<DecisionJob>(`/decision-jobs/${encodeURIComponent(jobId)}/run`, { method: "POST" }),
+  decisionJobWebhooks: (jobId: string) => request<DecisionWebhook[]>(`/decision-jobs/${encodeURIComponent(jobId)}/webhooks`),
+  retryDecisionWebhook: (deliveryId: string) => request<DecisionWebhook>(`/decision-webhooks/${encodeURIComponent(deliveryId)}/retry`, { method: "POST" }),
+  redeliverDecisionWebhook: (deliveryId: string) => request<DecisionWebhook>(`/decision-webhooks/${encodeURIComponent(deliveryId)}/redeliver`, { method: "POST" }),
+  downloadDecisionJobResults: (jobId: string, jobKey: string) => download(`/decision-jobs/${encodeURIComponent(jobId)}/results.csv`, `${jobKey}-results.csv`),
+  decisionClientProfile: () => request<DecisionClientProfile>("/decisions/client-profile"),
+  previewDecisionFieldMapping: (payload: DecisionFieldMappingPayload) => request<DecisionFieldMappingResult>("/decisions/field-mapping/preview", { method: "POST", body: JSON.stringify(payload) }),
+  downloadDecisionIntegrationKit: () => download("/decisions/integration-kit", "hengxin-decision-api-sandbox-kit.zip"),
+  salesDemoOverview: () => request<SalesDemoOverview>("/sales-demo/overview"),
+  salesDemoValueDashboard: () => request<SalesDemoValueDashboard>("/sales-demo/value-dashboard"),
+  salesDemoChampionChallenger: () => request<SalesDemoChampionChallenger>("/sales-demo/showcases/champion-challenger"),
+  salesDemoPostCreditAlert: () => request<SalesDemoPostCreditAlert>("/sales-demo/showcases/post-credit-alert"),
+  salesDemoScenario: (scenarioKey: string, storyKey?: string) => request<SalesDemoRun>(`/sales-demo/scenarios/${encodeURIComponent(scenarioKey)}${storyKey ? `?story=${encodeURIComponent(storyKey)}` : ""}`),
+  downloadSalesDemoBrief: (scenarioKey: string, storyKey: string) => download(`/sales-demo/scenarios/${encodeURIComponent(scenarioKey)}/brief?story=${encodeURIComponent(storyKey)}`, `${scenarioKey}-${storyKey}-executive-brief.md`),
+  downloadSalesDemoPilotPackage: () => download("/sales-demo/pilot-package", "enterprise-credit-platform-roadshow-pilot-package.zip"),
   counterparties: () => request<Counterparty[]>("/counterparties"),
+  counterpartyPage: (filters: { q?: string; counterparty_type?: "supplier" | "customer"; status?: "active" | "archived"; limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => { if (value !== undefined && value !== "") params.set(key, String(value)); });
+    return request<CounterpartyPage>(`/counterparties/page?${params.toString()}`);
+  },
+  counterparty: (id: string, includeArchived = false) => request<Counterparty>(`/counterparties/${encodeURIComponent(id)}${includeArchived ? "?include_archived=true" : ""}`),
+  counterpartyHistory: (id: string) => request<CounterpartyHistoryEvent[]>(`/counterparties/${encodeURIComponent(id)}/history`),
+  counterpartyGovernanceEvidence: (id: string) => request<CounterpartyGovernanceEvidence>(`/governance-evidence/counterparties/${encodeURIComponent(id)}`),
+  verifyCounterpartyGovernanceEvidence: (evidence: CounterpartyGovernanceEvidence) => request<CounterpartyGovernanceEvidenceVerification>("/governance-evidence/verify", { method: "POST", body: JSON.stringify({ package: evidence }) }),
+  downloadCounterpartyGovernanceEvidence: (id: string) => download(`/governance-evidence/counterparties/${encodeURIComponent(id)}/download`, `counterparty-governance-evidence-${id}.json`),
+  createCounterparty: (payload: Record<string, unknown>) => request<Counterparty>("/counterparties", { method: "POST", body: JSON.stringify(payload) }),
+  updateCounterparty: (id: string, payload: Record<string, unknown>) => request<Counterparty>(`/counterparties/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  archiveCounterparty: (id: string, payload: { expected_row_version: number; reason: string }) => request<Counterparty>(`/counterparties/${encodeURIComponent(id)}/archive`, { method: "POST", body: JSON.stringify(payload) }),
+  counterpartyImports: (status?: CounterpartyImportBatch["status"]) => request<CounterpartyImportPage>(`/counterparties/imports${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  precheckCounterpartyImport: (payload: { import_key: string; file_name: string; file_format: "json" | "csv"; content: string; duplicate_strategy: "reject" | "skip" | "update"; field_mapping: Record<string, string>; reason: string }) =>
+    request<CounterpartyImportBatch>("/counterparties/imports/precheck", { method: "POST", body: JSON.stringify(payload) }),
+  commitCounterpartyImport: (id: string, payload: { expected_row_version: number; preview_hash: string; reason: string }) =>
+    request<CounterpartyImportBatch>(`/counterparties/imports/${encodeURIComponent(id)}/commit`, { method: "POST", body: JSON.stringify(payload) }),
+  counterpartyImportCorrectionDraft: (id: string) => request<CounterpartyImportCorrectionDraft>(`/counterparties/imports/${encodeURIComponent(id)}/correction-draft`),
+  downloadCounterpartyImportReceipt: (id: string, importKey: string) => download(`/counterparties/imports/${encodeURIComponent(id)}/receipt.csv`, `${importKey}-receipt.csv`),
+  counterpartyImportMappingTemplates: (status: "active" | "archived" = "active") => request<CounterpartyImportMappingTemplate[]>(`/counterparties/import-mapping-templates?status=${status}`),
+  createCounterpartyImportMappingTemplate: (payload: { template_key: string; name: string; file_format: "json" | "csv"; mapping: Record<string, string>; description: string; reason: string }) => request<CounterpartyImportMappingTemplate>("/counterparties/import-mapping-templates", { method: "POST", body: JSON.stringify(payload) }),
+  updateCounterpartyImportMappingTemplate: (id: string, payload: { name?: string; file_format?: "json" | "csv"; mapping?: Record<string, string>; description?: string; expected_row_version: number; reason: string }) => request<CounterpartyImportMappingTemplate>(`/counterparties/import-mapping-templates/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  archiveCounterpartyImportMappingTemplate: (id: string, payload: { expected_row_version: number; reason: string }) => request<CounterpartyImportMappingTemplate>(`/counterparties/import-mapping-templates/${encodeURIComponent(id)}/archive`, { method: "POST", body: JSON.stringify(payload) }),
   rawProfile: (counterpartyId: string) => request<RawEnterpriseProfile>(`/counterparties/${counterpartyId}/raw-profile`),
   enterpriseDataProfile: (counterpartyId: string) => request<EnterpriseDataProfile>(`/data-governance/counterparties/${counterpartyId}/profile`),
   enterpriseDataConflicts: (counterpartyId: string) => request<EnterpriseDataConflict[]>(`/data-governance/counterparties/${counterpartyId}/conflicts`),
@@ -161,10 +256,14 @@ export const api = {
   decisionGovernanceSummary: () => request<DecisionGovernanceSummary>("/decision-governance/summary"),
   verifyCreditReport: (id: string) => request<CreditReportIntegrity>(`/credit-reports/${id}/integrity`),
   downloadCreditReport: async (report: CreditReport) => {
-    const response = await fetch(`${API_BASE}/credit-reports/${report.id}/download`, { headers: { Authorization: `Bearer ${getToken()}` } });
+    const response = await fetchApi(`/credit-reports/${report.id}/download`, { headers: { Authorization: `Bearer ${getToken()}` } });
     if (!response.ok) {
       let message = `报告下载失败（${response.status}）`;
-      try { const payload = await response.json() as ApiErrorShape; if (payload.detail) message = payload.detail; } catch { /* keep status message */ }
+      try {
+        const detail = ((await response.json()) as ApiErrorShape).detail;
+        if (typeof detail === "string") message = detail;
+        else if (detail?.message) message = detail.message;
+      } catch { /* keep status message */ }
       throw new Error(message);
     }
     const blob = await response.blob();
@@ -185,6 +284,51 @@ export const api = {
     request<PortfolioRatingBatch>("/ratings/batches", { method: "POST", body: JSON.stringify(payload) }),
   models: () => request<ModelSummary[]>("/models"),
   model: (templateKey: string) => request<ModelDetail>(`/models/${templateKey}`),
+  tenantAssets: (assetType?: TenantAssetType) => request<TenantAssetCatalog>(`/tenant-assets${assetType ? `?asset_type=${encodeURIComponent(assetType)}` : ""}`),
+  resolveTenantAsset: (assetType: TenantAssetType, assetCode: string) =>
+    request<TenantAssetResolution>(`/tenant-assets/${assetType}/${encodeURIComponent(assetCode)}/resolve`),
+  createTenantAssetBinding: (payload: { asset_type: TenantAssetType; asset_code: string; binding_mode: "inherit_active" | "pinned"; pinned_version?: string | null; allow_tenant_override: boolean; status: "active" | "suspended"; reason: string }) =>
+    request<TenantAssetBinding>("/tenant-assets/bindings", { method: "POST", body: JSON.stringify(payload) }),
+  updateTenantAssetBinding: (id: string, payload: { expected_row_version: number; binding_mode?: "inherit_active" | "pinned"; pinned_version?: string | null; clear_pinned_version?: boolean; allow_tenant_override?: boolean; status?: "active" | "suspended"; reason: string }) =>
+    request<TenantAssetBinding>(`/tenant-assets/bindings/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createTenantAssetOverride: (payload: { asset_type: TenantAssetType; asset_code: string; base_version?: string | null; config: Record<string, unknown>; reason: string }) =>
+    request<TenantAssetOverride>("/tenant-assets/overrides", { method: "POST", body: JSON.stringify(payload) }),
+  updateTenantAssetOverride: (id: string, payload: { expected_row_version: number; config: Record<string, unknown>; reason: string }) =>
+    request<TenantAssetOverride>(`/tenant-assets/overrides/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  submitTenantAssetOverride: (id: string, expectedRowVersion: number, reason: string) =>
+    request<TenantAssetOverride>(`/tenant-assets/overrides/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
+  reviewTenantAssetOverride: (id: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) =>
+    request<TenantAssetOverride>(`/tenant-assets/overrides/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, decision, comment }) }),
+  tenants: () => request<{ items: TenantSummary[]; total: number; limit: number; offset: number }>("/tenant-admin/tenants?limit=200&offset=0"),
+  productPackages: () => request<ProductPackage[]>("/tenant-admin/product-packages"),
+  createProductPackage: (payload: { code: string; name: string; description: string; environment_scopes: Array<"sandbox" | "production">; assets: ProductPackageAsset[]; quotas: ProductPackageQuotas; expiry_policy: "block"; reason: string }) =>
+    request<ProductPackage>("/tenant-admin/product-packages", { method: "POST", body: JSON.stringify(payload) }),
+  submitProductPackage: (id: string, expectedRowVersion: number, reason: string) =>
+    request<ProductPackage>(`/tenant-admin/product-packages/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
+  reviewProductPackage: (id: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) =>
+    request<ProductPackage>(`/tenant-admin/product-packages/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, decision, comment }) }),
+  entitlements: () => request<TenantEntitlement[]>("/tenant-admin/entitlements"),
+  previewEntitlement: (payload: { tenant_id: string; product_package_id: string; starts_at: string; expires_at: string; quota_overrides?: ProductPackageQuotas; reason: string }) =>
+    request<EntitlementPreview>("/tenant-admin/entitlements/preview", { method: "POST", body: JSON.stringify(payload) }),
+  createEntitlement: (payload: { tenant_id: string; product_package_id: string; starts_at: string; expires_at: string; quota_overrides?: ProductPackageQuotas; reason: string }) =>
+    request<TenantEntitlement>("/tenant-admin/entitlements", { method: "POST", body: JSON.stringify(payload) }),
+  submitEntitlement: (id: string, expectedRowVersion: number, reason: string) =>
+    request<TenantEntitlement>(`/tenant-admin/entitlements/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, reason }) }),
+  reviewEntitlement: (id: string, expectedRowVersion: number, decision: "approve" | "reject", comment: string) =>
+    request<TenantEntitlement>(`/tenant-admin/entitlements/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, decision, comment }) }),
+  changeEntitlementStatus: (id: string, expectedRowVersion: number, action: "activate" | "suspend" | "terminate", reason: string) =>
+    request<TenantEntitlement>(`/tenant-admin/entitlements/${id}/status`, { method: "POST", body: JSON.stringify({ expected_row_version: expectedRowVersion, action, reason }) }),
+  entitlementLifecycleStatus: () => request<EntitlementLifecycleStatus>("/tenant-admin/entitlement-lifecycle/status"),
+  entitlementLifecycleRuns: () => request<EntitlementLifecycleRun[]>("/tenant-admin/entitlement-runs?limit=100"),
+  scanEntitlementLifecycle: () => request<{ idempotent: boolean; run: EntitlementLifecycleRun; status: EntitlementLifecycleStatus }>("/tenant-admin/entitlement-lifecycle/scan", { method: "POST", body: JSON.stringify({}) }),
+  acknowledgeEntitlementLifecycleRun: (id: string, rowVersion: number, reason: string) =>
+    request<EntitlementLifecycleRun>(`/tenant-admin/entitlement-runs/${id}/acknowledge`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  retryEntitlementLifecycleRun: (id: string, rowVersion: number, reason: string) =>
+    request<{ idempotent: boolean; run: EntitlementLifecycleRun; status: EntitlementLifecycleStatus }>(`/tenant-admin/entitlement-runs/${id}/retry`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  tenantUsageSummary: (tenantId: string, billingMonth: string) => request<TenantUsageSummary>(`/tenant-admin/usage/summary?tenant_id=${encodeURIComponent(tenantId)}&billing_month=${encodeURIComponent(billingMonth)}`),
+  refreshTenantUsage: (tenantId: string, usageDate?: string) => request<TenantUsageDailyRecord>("/tenant-admin/usage/refresh", { method: "POST", body: JSON.stringify({ tenant_id: tenantId, ...(usageDate ? { usage_date: usageDate } : {}) }) }),
+  createTenantUsageStatement: (tenantId: string, billingMonth: string) => request<TenantUsageStatement>("/tenant-admin/usage/statements", { method: "POST", body: JSON.stringify({ tenant_id: tenantId, billing_month: billingMonth }) }),
+  downloadTenantUsageStatement: (statementId: string) => download(`/tenant-admin/usage/statements/${encodeURIComponent(statementId)}/export.csv`, "tenant-usage-statement.csv"),
   ruleDefinitions: () => request<RuleDefinition[]>("/rule-center/rules"),
   createRuleDefinition: (payload: { code: string; name: string; rule_type: RuleDefinition["rule_type"]; category?: string | null; enabled: boolean; conditions_json: RuleCondition[]; condition_relation: "all" | "any"; actions_json: RuleAction[]; priority: number }) =>
     request<RuleDefinition>("/rule-center/rules", { method: "POST", body: JSON.stringify(payload) }),
@@ -301,6 +445,61 @@ export const api = {
       body: JSON.stringify({ counterparty_id: counterpartyId, template_key: templateKey, field_path: fieldPath, new_value: newValue }),
     }),
   modelChanges: (templateKey: string) => request<ModelChangeRecord[]>(`/model-governance/changes?template_key=${encodeURIComponent(templateKey)}`),
+  modelRiskCatalog: () => request<ModelRiskCatalogResponse>("/model-governance/risk-catalog"),
+  modelRiskPolicies: () => request<ModelRiskPolicy[]>("/model-governance/risk-policies"),
+  createModelRiskPolicy: (payload: { name: string; description: string; levels: ModelRiskCatalog[]; reason: string }) => request<ModelRiskPolicy>("/model-governance/risk-policies", { method: "POST", body: JSON.stringify(payload) }),
+  submitModelRiskPolicy: (id: string, rowVersion: number, reason: string) => request<ModelRiskPolicy>(`/model-governance/risk-policies/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  reviewModelRiskPolicy: (id: string, rowVersion: number, decision: "publish" | "reject", comment: string) => request<ModelRiskPolicy>(`/model-governance/risk-policies/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  modelRiskAcceptances: (changeId?: string) => request<ModelRiskAcceptance[]>(`/model-governance/risk-acceptances${changeId ? `?change_id=${encodeURIComponent(changeId)}` : ""}`),
+  modelRiskReviewQueue: () => request<ModelRiskReviewQueueItem[]>("/model-governance/risk-acceptances/review-queue"),
+  modelRiskUnifiedReviewQueue: (templateKey?: string) => request<ModelRiskUnifiedReviewQueueItem[]>(`/model-governance/risk-review-queue${templateKey ? `?template_key=${encodeURIComponent(templateKey)}` : ""}`),
+  modelRiskReviewWorkbench: (params: { templateKey?: string; ownership?: "all" | "mine" | "unassigned"; source?: string; priority?: string; ownerRole?: string; evidenceLevel?: string; query?: string } = {}) => {
+    const search = new URLSearchParams();
+    if (params.templateKey) search.set("template_key", params.templateKey);
+    if (params.ownership) search.set("ownership", params.ownership);
+    if (params.source) search.set("source", params.source);
+    if (params.priority) search.set("priority", params.priority);
+    if (params.ownerRole) search.set("owner_role", params.ownerRole);
+    if (params.evidenceLevel) search.set("evidence_level", params.evidenceLevel);
+    if (params.query) search.set("query", params.query);
+    return request<ModelRiskReviewWorkbench>(`/model-governance/risk-review-queue/workbench${search.toString() ? `?${search.toString()}` : ""}`);
+  },
+  modelRiskReviewViews: () => request<ModelRiskReviewSavedView[]>("/model-governance/risk-review-queue/views"),
+  createModelRiskReviewView: (payload: { name: string; filters: Record<string, unknown>; is_default: boolean }) => request<ModelRiskReviewSavedView>("/model-governance/risk-review-queue/views", { method: "POST", body: JSON.stringify(payload) }),
+  updateModelRiskReviewView: (id: string, rowVersion: number, payload: { name: string; filters: Record<string, unknown>; is_default: boolean }) => request<ModelRiskReviewSavedView>(`/model-governance/risk-review-queue/views/${id}`, { method: "PUT", body: JSON.stringify({ expected_row_version: rowVersion, ...payload }) }),
+  deleteModelRiskReviewView: (id: string, rowVersion: number) => request<void>(`/model-governance/risk-review-queue/views/${id}?expected_row_version=${rowVersion}`, { method: "DELETE" }),
+  bulkAssignModelRiskReview: (payload: { items: Array<{ item_id: string; expected_assignment_version: number; expected_source_version?: number }>; assignee: string | null; assignee_name: string | null; assigned_role: string; reason: string }) => request<{ batch_id: string; assigned_count: number }>("/model-governance/risk-review-queue/bulk-assign", { method: "POST", body: JSON.stringify(payload) }),
+  modelRiskReviewMembers: () => request<import("./types").ModelRiskReviewMember[]>("/model-governance/risk-review-queue/members"),
+  modelRiskReviewDelegations: () => request<import("./types").ModelRiskReviewDelegation[]>("/model-governance/risk-review-queue/delegations"),
+  createModelRiskReviewDelegation: (payload: { principal_subject: string; delegate_subject: string; assigned_role: string; starts_at: string; ends_at: string; reason: string }) => request<import("./types").ModelRiskReviewDelegation>("/model-governance/risk-review-queue/delegations", { method: "POST", body: JSON.stringify(payload) }),
+  revokeModelRiskReviewDelegation: (id: string, rowVersion: number, reason: string) => request<import("./types").ModelRiskReviewDelegation>(`/model-governance/risk-review-queue/delegations/${id}/revoke`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  modelRiskReviewAssignmentHistory: (itemId: string) => request<import("./types").ModelRiskReviewAssignmentHistory>(`/model-governance/risk-review-queue/assignment-history?item_id=${encodeURIComponent(itemId)}`),
+  modelRiskReviewSlaTrends: (days = 30, templateKey?: string) => request<ModelRiskReviewSlaTrend>(`/model-governance/risk-review-queue/sla-trends?days=${days}${templateKey ? `&template_key=${encodeURIComponent(templateKey)}` : ""}`),
+  createModelRiskReviewSlaSnapshot: (templateKey?: string) => request<Record<string, unknown>>(`/model-governance/risk-review-queue/sla-snapshot${templateKey ? `?template_key=${encodeURIComponent(templateKey)}` : ""}`, { method: "POST" }),
+  scanModelRiskReviews: () => request<{ items_scanned: number; overdue: number; notifications_created: number }>("/model-governance/risk-acceptances/review-scan", { method: "POST" }),
+  modelRiskReacceptances: (releaseId?: string) => request<ModelRiskReacceptance[]>(`/model-governance/risk-reacceptances${releaseId ? `?release_id=${encodeURIComponent(releaseId)}` : ""}`),
+  modelRiskReacceptanceReviewQueue: () => request<ModelRiskReacceptanceReviewQueueItem[]>("/model-governance/risk-reacceptances/review-queue"),
+  scanModelRiskReacceptanceReviews: () => request<{ items_scanned: number; overdue: number; notifications_created: number; notifications_resolved: number }>("/model-governance/risk-reacceptances/review-scan", { method: "POST" }),
+  createModelRiskReacceptance: (releaseId: string, payload: { rationale: string; observed_from: string; observed_to: string; evidence_reference: string; evidence_summary: string; monitoring_run_id?: string | null; monitoring_evidence_hash?: string | null; supervised_evaluation_id?: string | null; supervised_evidence_hash?: string | null }) => request<ModelRiskReacceptance>(`/model-governance/releases/${releaseId}/risk-reacceptances`, { method: "POST", body: JSON.stringify(payload) }),
+  signModelRiskReacceptance: (id: string, rowVersion: number, acceptanceRole: ModelRiskAcceptanceRole, note: string) => request<ModelRiskReacceptance>(`/model-governance/risk-reacceptances/${id}/accept`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, acceptance_role: acceptanceRole, note }) }),
+  revokeModelRiskReacceptance: (id: string, rowVersion: number, reason: string) => request<ModelRiskReacceptance>(`/model-governance/risk-reacceptances/${id}/revoke`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  modelRiskReacceptanceAuditPackage: (id: string) => request<ModelRiskReacceptanceAuditPackage>(`/model-governance/risk-reacceptances/${id}/audit-package?format=full`),
+  modelRiskReacceptanceRegulatoryReport: (id: string) => request<ModelRiskReacceptanceRegulatoryReport>(`/model-governance/risk-reacceptances/${id}/audit-package?format=regulatory`),
+  downloadModelRiskReacceptanceAuditPackage: (id: string) => download(`/model-governance/risk-reacceptances/${id}/audit-package?format=full`, `model-risk-reacceptance-${id}-full.json`),
+  downloadModelRiskReacceptanceRegulatoryReport: (id: string) => download(`/model-governance/risk-reacceptances/${id}/audit-package?format=regulatory`, `model-risk-reacceptance-${id}-regulatory.json`),
+  createModelRiskAcceptance: (changeId: string, rationale: string) => request<ModelRiskAcceptance>(`/model-governance/changes/${changeId}/risk-acceptances`, { method: "POST", body: JSON.stringify({ rationale }) }),
+  signModelRiskAcceptance: (id: string, rowVersion: number, acceptanceRole: ModelRiskAcceptanceRole, note: string) => request<ModelRiskAcceptance>(`/model-governance/risk-acceptances/${id}/accept`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, acceptance_role: acceptanceRole, note }) }),
+  revokeModelRiskAcceptance: (id: string, rowVersion: number, reason: string) => request<ModelRiskAcceptance>(`/model-governance/risk-acceptances/${id}/revoke`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  modelReleaseApprovalDashboard: (templateKey?: string) => request<ModelReleaseApprovalDashboard>(`/model-governance/release-approval-dashboard${templateKey ? `?template_key=${encodeURIComponent(templateKey)}` : ""}`),
+  validationAttachments: (changeId: string) => request<ModelValidationAttachment[]>(`/model-governance/changes/${changeId}/supervised-validation/attachments`),
+  uploadValidationAttachment: (changeId: string, file: File) => { const body = new FormData(); body.append("file", file); return request<ModelValidationAttachment>(`/model-governance/changes/${changeId}/supervised-validation/attachments`, { method: "POST", body }); },
+  scanValidationAttachment: (attachmentId: string, rowVersion: number, scanStatus: "pending" | "passed" | "rejected", scanEngine: string, resultReason: string) => request<ModelValidationAttachment>(`/model-governance/supervised-validation/attachments/${attachmentId}/scan`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, scan_status: scanStatus, scan_engine: scanEngine, result_reason: resultReason }) }),
+  downloadValidationAttachment: (attachmentId: string, filename?: string) => download(`/model-governance/supervised-validation/attachments/${attachmentId}/download`, filename ?? "validation-attachment"),
+  modelValidationIssuances: (changeId: string) => request<ModelValidationReportIssuance[]>(`/model-governance/changes/${changeId}/validation-issuances`),
+  issueModelValidationReport: (changeId: string) => request<ModelValidationReportIssuance>(`/model-governance/changes/${changeId}/validation-issuances`, { method: "POST" }),
+  revokeModelValidationReport: (issuanceId: string, rowVersion: number, reason: string) => request<ModelValidationReportIssuance>(`/model-governance/validation-issuances/${issuanceId}/revoke`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  reissueModelValidationReport: (issuanceId: string, rowVersion: number, reason: string) => request<ModelValidationReportIssuance>(`/model-governance/validation-issuances/${issuanceId}/reissue`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  downloadModelValidationOfflinePackage: (issuanceId: string) => download(`/model-governance/validation-issuances/${issuanceId}/offline-package`, `model-validation-${issuanceId}-verification.json`),
   modelValidation: (templateKey: string, candidateChangeId?: string) => request<ModelValidationReport>(`/model-governance/validation?template_key=${encodeURIComponent(templateKey)}${candidateChangeId ? `&candidate_change_id=${encodeURIComponent(candidateChangeId)}` : ""}`),
   createModelChange: (payload: { template_key: string; candidate_version: string; change_reason: string; weights: Record<string, number>; thresholds: Record<string, number>; strong_rules: StrongRule[]; strategy_mapping: Array<Record<string, string | number>>; indicator_selection: Array<{ indicator_id: string; weight: number; enabled: boolean }>; risk_screening_policy: RiskScreeningPolicy; scorecard_id?: string | null; scorecard_validation_run_id?: string | null }) =>
     request<ModelChangeRecord>("/model-governance/changes", { method: "POST", body: JSON.stringify(payload) }),
@@ -312,9 +511,89 @@ export const api = {
     request<ModelChangeRecord>(`/model-governance/changes/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
   reviewModelChange: (id: string, rowVersion: number, decision: "publish" | "reject", comment: string) =>
     request<ModelChangeRecord>(`/model-governance/changes/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  reviewSupervisedValidation: (id: string, payload: { expected_row_version: number; expected_binding_hash: string; decision: "approve" | "reject"; risk_level: "low" | "medium" | "high"; opinion: string; report_template_version?: string; attachments?: Array<{ attachment_id?: string; name: string; reference: string; sha256: string }> }) =>
+    request<ModelChangeRecord>(`/model-governance/changes/${id}/supervised-validation/review`, { method: "POST", body: JSON.stringify(payload) }),
   modelReleases: (templateKey: string) => request<ModelReleaseRecord[]>(`/model-governance/releases?template_key=${encodeURIComponent(templateKey)}`),
   rollbackModelRelease: (id: string, comment: string) =>
     request<ModelReleaseRecord>(`/model-governance/releases/${id}/rollback`, { method: "POST", body: JSON.stringify({ comment }) }),
+  tenantRollouts: (modelKey?: string) => request<TenantRolloutPolicy[]>(`/model-governance/rollouts${modelKey ? `?model_key=${encodeURIComponent(modelKey)}` : ""}`),
+  createTenantRollout: (payload: { name: string; comparison_run_id: string; routing_key_field: "counterparty_id"; traffic_basis_points: number; observation_window_minutes: number; min_sample_size: number; thresholds: TenantRolloutPolicy["thresholds"]; starts_at: string; ends_at: string; reason: string }) =>
+    request<TenantRolloutPolicy>("/model-governance/rollouts", { method: "POST", body: JSON.stringify(payload) }),
+  submitTenantRollout: (id: string, rowVersion: number, reason: string) => request<TenantRolloutPolicy>(`/model-governance/rollouts/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  reviewTenantRollout: (id: string, rowVersion: number, decision: "approve" | "reject", comment: string) => request<TenantRolloutPolicy>(`/model-governance/rollouts/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  changeTenantRolloutStatus: (id: string, rowVersion: number, action: "activate" | "pause" | "resume" | "rollback" | "complete", reason: string) => request<TenantRolloutPolicy>(`/model-governance/rollouts/${id}/status`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, action, reason }) }),
+  restartTenantRolloutAfterRelease: (id: string, rowVersion: number, modelChangeId: string, reason: string) => request<{ previous_policy_id: string; model_change_id: string; release_id: string; traffic_changed: false; policy: TenantRolloutPolicy }>(`/model-governance/rollouts/${id}/restart-after-release`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, model_change_id: modelChangeId, reason }) }),
+  tenantRolloutRoutes: (id: string) => request<TenantRoutingDecision[]>(`/model-governance/rollouts/${id}/routes`),
+  tenantRolloutEvaluations: (id: string) => request<TenantRolloutEvaluation[]>(`/model-governance/rollouts/${id}/evaluations`),
+  evaluateTenantRollout: (id: string) => request<TenantRolloutEvaluation>(`/model-governance/rollouts/${id}/evaluate`, { method: "POST" }),
+  tenantRolloutScans: () => request<TenantRolloutScan[]>("/model-governance/rollouts/scans"),
+  scanTenantRollouts: () => request<{ idempotent: boolean; run: TenantRolloutScan }>("/model-governance/rollouts/scan", { method: "POST" }),
+  actOnTenantRolloutIncident: (id: string, rowVersion: number, action: "acknowledge" | "request_resolution" | "approve_resolution", reason: string) =>
+    request<TenantRolloutPolicy>(`/model-governance/rollouts/${id}/incident`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, action, reason }) }),
+  outcomeLabelDefinitions: (publishedOnly = false) => request<TenantOutcomeLabelDefinition[]>(`/model-governance/outcome-label-definitions${publishedOnly ? "?published_only=true" : ""}`),
+  createOutcomeLabelDefinition: (payload: { code: string; name: string; description: string; event_type: "default" | "delinquency" | "loss" | "recovery"; event_threshold: Record<string, unknown>; observation_window_days: number; maturity_grace_days: number; source_priorities: Array<{ source: string; priority: number }>; applicable_model_keys: string[]; require_loss_amount: boolean; require_exposure_amount: boolean }) =>
+    request<TenantOutcomeLabelDefinition>("/model-governance/outcome-label-definitions", { method: "POST", body: JSON.stringify(payload) }),
+  submitOutcomeLabelDefinition: (id: string, rowVersion: number, note: string) =>
+    request<TenantOutcomeLabelDefinition>(`/model-governance/outcome-label-definitions/${id}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, note }) }),
+  reviewOutcomeLabelDefinition: (id: string, rowVersion: number, decision: "approve" | "reject", comment: string) =>
+    request<TenantOutcomeLabelDefinition>(`/model-governance/outcome-label-definitions/${id}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  tenantRolloutOutcomes: (id: string) => request<TenantOutcomeLabel[]>(`/model-governance/rollouts/${id}/outcomes`),
+  createTenantRolloutOutcome: (id: string, payload: { source: string; external_label_id: string; routing_decision_id: string; counterparty_id: string; label_definition_id: string; observed_event: boolean; observation_end: string; loss_amount?: number; exposure_amount?: number; evidence_reference: string }) =>
+    request<TenantOutcomeLabel>(`/model-governance/rollouts/${id}/outcomes`, { method: "POST", body: JSON.stringify(payload) }),
+  tenantRolloutOutcomeImports: (id: string) => request<TenantOutcomeImport[]>(`/model-governance/rollouts/${id}/outcome-imports`),
+  createTenantRolloutOutcomeImport: (id: string, payload: { import_key: string; source: string; label_definition_id: string; expected_count: number; outcomes: Array<{ external_label_id: string; routing_decision_id: string; counterparty_id: string; observed_event: boolean; observation_end: string; loss_amount?: number; exposure_amount?: number; evidence_reference: string }> }) =>
+    request<TenantOutcomeImport>(`/model-governance/rollouts/${id}/outcome-imports`, { method: "POST", body: JSON.stringify(payload) }),
+  uploadTenantRolloutOutcomeCsv: (id: string, payload: { file: File; importKey: string; source: string; labelDefinitionId: string; expectedCount: number }) => {
+    const form = new FormData();
+    form.append("file", payload.file);
+    form.append("import_key", payload.importKey);
+    form.append("source", payload.source);
+    form.append("label_definition_id", payload.labelDefinitionId);
+    form.append("expected_count", String(payload.expectedCount));
+    return request<TenantOutcomeImport & { file: { filename: string; sha256: string; byte_count: number; row_count: number } }>(`/model-governance/rollouts/${id}/outcome-imports/csv`, { method: "POST", body: form });
+  },
+  verifyTenantRolloutOutcome: (policyId: string, labelId: string, rowVersion: number, decision: "verify" | "reject", note: string) =>
+    request<TenantOutcomeLabel>(`/model-governance/rollouts/${policyId}/outcomes/${labelId}/verify`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, note }) }),
+  correctTenantRolloutOutcome: (policyId: string, labelId: string, payload: { expected_row_version: number; external_label_id: string; observed_event: boolean; observation_end: string; loss_amount?: number; exposure_amount?: number; evidence_reference: string; reason: string }) =>
+    request<TenantOutcomeLabel>(`/model-governance/rollouts/${policyId}/outcomes/${labelId}/correct`, { method: "POST", body: JSON.stringify(payload) }),
+  tenantSupervisedEvaluations: (id: string) => request<TenantSupervisedEvaluation[]>(`/model-governance/rollouts/${id}/supervised-evaluations`),
+  tenantMonitoringRuns: (id: string) => request<TenantMonitoringRun[]>(`/model-governance/rollouts/${id}/tenant-monitoring-runs`),
+  tenantMonitoringGate: (policyId: string, runId: string) => request<NonNullable<TenantMonitoringRun["monitoring_gate"]>>(`/model-governance/rollouts/${policyId}/tenant-monitoring-runs/${runId}/gate`),
+  scanTenantMonitoringGates: () => request<{ scanned_count: number; accepted_count: number; at_risk_count: number; blocked_count: number; stale_count: number; notifications_created: number; notifications_resolved: number; scanned_at: string }>("/model-governance/rollouts/monitoring-gates/scan", { method: "POST" }),
+  generateTenantMonitoringRuns: (id: string, labelDefinitionId: string, asOf?: string) =>
+    request<{ runs: TenantMonitoringRun[]; idempotent: boolean }>(`/model-governance/rollouts/${id}/tenant-monitoring-runs/generate`, { method: "POST", body: JSON.stringify({ label_definition_id: labelDefinitionId, as_of: asOf }) }),
+  createTenantMonitoringRun: (id: string, payload: { run_key: string; model_key: string; model_version: string; observed_from: string; observed_to: string; dataset_id: string; evidence_level: "supervised" | "non_supervised"; status?: "completed" | "failed" | "cancelled"; label_definition_id?: string; label_definition_version?: number; label_definition_hash?: string; label_watermark?: Record<string, unknown>; monitoring?: Record<string, unknown> }) =>
+    request<TenantMonitoringRun>(`/model-governance/rollouts/${id}/tenant-monitoring-runs`, { method: "POST", body: JSON.stringify(payload) }),
+  submitTenantMonitoringRun: (policyId: string, runId: string, rowVersion: number, note: string) =>
+    request<TenantMonitoringRun>(`/model-governance/rollouts/${policyId}/tenant-monitoring-runs/${runId}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, note }) }),
+  reviewTenantMonitoringRun: (policyId: string, runId: string, rowVersion: number, decision: "approve" | "reject", comment: string) =>
+    request<TenantMonitoringRun>(`/model-governance/rollouts/${policyId}/tenant-monitoring-runs/${runId}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, comment }) }),
+  retractTenantMonitoringRun: (policyId: string, runId: string, rowVersion: number, reason: string) =>
+    request<TenantMonitoringRun>(`/model-governance/rollouts/${policyId}/tenant-monitoring-runs/${runId}/retract`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  tenantMonitoringRunDiff: (policyId: string, runId: string, againstRunId?: string) => request<{ diff_hash: string; base_run_id: string; against_run_id: string; comparison: Record<string, unknown> }>(`/model-governance/rollouts/${policyId}/tenant-monitoring-runs/${runId}/diff${againstRunId ? `?against_run_id=${encodeURIComponent(againstRunId)}` : ""}`),
+  tenantMonitoringDiffCases: (policyId: string) => request<TenantMonitoringDiffCase[]>(`/model-governance/rollouts/${policyId}/monitoring-diff-cases`),
+  createTenantMonitoringDiffCase: (policyId: string, payload: { base_run_id: string; against_run_id: string; reason: string; severity?: "info" | "warning" | "critical"; due_at?: string }) =>
+    request<TenantMonitoringDiffCase>(`/model-governance/rollouts/${policyId}/monitoring-diff-cases`, { method: "POST", body: JSON.stringify(payload) }),
+  assignTenantMonitoringDiffCase: (policyId: string, caseId: string, rowVersion: number, reason: string) =>
+    request<TenantMonitoringDiffCase>(`/model-governance/rollouts/${policyId}/monitoring-diff-cases/${caseId}/assign`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  recomputeTenantMonitoringDiffCase: (policyId: string, caseId: string, rowVersion: number, reason: string) =>
+    request<TenantMonitoringDiffCase>(`/model-governance/rollouts/${policyId}/monitoring-diff-cases/${caseId}/recompute`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, reason }) }),
+  disposeTenantMonitoringDiffCase: (policyId: string, caseId: string, rowVersion: number, disposition: NonNullable<TenantMonitoringDiffCase["disposition"]>, conclusion: string) =>
+    request<TenantMonitoringDiffCase>(`/model-governance/rollouts/${policyId}/monitoring-diff-cases/${caseId}/dispose`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, disposition, conclusion }) }),
+  tenantMonitoringDiffSlaDashboard: (templateKey?: string) =>
+    request<MonitoringDiffSlaDashboard>(`/model-governance/rollouts/monitoring-diff-cases/sla-dashboard${templateKey ? `?template_key=${encodeURIComponent(templateKey)}` : ""}`),
+  scanTenantMonitoringDiffSla: () =>
+    request<{ scanned_at: string; items_scanned: number; due_soon: number; overdue: number; escalated: number; notifications_created: number; notifications_resolved: number }>("/model-governance/rollouts/monitoring-diff-cases/sla-scan", { method: "POST" }),
+  tenantSupervisedVerificationReport: (policyId: string, evaluationId: string) => request<TenantSupervisedVerificationReport>(`/model-governance/rollouts/${policyId}/supervised-evaluations/${evaluationId}/verification-report`),
+  downloadTenantSupervisedVerificationReport: (policyId: string, evaluationId: string) => download(`/model-governance/rollouts/${policyId}/supervised-evaluations/${evaluationId}/verification-report.csv`, `supervised-verification-${evaluationId.slice(0, 8)}.csv`),
+  evaluateTenantSupervisedOutcomes: (id: string, payload: { evaluation_as_of?: string; label_definition_id?: string; tenant_monitoring_run_id?: string; min_mature_samples: number; min_events: number; min_non_events: number; min_reliable_samples_per_arm: number; high_risk_threshold: number; bootstrap_resamples: number }) =>
+    request<TenantSupervisedEvaluation>(`/model-governance/rollouts/${id}/supervised-evaluate`, { method: "POST", body: JSON.stringify(payload) }),
+  submitTenantSupervisedEvaluation: (policyId: string, evaluationId: string, rowVersion: number, note: string) =>
+    request<TenantSupervisedEvaluation>(`/model-governance/rollouts/${policyId}/supervised-evaluations/${evaluationId}/submit`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, note }) }),
+  reviewTenantSupervisedEvaluation: (policyId: string, evaluationId: string, rowVersion: number, decision: "approve" | "reject", governanceDecision: "retain_champion" | "promote_candidate" | "reject_candidate" | "continue_observation" | null, comment: string) =>
+    request<TenantSupervisedEvaluation>(`/model-governance/rollouts/${policyId}/supervised-evaluations/${evaluationId}/review`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion, decision, governance_decision: governanceDecision, comment }) }),
+  createTenantSupervisedUpgradeDraft: (policyId: string, evaluationId: string, evidenceHash: string, changeReason: string) =>
+    request<TenantSupervisedUpgradeDecision>(`/model-governance/rollouts/${policyId}/supervised-evaluations/${evaluationId}/create-change-draft`, { method: "POST", body: JSON.stringify({ expected_evidence_hash: evidenceHash, change_reason: changeReason }) }),
   modelMonitoringSummary: (templateKey: string) => request<MonitoringSummary>(`/model-governance/monitoring-summary?template_key=${encodeURIComponent(templateKey)}`),
   modelOutcomes: (templateKey: string) => request<ModelOutcome[]>(`/model-governance/outcomes?template_key=${encodeURIComponent(templateKey)}`),
   createModelOutcome: (payload: ModelOutcomePayload) =>
@@ -415,7 +694,7 @@ export const api = {
   linkDocumentToCase: (documentId: string, caseId: string, expectedRowVersion: number) =>
     request<DocumentRecord>(`/documents/${documentId}/case`, { method: "POST", body: JSON.stringify({ case_id: caseId, expected_row_version: expectedRowVersion }) }),
   downloadDocument: async (document: DocumentRecord) => {
-    const response = await fetch(`${API_BASE}/documents/${document.id}/download`, {
+    const response = await fetchApi(`/documents/${document.id}/download`, {
       headers: { Authorization: `Bearer ${getToken()}` },
     });
     if (!response.ok) throw new Error(`下载失败（${response.status}）`);
@@ -429,6 +708,15 @@ export const api = {
   },
   notifications: (unreadOnly = false) => request<NotificationRecord[]>(`/notifications?unread_only=${unreadOnly}`),
   markNotificationRead: (id: string) => request<NotificationRecord>(`/notifications/${id}/read`, { method: "POST" }),
+  notificationChannels: () => request<TenantNotificationChannel[]>("/notifications/channels"),
+  createNotificationChannel: (payload: TenantNotificationChannelPayload) => request<TenantNotificationChannel>("/notifications/channels", { method: "POST", body: JSON.stringify(payload) }),
+  updateNotificationChannel: (id: string, rowVersion: number, payload: TenantNotificationChannelPayload) => request<TenantNotificationChannel>(`/notifications/channels/${id}`, { method: "PUT", body: JSON.stringify({ ...payload, expected_row_version: rowVersion }) }),
+  testNotificationChannel: (id: string, rowVersion: number) => request<TenantNotificationChannelTestResult>(`/notifications/channels/${id}/test`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
+  notificationDeliveries: (status?: TenantNotificationDeliveryStatus) => request<TenantNotificationDeliveryLedger>(`/notifications/deliveries${status ? `?status=${status}` : ""}`),
+  notificationDeliveryOperations: (windowHours = 24) => request<NotificationDeliveryOperations>(`/notifications/deliveries/operations?window_hours=${windowHours}`),
+  dispatchNotificationDeliveries: (limit = 100) => request<TenantNotificationDispatchResult>("/notifications/deliveries/dispatch", { method: "POST", body: JSON.stringify({ limit }) }),
+  retryNotificationDelivery: (id: string, rowVersion: number) => request<TenantNotificationDelivery>(`/notifications/deliveries/${id}/retry`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
+  redeliverNotificationDelivery: (id: string, rowVersion: number) => request<TenantNotificationDelivery>(`/notifications/deliveries/${id}/redeliver`, { method: "POST", body: JSON.stringify({ expected_row_version: rowVersion }) }),
   personalTasks: () => request<PersonalTaskQueue>("/operations/my-tasks"),
   assignPersonalTask: (taskType: "approval" | "correction", taskId: string, action: "claim" | "renew" | "release", expectedRowVersion: number) =>
     request<PersonalTaskAssignment>(`/operations/my-tasks/${taskType}/${taskId}/assignment`, { method: "POST", body: JSON.stringify({ action, expected_row_version: expectedRowVersion }) }),

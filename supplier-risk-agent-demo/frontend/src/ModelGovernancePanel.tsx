@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { CreditCalibrationCandidate, DecisionPipelineDefinition, EnterpriseRiskIndicator, ModelChangeRecord, ModelDetail, ModelGovernanceNotification, ModelMonitoringRun, ModelMonitoringSchedule, ModelOutcome, ModelOutcomeImport, ModelReleaseRecord, ModelValidationReport, MonitoringIssue, MonitoringSummary, RiskScreeningPolicy, RiskScreeningPolicyRule, RuleCenterReplaySnapshot, ScorecardAsset, ScorecardDevelopmentRun, StrongRule } from "./types";
+import TenantRolloutPanel from "./TenantRolloutPanel";
+import NotificationDeliveryPanel from "./NotificationDeliveryPanel";
+import type { ModelReleaseApprovalDashboard, ModelRiskAcceptance, ModelRiskAcceptanceRole, ModelRiskCatalog, ModelRiskCatalogResponse, ModelRiskPolicy, ModelRiskReacceptance, ModelRiskReacceptanceReviewQueueItem, ModelRiskReviewAssignmentHistory, ModelRiskReviewDelegation, ModelRiskReviewMember, ModelRiskReviewSavedView, ModelRiskReviewSlaTrend, ModelRiskReviewWorkbench, ModelRiskUnifiedReviewQueueItem, TenantSupervisedEvaluation } from "./types";
+import type { ModelValidationAttachment } from "./types";
 
 
 type Notice = { kind: "error" | "success"; text: string };
@@ -11,7 +15,7 @@ const statusLabels: Record<string, string> = { draft: "草稿", pending_review: 
 const riskMetricLabels: Record<RiskScreeningPolicyRule["metric"], string> = { normalized_score: "筛查标准分", completeness: "数据完整度", critical_indicator_count: "关键低分指标数", missing_count: "缺失指标数" };
 
 
-export default function ModelGovernancePanel({ model, modelKey, canManage, canReview, onPublished, onNotice }: { model: ModelDetail; modelKey: string; canManage: boolean; canReview: boolean; onPublished: () => Promise<void>; onNotice: (notice: Notice) => void }) {
+export default function ModelGovernancePanel({ model, modelKey, currentSubject, currentRoles, canManage, canReview, onPublished, onNotice }: { model: ModelDetail; modelKey: string; currentSubject: string; currentRoles: string[]; canManage: boolean; canReview: boolean; onPublished: () => Promise<void>; onNotice: (notice: Notice) => void }) {
   const [changes, setChanges] = useState<ModelChangeRecord[]>([]);
   const [releases, setReleases] = useState<ModelReleaseRecord[]>([]);
   const [validation, setValidation] = useState<ModelValidationReport | null>(null);
@@ -27,6 +31,37 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
   const [scorecards, setScorecards] = useState<ScorecardAsset[]>([]);
   const [scorecardId, setScorecardId] = useState("");
   const [scorecardValidationRuns, setScorecardValidationRuns] = useState<ScorecardDevelopmentRun[]>([]);
+  const [riskCatalog, setRiskCatalog] = useState<ModelRiskCatalog[]>([]);
+  const [riskCatalogMeta, setRiskCatalogMeta] = useState<Pick<ModelRiskCatalogResponse, "source" | "version" | "config_hash">>({ source: "platform_default", version: "model-risk-catalog-v1", config_hash: "" });
+  const [riskPolicies, setRiskPolicies] = useState<ModelRiskPolicy[]>([]);
+  const [riskAcceptances, setRiskAcceptances] = useState<ModelRiskAcceptance[]>([]);
+  const [unifiedRiskReviewQueue, setUnifiedRiskReviewQueue] = useState<ModelRiskUnifiedReviewQueueItem[]>([]);
+  const [reviewWorkbench, setReviewWorkbench] = useState<ModelRiskReviewWorkbench | null>(null);
+  const [reviewViews, setReviewViews] = useState<ModelRiskReviewSavedView[]>([]);
+  const [reviewSlaTrend, setReviewSlaTrend] = useState<ModelRiskReviewSlaTrend | null>(null);
+  const [reviewMembers, setReviewMembers] = useState<ModelRiskReviewMember[]>([]);
+  const [reviewDelegations, setReviewDelegations] = useState<ModelRiskReviewDelegation[]>([]);
+  const [reviewAssignmentHistory, setReviewAssignmentHistory] = useState<ModelRiskReviewAssignmentHistory | null>(null);
+  const [reviewOwnership, setReviewOwnership] = useState<"all" | "mine" | "unassigned">("all");
+  const [reviewSource, setReviewSource] = useState("");
+  const [reviewPriority, setReviewPriority] = useState("");
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewSelectedIds, setReviewSelectedIds] = useState<string[]>([]);
+  const [reviewViewName, setReviewViewName] = useState("");
+  const [riskReacceptances, setRiskReacceptances] = useState<ModelRiskReacceptance[]>([]);
+  const [reacceptanceReviewQueue, setReacceptanceReviewQueue] = useState<ModelRiskReacceptanceReviewQueueItem[]>([]);
+  const [riskPolicyDraft, setRiskPolicyDraft] = useState<ModelRiskCatalog[]>([]);
+  const [riskGovernanceNote, setRiskGovernanceNote] = useState("建立企业评级、授信、额度与账期模型的租户风险治理基线");
+  const [reacceptanceEvidenceReference, setReacceptanceEvidenceReference] = useState("monitoring-run:manual-review");
+  const [reacceptanceEvidenceSummary, setReacceptanceEvidenceSummary] = useState("运行期数据质量、稳定性和人工复核闭环已完成独立核验，未发现超出当前风险政策边界的异常。");
+  const [reacceptanceObservedFrom, setReacceptanceObservedFrom] = useState("2026-08-01");
+  const [reacceptanceObservedTo, setReacceptanceObservedTo] = useState("2026-09-22");
+  const [reacceptanceMonitoringRunId, setReacceptanceMonitoringRunId] = useState("");
+  const [reacceptanceMonitoringEvidenceHash, setReacceptanceMonitoringEvidenceHash] = useState("");
+  const [reacceptanceEvaluations, setReacceptanceEvaluations] = useState<TenantSupervisedEvaluation[]>([]);
+  const [reacceptanceEvaluationId, setReacceptanceEvaluationId] = useState("");
+  const [validationAttachments, setValidationAttachments] = useState<Record<string, ModelValidationAttachment[]>>({});
+  const [releaseDashboard, setReleaseDashboard] = useState<ModelReleaseApprovalDashboard | null>(null);
   const [scorecardValidationRunId, setScorecardValidationRunId] = useState("");
   const [comparisonSnapshotId, setComparisonSnapshotId] = useState("");
   const [championPipeline, setChampionPipeline] = useState("");
@@ -44,6 +79,7 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
   const [indicatorSearch, setIndicatorSearch] = useState("");
   const [indicatorCategory, setIndicatorCategory] = useState("");
   const [reviewComment, setReviewComment] = useState("组合影响与规则边界已复核");
+  const [supervisedRiskLevel, setSupervisedRiskLevel] = useState<"low" | "medium" | "high">("medium");
   const [editingId, setEditingId] = useState("");
   const [busy, setBusy] = useState("");
   const [loading, setLoading] = useState(true);
@@ -64,7 +100,7 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [changeRows, releaseRows, validationReport, monitoring, outcomeRows, issueRows, runRows, governanceNoticeRows, importRows, scheduleRows, poolResponse, snapshotRows, pipelineRows, scorecardRows, scorecardDevelopmentRows] = await Promise.all([api.modelChanges(modelKey), api.modelReleases(modelKey), api.modelValidation(modelKey), api.modelMonitoringSummary(modelKey), api.modelOutcomes(modelKey), api.monitoringIssues(modelKey), api.modelMonitoringRuns(modelKey), api.governanceNotifications(), api.outcomeImports(modelKey), api.monitoringSchedules(modelKey), api.indicatorPool(), api.ruleCenterReplaySnapshots(), api.decisionPipelines(), api.scorecards(), api.scorecardDevelopmentRuns()]);
+      const [changeRows, releaseRows, validationReport, monitoring, outcomeRows, issueRows, runRows, governanceNoticeRows, importRows, scheduleRows, poolResponse, snapshotRows, pipelineRows, scorecardRows, scorecardDevelopmentRows, riskCatalogResponse, riskPolicyRows, riskAcceptanceRows, unifiedRiskReviewRows, riskReacceptanceRows, reacceptanceQueueRows, dashboardResponse] = await Promise.all([api.modelChanges(modelKey), api.modelReleases(modelKey), api.modelValidation(modelKey), api.modelMonitoringSummary(modelKey), api.modelOutcomes(modelKey), api.monitoringIssues(modelKey), api.modelMonitoringRuns(modelKey), api.governanceNotifications(), api.outcomeImports(modelKey), api.monitoringSchedules(modelKey), api.indicatorPool(), api.ruleCenterReplaySnapshots(), api.decisionPipelines(), api.scorecards(), api.scorecardDevelopmentRuns(), api.modelRiskCatalog(), api.modelRiskPolicies(), api.modelRiskAcceptances(), api.modelRiskUnifiedReviewQueue(modelKey), api.modelRiskReacceptances(), api.modelRiskReacceptanceReviewQueue(), api.modelReleaseApprovalDashboard(modelKey).catch(() => null)]);
       setChanges(changeRows);
       setReleases(releaseRows);
       setValidation(validationReport);
@@ -80,6 +116,41 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
       setPipelines(pipelineRows.filter((item) => item.is_active));
       setScorecards(scorecardRows);
       setScorecardValidationRuns(scorecardDevelopmentRows);
+      setRiskCatalog(riskCatalogResponse.items);
+      setRiskCatalogMeta({ source: riskCatalogResponse.source, version: riskCatalogResponse.version, config_hash: riskCatalogResponse.config_hash });
+      setRiskPolicies(riskPolicyRows);
+      setRiskAcceptances(riskAcceptanceRows);
+      setUnifiedRiskReviewQueue(unifiedRiskReviewRows);
+      const [workbenchResponse, viewRows, trendResponse, memberRows, delegationRows] = await Promise.all([
+        api.modelRiskReviewWorkbench({ templateKey: modelKey, ownership: reviewOwnership, source: reviewSource || undefined, priority: reviewPriority || undefined, query: reviewQuery || undefined }).catch(() => null),
+        api.modelRiskReviewViews().catch(() => []),
+        api.modelRiskReviewSlaTrends(30, modelKey).catch(() => null),
+        api.modelRiskReviewMembers().catch(() => []),
+        api.modelRiskReviewDelegations().catch(() => []),
+      ]);
+      if (workbenchResponse) {
+        setReviewWorkbench(workbenchResponse);
+        setUnifiedRiskReviewQueue(workbenchResponse.items);
+      }
+      setReviewViews(viewRows);
+      setReviewSlaTrend(trendResponse);
+      setReviewMembers(memberRows);
+      setReviewDelegations(delegationRows);
+      setRiskReacceptances(riskReacceptanceRows);
+      setReacceptanceReviewQueue(reacceptanceQueueRows);
+      const rolloutRows = await api.tenantRollouts(modelKey).catch(() => []);
+      const eligibleRollouts = rolloutRows.filter((rollout) => releaseRows.some((release) => release.is_active && (
+        (rollout.champion.model_key === release.template_key && rollout.champion.model_version === release.model_version)
+        || (rollout.challenger.model_key === release.template_key && rollout.challenger.model_version === release.model_version)
+      )));
+      const evaluationRows = await Promise.all(eligibleRollouts.map((rollout) => api.tenantSupervisedEvaluations(rollout.id).catch(() => [])));
+      const eligibleEvaluations = evaluationRows.flat().filter((item) => item.status === "approved" && item.evidence_level === "supervised" && item.label_definition_id);
+      setReacceptanceEvaluations(eligibleEvaluations);
+      setReacceptanceEvaluationId((current) => eligibleEvaluations.some((item) => item.id === current) ? current : "");
+      setRiskPolicyDraft((current) => current.length ? current : riskCatalogResponse.items.map((item) => ({ ...item, basis: [...item.basis], acceptance_roles: [...item.acceptance_roles], regulatory_mapping: [...item.regulatory_mapping], required_evidence: [...item.required_evidence] })));
+      setReleaseDashboard(dashboardResponse);
+      const attachmentRows = await Promise.all(changeRows.map(async (change) => [change.id, await api.validationAttachments(change.id).catch(() => [])] as const));
+      setValidationAttachments(Object.fromEntries(attachmentRows));
       setComparisonSnapshotId((current) => current || snapshotRows[0]?.id || "");
       if (scheduleRows[0]) {
         setScheduleCadence(scheduleRows[0].cadence);
@@ -90,7 +161,7 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     } catch (error) {
       onNotice({ kind: "error", text: error instanceof Error ? error.message : "模型治理记录加载失败" });
     } finally { setLoading(false); }
-  }, [modelKey, onNotice]);
+  }, [modelKey, onNotice, reviewOwnership, reviewPriority, reviewQuery, reviewSource]);
 
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => {
@@ -104,6 +175,98 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     setScorecardValidationRunId("");
     setChangeReason("");
   }, [model]);
+
+  function updateRiskPolicyLevel(level: ModelRiskCatalog["level"], patch: Partial<ModelRiskCatalog>) {
+    setRiskPolicyDraft((items) => items.map((item) => item.level === level ? { ...item, ...patch } : item));
+  }
+
+  async function createRiskPolicy() {
+    if (riskGovernanceNote.trim().length < 10) return onNotice({ kind: "error", text: "请填写至少 10 个字的政策变更原因" });
+    setBusy("risk-policy-create");
+    try {
+      await api.createModelRiskPolicy({
+        name: `企业模型风险政策 v${(riskPolicies[0]?.version ?? 0) + 1}`,
+        description: "适用于企业评级、授信额度、准入与账期模型的风险分级、接受和定期复核。",
+        levels: riskPolicyDraft,
+        reason: riskGovernanceNote.trim(),
+      });
+      await reload();
+      onNotice({ kind: "success", text: "租户模型风险政策草稿已创建，请提交独立复核" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "风险政策创建失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function actOnRiskPolicy(policy: ModelRiskPolicy, action: "submit" | "publish" | "reject") {
+    if (riskGovernanceNote.trim().length < 5) return onNotice({ kind: "error", text: "请填写政策提交或复核说明" });
+    setBusy(`risk-policy-${policy.id}`);
+    try {
+      if (action === "submit") await api.submitModelRiskPolicy(policy.id, policy.row_version, riskGovernanceNote.trim());
+      else await api.reviewModelRiskPolicy(policy.id, policy.row_version, action, riskGovernanceNote.trim());
+      setRiskPolicyDraft([]);
+      await reload();
+      onNotice({ kind: action === "reject" ? "error" : "success", text: action === "submit" ? "风险政策已提交独立复核" : action === "publish" ? "风险政策已发布，存量接受结论已按版本治理" : "风险政策已驳回" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "风险政策操作失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function actOnRiskAcceptance(changeId: string, action: "create" | "sign" | "revoke", acceptance?: ModelRiskAcceptance | null, role?: ModelRiskAcceptanceRole) {
+    if (riskGovernanceNote.trim().length < 5) return onNotice({ kind: "error", text: "请填写风险接受依据或签署意见" });
+    setBusy(`risk-acceptance-${changeId}`);
+    try {
+      if (action === "create") await api.createModelRiskAcceptance(changeId, riskGovernanceNote.trim());
+      if (action === "sign" && acceptance && role) await api.signModelRiskAcceptance(acceptance.id, acceptance.row_version, role, riskGovernanceNote.trim());
+      if (action === "revoke" && acceptance) await api.revokeModelRiskAcceptance(acceptance.id, acceptance.row_version, riskGovernanceNote.trim());
+      await reload();
+      onNotice({ kind: action === "revoke" ? "error" : "success", text: action === "create" ? "风险接受台账已创建，请按要求席位签署" : action === "sign" ? "风险接受席位已签署" : "风险接受结论已撤销" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "风险接受操作失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function scanRiskReviews() {
+    setBusy("risk-review-scan");
+    try {
+      const result = await api.scanModelRiskReviews();
+      await reload();
+      onNotice({ kind: "success", text: `复核扫描完成：${result.items_scanned} 条临期或逾期，新增 ${result.notifications_created} 条站内提醒` });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "复核扫描失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function scanReacceptanceReviews() {
+    setBusy("reacceptance-review-scan");
+    try {
+      const result = await api.scanModelRiskReacceptanceReviews();
+      await reload();
+      onNotice({ kind: "success", text: `在役复核扫描完成：${result.items_scanned} 条临期或逾期，新增 ${result.notifications_created} 条定向提醒` });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "在役复核扫描失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function downloadReacceptanceAuditPackage(id: string) {
+    try { await api.downloadModelRiskReacceptanceAuditPackage(id); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "再接受审计包下载失败" }); }
+  }
+
+  async function downloadReacceptanceRegulatoryReport(id: string) {
+    try { await api.downloadModelRiskReacceptanceRegulatoryReport(id); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "监管报送视图下载失败" }); }
+  }
+
+  async function actOnRiskReacceptance(releaseId: string, action: "create" | "sign" | "revoke", reacceptance?: ModelRiskReacceptance | null, role?: ModelRiskAcceptanceRole) {
+    if (riskGovernanceNote.trim().length < 10) return onNotice({ kind: "error", text: "请填写再接受依据或签署意见" });
+    setBusy(`risk-reacceptance-${releaseId}`);
+    try {
+      if (action === "create") {
+        const evaluation = reacceptanceEvaluations.find((item) => item.id === reacceptanceEvaluationId);
+        await api.createModelRiskReacceptance(releaseId, { rationale: riskGovernanceNote.trim(), observed_from: reacceptanceObservedFrom, observed_to: reacceptanceObservedTo, evidence_reference: reacceptanceEvidenceReference.trim(), evidence_summary: reacceptanceEvidenceSummary.trim(), monitoring_run_id: reacceptanceMonitoringRunId || null, monitoring_evidence_hash: reacceptanceMonitoringEvidenceHash || null, supervised_evaluation_id: evaluation?.id ?? null, supervised_evidence_hash: evaluation?.evidence_hash ?? null });
+      }
+      if (action === "sign" && reacceptance && role) await api.signModelRiskReacceptance(reacceptance.id, reacceptance.row_version, role, riskGovernanceNote.trim());
+      if (action === "revoke" && reacceptance) await api.revokeModelRiskReacceptance(reacceptance.id, reacceptance.row_version, riskGovernanceNote.trim());
+      await reload();
+      onNotice({ kind: action === "revoke" ? "error" : "success", text: action === "create" ? "在役模型再接受已创建，请完成席位签署" : action === "sign" ? "在役再接受席位已签署" : "在役再接受已撤销" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "在役再接受操作失败" }); }
+    finally { setBusy(""); }
+  }
 
   async function createDraft() {
     if (!changeReason.trim()) return onNotice({ kind: "error", text: "请填写不少于 5 个字的变更原因" });
@@ -180,6 +343,59 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
       if (decision === "publish") await onPublished();
       onNotice({ kind: "success", text: decision === "publish" ? `${change.candidate_version} 已发布生效` : `${change.candidate_version} 已驳回` });
     } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "模型评审失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function reviewSupervised(change: ModelChangeRecord, decision: "approve" | "reject") {
+    const evidence = change.supervised_validation_evidence;
+    if (!evidence.binding_hash || reviewComment.trim().length < 10) return onNotice({ kind: "error", text: "请填写至少 10 个字的独立验证意见" });
+    setBusy(`supervised-review-${change.id}`);
+    try {
+      await api.reviewSupervisedValidation(change.id, {
+        expected_row_version: change.row_version,
+        expected_binding_hash: evidence.binding_hash,
+        decision,
+        risk_level: supervisedRiskLevel,
+        opinion: reviewComment.trim(),
+        report_template_version: "supervised-model-validation-v2",
+        attachments: (validationAttachments[change.id] ?? []).filter((item) => item.status === "active").map((item) => ({ attachment_id: item.id, name: item.name, reference: item.reference, sha256: item.sha256 })),
+      });
+      await reload();
+      onNotice({ kind: decision === "approve" ? "success" : "error", text: decision === "approve" ? "独立验证意见已批准，模型变更可进入发布审批" : "独立验证意见已驳回，模型变更保持阻断" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "独立验证意见提交失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function uploadValidationAttachment(changeId: string, file: File) {
+    setBusy(`attachment-${changeId}`);
+    try {
+      await api.uploadValidationAttachment(changeId, file);
+      await reload();
+      onNotice({ kind: "success", text: "验证附件已上传并完成哈希登记" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "验证附件上传失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function downloadValidationAttachment(item: ModelValidationAttachment) {
+    try { await api.downloadValidationAttachment(item.id, item.name); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "验证附件下载失败" }); }
+  }
+
+  async function downloadValidationOfflinePackage(issuanceId: string) {
+    try { await api.downloadModelValidationOfflinePackage(issuanceId); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "离线验签包下载失败" }); }
+  }
+
+  async function actOnValidationIssuance(changeId: string, action: "issue" | "revoke" | "reissue", issuance?: NonNullable<ModelReleaseApprovalDashboard["rows"][number]["issuance"]>) {
+    if (action !== "issue" && reviewComment.trim().length < 10) return onNotice({ kind: "error", text: "撤销或换发必须填写至少 10 个字的治理依据" });
+    setBusy(`issuance-${action}-${changeId}`);
+    try {
+      if (action === "issue") await api.issueModelValidationReport(changeId);
+      else if (action === "revoke" && issuance) await api.revokeModelValidationReport(issuance.id, issuance.row_version, reviewComment.trim());
+      else if (action === "reissue" && issuance) await api.reissueModelValidationReport(issuance.id, issuance.row_version, reviewComment.trim());
+      await reload();
+      onNotice({ kind: "success", text: action === "issue" ? "验证报告已可信签发" : action === "revoke" ? "验证报告可信资格已撤销" : "验证报告已形成换发登记" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "验证报告签发操作失败" }); }
     finally { setBusy(""); }
   }
 
@@ -291,11 +507,70 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
     finally { setBusy(""); }
   }
 
+  async function assignReviewItems(assignee: string | null, assigneeName: string | null, assignedRole: string, reason: string) {
+    if (!reviewWorkbench || reviewSelectedIds.length === 0) return onNotice({ kind: "error", text: "请先选择至少一条复核事项" });
+    setBusy("review-assign");
+    try {
+      const selected = reviewWorkbench.items.filter((item) => reviewSelectedIds.includes(item.id));
+      await api.bulkAssignModelRiskReview({
+        items: selected.map((item) => ({ item_id: item.id, expected_assignment_version: item.assignment?.row_version ?? 0, ...(item.source_row_version ? { expected_source_version: item.source_row_version } : {}) })),
+        assignee, assignee_name: assigneeName, assigned_role: assignedRole, reason,
+      });
+      setReviewSelectedIds([]);
+      await reload();
+      onNotice({ kind: "success", text: assignee ? `已更新 ${selected.length} 条模型风险复核责任` : `已撤回 ${selected.length} 条模型风险复核分派` });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "批量分派失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function saveReviewView() {
+    if (reviewViewName.trim().length < 1) return onNotice({ kind: "error", text: "请填写视图名称" });
+    setBusy("review-view");
+    try {
+      await api.createModelRiskReviewView({ name: reviewViewName.trim(), is_default: reviewViews.length === 0, filters: { ownership: reviewOwnership, source: reviewSource, priority: reviewPriority, query: reviewQuery } });
+      setReviewViewName("");
+      await reload();
+      onNotice({ kind: "success", text: "复核视图已保存" });
+    } catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "复核视图保存失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function snapshotReviewTrend() {
+    setBusy("review-snapshot");
+    try { await api.createModelRiskReviewSlaSnapshot(modelKey); await reload(); onNotice({ kind: "success", text: "SLA 趋势快照已记录" }); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "趋势快照失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function createReviewDelegation(payload: { principal_subject: string; delegate_subject: string; assigned_role: string; starts_at: string; ends_at: string; reason: string }) {
+    setBusy("review-delegation-create");
+    try { await api.createModelRiskReviewDelegation(payload); await reload(); onNotice({ kind: "success", text: "复核代理已生效，代理事项将自动进入代理人的待办" }); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "创建复核代理失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function revokeReviewDelegation(delegation: ModelRiskReviewDelegation, reason: string) {
+    setBusy(`review-delegation-${delegation.id}`);
+    try { await api.revokeModelRiskReviewDelegation(delegation.id, delegation.row_version, reason); await reload(); onNotice({ kind: "success", text: "复核代理已撤销" }); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "撤销复核代理失败" }); }
+    finally { setBusy(""); }
+  }
+
+  async function loadReviewAssignmentHistory(itemId: string) {
+    setBusy(`review-history-${itemId}`);
+    try { setReviewAssignmentHistory(await api.modelRiskReviewAssignmentHistory(itemId)); }
+    catch (error) { onNotice({ kind: "error", text: error instanceof Error ? error.message : "责任历史加载失败" }); }
+    finally { setBusy(""); }
+  }
+
   const approvedScorecardValidations = scorecardValidationRuns.filter((run) => run.scorecard_asset_id === scorecardId && run.review_status === "approved" && run.integrity_valid && run.review_integrity_valid && run.report.validation_gate?.passed);
+  const canManageNotifications = currentRoles.some((role) => ["risk_manager", "model_admin", "integration_admin", "operations", "admin"].includes(role));
 
   return <section className="panel governance-panel">
     <div className="section-title"><div><span>MODEL LIFECYCLE</span><h2>模型变更、审核与发布治理</h2></div><span className="soft-chip">制作者与审批者分离</span></div>
     <div className="governance-guide"><div><b>01</b><span>配置草稿</span></div><i>→</i><div><b>02</b><span>全样本重算</span></div><i>→</i><div><b>03</b><span>提交风控审核</span></div><i>→</i><div><b>04</b><span>发布或回滚</span></div></div>
+    <ModelRiskPolicyPanel catalog={riskCatalog} catalogMeta={riskCatalogMeta} draft={riskPolicyDraft} policies={riskPolicies} acceptances={riskAcceptances} unifiedQueue={unifiedRiskReviewQueue} reviewWorkbench={reviewWorkbench} reviewViews={reviewViews} reviewSlaTrend={reviewSlaTrend} reviewMembers={reviewMembers} reviewDelegations={reviewDelegations} reviewAssignmentHistory={reviewAssignmentHistory} currentSubject={currentSubject} reviewOwnership={reviewOwnership} reviewSource={reviewSource} reviewPriority={reviewPriority} reviewQuery={reviewQuery} selectedReviewIds={reviewSelectedIds} onReviewOwnership={setReviewOwnership} onReviewSource={setReviewSource} onReviewPriority={setReviewPriority} onReviewQuery={setReviewQuery} onReviewSelection={setReviewSelectedIds} reviewViewName={reviewViewName} onReviewViewName={setReviewViewName} onSaveReviewView={() => void saveReviewView()} onSnapshotReviewTrend={() => void snapshotReviewTrend()} onAssignReviewItems={(assignee, name, role, reason) => void assignReviewItems(assignee, name, role, reason)} onCreateReviewDelegation={(payload) => void createReviewDelegation(payload)} onRevokeReviewDelegation={(delegation, reason) => void revokeReviewDelegation(delegation, reason)} onLoadReviewAssignmentHistory={(itemId) => void loadReviewAssignmentHistory(itemId)} monitoringRuns={monitoringRuns} supervisedEvaluations={reacceptanceEvaluations} selectedEvaluationId={reacceptanceEvaluationId} onEvaluation={setReacceptanceEvaluationId} note={riskGovernanceNote} canManage={canManage} canReview={canReview} busy={busy} onNote={setRiskGovernanceNote} onDraftChange={updateRiskPolicyLevel} onCreate={() => void createRiskPolicy()} onPolicyAction={(policy, action) => void actOnRiskPolicy(policy, action)} onScan={() => void scanRiskReviews()} onScanReacceptance={() => void scanReacceptanceReviews()} reacceptanceEvidenceReference={reacceptanceEvidenceReference} reacceptanceEvidenceSummary={reacceptanceEvidenceSummary} observedFrom={reacceptanceObservedFrom} observedTo={reacceptanceObservedTo} monitoringRunId={reacceptanceMonitoringRunId} monitoringEvidenceHash={reacceptanceMonitoringEvidenceHash} onMonitoringRun={(run) => { setReacceptanceMonitoringRunId(run?.id ?? ""); setReacceptanceMonitoringEvidenceHash(run?.evidence_hash ?? ""); }} onEvidenceReference={setReacceptanceEvidenceReference} onEvidenceSummary={setReacceptanceEvidenceSummary} onObservedFrom={setReacceptanceObservedFrom} onObservedTo={setReacceptanceObservedTo} />
+    {releaseDashboard && <ReleaseApprovalDashboard dashboard={releaseDashboard} reacceptances={riskReacceptances} reacceptanceQueue={reacceptanceReviewQueue} currentRoles={currentRoles} canManage={canManage} canReview={canReview} busy={busy} onAction={(changeId, action, issuance) => void actOnValidationIssuance(changeId, action, issuance)} onAcceptanceAction={(changeId, action, acceptance, role) => void actOnRiskAcceptance(changeId, action, acceptance, role)} onReacceptanceAction={(releaseId, action, reacceptance, role) => void actOnRiskReacceptance(releaseId, action, reacceptance, role)} onDownloadAuditPackage={(id) => void downloadReacceptanceAuditPackage(id)} onDownloadRegulatoryReport={(id) => void downloadReacceptanceRegulatoryReport(id)} onDownloadOfflinePackage={(issuanceId) => void downloadValidationOfflinePackage(issuanceId)} />}
     <IndicatorPoolComposer pool={indicatorPool} selection={indicatorSelection} search={indicatorSearch} category={indicatorCategory} editable={canManage} onSearch={setIndicatorSearch} onCategory={setIndicatorCategory} onSelection={setIndicatorSelection} />
     <ModelValidationDashboard report={validation} loading={loading} />
     <MonitoringClosurePanel summary={monitoringSummary} outcomes={outcomes} imports={outcomeImports} issues={monitoringIssues} runs={monitoringRuns} schedules={monitoringSchedules} notifications={governanceNotifications} changes={changes} canManage={canManage} canReview={canReview} busy={busy} owner={monitoringOwner} note={monitoringNote} monitoringPeriod={monitoringPeriod} batchPayload={batchPayload} importKey={importKey} importSource={importSource} importPeriod={importPeriod} importExpectedCount={importExpectedCount} scheduleCadence={scheduleCadence} scheduleTimezone={scheduleTimezone} scheduleEnabled={scheduleEnabled} scheduleNextRun={scheduleNextRun} outcomeForm={outcomeForm} onOwner={setMonitoringOwner} onNote={setMonitoringNote} onMonitoringPeriod={setMonitoringPeriod} onBatchPayload={setBatchPayload} onImportKey={setImportKey} onImportSource={setImportSource} onImportPeriod={setImportPeriod} onImportExpectedCount={setImportExpectedCount} onScheduleCadence={setScheduleCadence} onScheduleTimezone={setScheduleTimezone} onScheduleEnabled={setScheduleEnabled} onScheduleNextRun={setScheduleNextRun} onOutcomeForm={setOutcomeForm} onIngest={() => void ingestOutcome()} onIngestBatch={() => void ingestOutcomeBatch()} onSaveSchedule={() => void saveMonitoringSchedule()} onRunDueSchedules={() => void executeDueSchedules()} onVerifyOutcome={(outcome, decision) => void verifyOutcome(outcome, decision)} onScan={() => void scanMonitoringIssues()} onRun={() => void executeMonitoringRun()} onReadNotification={(notification) => void readGovernanceNotification(notification)} onLinkChange={(issue, changeId) => void linkIssueToChange(issue, changeId)} onAction={(issue, action) => void actOnMonitoringIssue(issue, action)} />
@@ -349,6 +624,9 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
       </div>
     </section>}
 
+    <TenantRolloutPanel modelKey={modelKey} canManage={canManage} canReview={canReview} onNotice={onNotice} />
+    {canManageNotifications && <NotificationDeliveryPanel canManage onNotice={onNotice} />}
+
     {canReview && <label className="review-comment"><span>评审/回滚意见</span><input value={reviewComment} onChange={(event) => setReviewComment(event.target.value)} /></label>}
 
     <div className="governance-history-grid">
@@ -360,6 +638,8 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
           const evidenceReady = evidenceStatus === "passed" || evidenceStatus === "exception_approved";
           const scorecardValidationReady = !change.config.scorecard_binding || change.scorecard_validation_evidence.current_valid === true;
           const calibrationReady = !change.calibration_evidence.analysis || change.calibration_evidence.current_valid === true;
+          const supervisedEvidence = change.supervised_validation_evidence;
+          const supervisedReady = !supervisedEvidence.evaluation_id || supervisedEvidence.independent_validation?.status === "approved";
           const currentGate = evidence.current_gate ?? evidence.gate;
           return <article className="change-card" key={change.id}>
             <header><div><span className={`governance-status ${change.status}`}>{statusLabels[change.status]}</span><strong>{change.candidate_version}</strong>{change.validation.model_risk && <span className={`validation-mini ${change.validation.model_risk.release_gate.status}`}>{change.validation.model_risk.release_gate.passed ? "验证通过" : "发布阻断"}</span>}</div><small>v{change.row_version}</small></header>
@@ -369,9 +649,12 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
             <ScorecardBindingSummary change={change} />
             <ScorecardValidationEvidenceSummary change={change} />
             <ComparisonEvidenceSummary change={change} />
+            <SupervisedValidationSummary change={change} attachments={validationAttachments[change.id] ?? []} onDownload={(item) => void downloadValidationAttachment(item)} />
             <footer><span>{change.created_by_name} · {formatTime(change.created_at)}</span><div>
-              {canManage && change.status === "draft" && <><button className="secondary" disabled={Boolean(busy)} onClick={() => editDraft(change)}>编辑</button><button className="secondary" disabled={Boolean(busy) || !comparisonSnapshotId || !calibrationReady} onClick={() => void runComparisonEvidence(change)}>{busy === `comparison-${change.id}` ? "比较运行中…" : evidence.comparison_run_id ? "重新运行比较" : "运行候选比较"}</button><button disabled={Boolean(busy) || change.validation.model_risk?.release_gate.passed === false || !evidenceReady || !scorecardValidationReady || !calibrationReady} title={!calibrationReady ? "校准来源证据已失效" : !scorecardValidationReady ? "缺少与固定评分卡匹配的已批准 PASS 验证证据" : !evidenceReady ? "缺少有效的候选比较证据" : change.validation.model_risk?.release_gate.summary} onClick={() => void submit(change)}>提交审核</button></>}
-              {canReview && change.status === "pending_review" && <><button className="reject" disabled={Boolean(busy)} onClick={() => void review(change, "reject")}>驳回</button><button disabled={Boolean(busy) || change.validation.model_risk?.release_gate.passed === false || !evidenceReady || !scorecardValidationReady || !calibrationReady} title={!calibrationReady ? "校准来源证据已失效" : !scorecardValidationReady ? "评分卡开发验证证据已失效" : !evidenceReady ? "比较证据无效、过期或尚未完成例外复核" : currentGate?.summary} onClick={() => void review(change, "publish")}>审核发布</button></>}
+              {canManage && change.status === "draft" && <><button className="secondary" disabled={Boolean(busy)} onClick={() => editDraft(change)}>编辑</button><button className="secondary" disabled={Boolean(busy) || !comparisonSnapshotId || !calibrationReady} onClick={() => void runComparisonEvidence(change)}>{busy === `comparison-${change.id}` ? "比较运行中…" : evidence.comparison_run_id ? "重新运行比较" : "运行候选比较"}</button><button disabled={Boolean(busy) || change.validation.model_risk?.release_gate.passed === false || !evidenceReady || !scorecardValidationReady || !calibrationReady || !supervisedReady} title={!supervisedReady ? "监督验证尚未获得独立意见" : !calibrationReady ? "校准来源证据已失效" : !scorecardValidationReady ? "缺少与固定评分卡匹配的已批准 PASS 验证证据" : !evidenceReady ? "缺少有效的候选比较证据" : change.validation.model_risk?.release_gate.summary} onClick={() => void submit(change)}>提交审核</button></>}
+              {canManage && change.status === "draft" && supervisedEvidence.evaluation_id && <label className="attachment-upload"><span>上传验证附件</span><input type="file" disabled={Boolean(busy)} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadValidationAttachment(change.id, file); event.currentTarget.value = ""; }} /></label>}
+              {canReview && supervisedEvidence.evaluation_id && supervisedEvidence.independent_validation?.status === "pending" && change.status === "draft" && <><select value={supervisedRiskLevel} onChange={(event) => setSupervisedRiskLevel(event.target.value as typeof supervisedRiskLevel)} aria-label="监督验证风险等级"><option value="low">低风险</option><option value="medium">中风险</option><option value="high">高风险</option></select><button className="reject" disabled={Boolean(busy)} onClick={() => void reviewSupervised(change, "reject")}>驳回监督意见</button><button disabled={Boolean(busy)} onClick={() => void reviewSupervised(change, "approve")}>{busy === `supervised-review-${change.id}` ? "复核中…" : "批准独立验证"}</button></>}
+              {canReview && change.status === "pending_review" && <><button className="reject" disabled={Boolean(busy)} onClick={() => void review(change, "reject")}>驳回</button><button disabled={Boolean(busy) || !supervisedReady || change.validation.model_risk?.release_gate.passed === false || !evidenceReady || !scorecardValidationReady || !calibrationReady} title={!supervisedReady ? "监督验证尚未获得独立意见" : !calibrationReady ? "校准来源证据已失效" : !scorecardValidationReady ? "评分卡开发验证证据已失效" : !evidenceReady ? "比较证据无效、过期或尚未完成例外复核" : currentGate?.summary} onClick={() => void review(change, "publish")}>审核发布</button></>}
             </div></footer>
             {change.validation.model_risk?.release_gate.passed === false && <aside className="validation-blocker">发布阻断：{change.validation.model_risk.release_gate.summary}</aside>}
             {change.review_comment && <aside>评审意见：{change.review_comment}</aside>}
@@ -381,6 +664,122 @@ export default function ModelGovernancePanel({ model, modelKey, canManage, canRe
       <div><div className="governance-subhead"><div><strong>发布版本</strong><span>生效指针与回滚入口</span></div></div>{releases.length ? <div className="release-list">{releases.map((release) => <div className={`release-row ${release.is_active ? "active" : ""}`} key={release.id}><div><span>{release.is_active ? "当前生效" : "历史版本"}</span><strong>{release.model_version}</strong><small>{release.published_by} · {formatTime(release.published_at)}</small><code>{release.config_hash.slice(0, 12)}</code></div>{canReview && !release.is_active && <button disabled={busy === release.id} onClick={() => void rollback(release)}>回滚至此版本</button>}</div>)}</div> : <div className="governance-empty">首次发布后将生成基线与版本历史</div>}</div>
     </div>
   </section>;
+}
+
+
+function ModelRiskPolicyPanel({ catalog, catalogMeta, draft, policies, acceptances, unifiedQueue, reviewWorkbench, reviewViews, reviewSlaTrend, reviewMembers, reviewDelegations, reviewAssignmentHistory, currentSubject, reviewOwnership, reviewSource, reviewPriority, reviewQuery, selectedReviewIds, onReviewOwnership, onReviewSource, onReviewPriority, onReviewQuery, onReviewSelection, reviewViewName, onReviewViewName, onSaveReviewView, onSnapshotReviewTrend, onAssignReviewItems, onCreateReviewDelegation, onRevokeReviewDelegation, onLoadReviewAssignmentHistory, monitoringRuns, supervisedEvaluations, selectedEvaluationId, onEvaluation, note, canManage, canReview, busy, onNote, onDraftChange, onCreate, onPolicyAction, onScan, onScanReacceptance, reacceptanceEvidenceReference, reacceptanceEvidenceSummary, observedFrom, observedTo, monitoringRunId, monitoringEvidenceHash, onMonitoringRun, onEvidenceReference, onEvidenceSummary, onObservedFrom, onObservedTo }: { catalog: ModelRiskCatalog[]; catalogMeta: Pick<ModelRiskCatalogResponse, "source" | "version" | "config_hash">; draft: ModelRiskCatalog[]; policies: ModelRiskPolicy[]; acceptances: ModelRiskAcceptance[]; unifiedQueue: ModelRiskUnifiedReviewQueueItem[]; reviewWorkbench: ModelRiskReviewWorkbench | null; reviewViews: ModelRiskReviewSavedView[]; reviewSlaTrend: ModelRiskReviewSlaTrend | null; reviewMembers: ModelRiskReviewMember[]; reviewDelegations: ModelRiskReviewDelegation[]; reviewAssignmentHistory: ModelRiskReviewAssignmentHistory | null; currentSubject: string; reviewOwnership: "all" | "mine" | "unassigned"; reviewSource: string; reviewPriority: string; reviewQuery: string; selectedReviewIds: string[]; onReviewOwnership: (value: "all" | "mine" | "unassigned") => void; onReviewSource: (value: string) => void; onReviewPriority: (value: string) => void; onReviewQuery: (value: string) => void; onReviewSelection: (value: string[]) => void; reviewViewName: string; onReviewViewName: (value: string) => void; onSaveReviewView: () => void; onSnapshotReviewTrend: () => void; onAssignReviewItems: (assignee: string | null, name: string | null, role: string, reason: string) => void; onCreateReviewDelegation: (payload: { principal_subject: string; delegate_subject: string; assigned_role: string; starts_at: string; ends_at: string; reason: string }) => void; onRevokeReviewDelegation: (delegation: ModelRiskReviewDelegation, reason: string) => void; onLoadReviewAssignmentHistory: (itemId: string) => void; monitoringRuns: ModelMonitoringRun[]; supervisedEvaluations: TenantSupervisedEvaluation[]; selectedEvaluationId: string; onEvaluation: (id: string) => void; note: string; canManage: boolean; canReview: boolean; busy: string; onNote: (value: string) => void; onDraftChange: (level: ModelRiskCatalog["level"], patch: Partial<ModelRiskCatalog>) => void; onCreate: () => void; onPolicyAction: (policy: ModelRiskPolicy, action: "submit" | "publish" | "reject") => void; onScan: () => void; onScanReacceptance: () => void; reacceptanceEvidenceReference: string; reacceptanceEvidenceSummary: string; observedFrom: string; observedTo: string; monitoringRunId: string; monitoringEvidenceHash: string; onMonitoringRun: (run: ModelMonitoringRun | null) => void; onEvidenceReference: (value: string) => void; onEvidenceSummary: (value: string) => void; onObservedFrom: (value: string) => void; onObservedTo: (value: string) => void }) {
+  const roleLabels: Record<string, string> = { model_owner: "模型所有者", risk_manager: "风控经理", model_risk_committee: "模型风险委员会" };
+  const queueSourceLabels: Record<ModelRiskUnifiedReviewQueueItem["source"], string> = { risk_acceptance: "风险接受", risk_reacceptance: "在役续期", monitoring_gate: "监控门禁", monitoring_diff_case: "差异工单" };
+  const priorityLabels: Record<ModelRiskUnifiedReviewQueueItem["priority"], string> = { P0: "证据失效", P1: "重大异常", P2: "已逾期", P3: "优先处理", P4: "计划处理" };
+  const [assignmentTarget, setAssignmentTarget] = useState("");
+  const [assignmentName, setAssignmentName] = useState("");
+  const [assignmentRole, setAssignmentRole] = useState("risk_manager");
+  const [assignmentReason, setAssignmentReason] = useState("统一复核队列运营分派");
+  const [delegationPrincipal, setDelegationPrincipal] = useState(currentSubject);
+  const [delegationDelegate, setDelegationDelegate] = useState("");
+  const [delegationRole, setDelegationRole] = useState("risk_manager");
+  const [delegationStartsAt, setDelegationStartsAt] = useState(toLocalInputValue(new Date().toISOString()));
+  const [delegationEndsAt, setDelegationEndsAt] = useState(toLocalInputValue(new Date(Date.now() + 7 * 86400000).toISOString()));
+  const [delegationReason, setDelegationReason] = useState("运营轮班或休假期间的模型风险复核代理");
+  const displayItems = canManage && draft.length ? draft : catalog;
+  const activeAcceptances = acceptances.filter((item) => item.status !== "revoked");
+  const workbenchItems: ModelRiskReviewWorkbench["items"] = reviewWorkbench?.items ?? unifiedQueue.map((item) => ({
+    ...item, assignment: null, delegated: false, delegated_from: null, delegation_id: null,
+  }));
+  const assignmentMember = reviewMembers.find((member) => member.subject === assignmentTarget);
+  const principalMember = reviewMembers.find((member) => member.subject === delegationPrincipal);
+  const delegateMember = reviewMembers.find((member) => member.subject === delegationDelegate);
+  const delegationRoles = principalMember && delegateMember ? principalMember.roles.filter((role) => delegateMember.roles.includes(role)) : [];
+  const selectedWorkbenchItems = workbenchItems.filter((item) => selectedReviewIds.includes(item.id));
+  const canUnassignSelection = selectedWorkbenchItems.length > 0 && selectedWorkbenchItems.every((item) => item.assignment || item.source === "monitoring_diff_case" && item.responsible.some((person) => person.subject));
+  return <section id="model-risk-policy" className="model-risk-catalog">
+    <header><div><span>MODEL RISK POLICY</span><h3>租户模型风险政策</h3><p>政策版本决定最低证据、风险接受席位和定期复核周期；发布后冻结到签发包。</p></div><div className="model-risk-policy-meta"><code>{catalogMeta.version}</code><span>{catalogMeta.source === "tenant_policy" ? "租户政策生效" : "平台默认兼容"}</span></div></header>
+    <div className="model-risk-catalog-grid">{displayItems.map((item) => <article key={item.code} className={`risk-level-${item.level}`}><div><strong>{item.name}</strong><span>{item.code}</span></div><p>{item.basis.join("；")}</p>{canManage ? <label className="risk-review-days"><span>定期复核周期</span><input type="number" min="30" max="730" value={item.review_days} onChange={(event) => onDraftChange(item.level, { review_days: Number(event.target.value) })} /><small>天</small></label> : <small>复核周期：{item.review_days} 天</small>}<div className="risk-role-options">{Object.entries(roleLabels).map(([role, label]) => { const checked = item.acceptance_roles.includes(role); return canManage ? <label key={role}><input type="checkbox" checked={checked} onChange={(event) => onDraftChange(item.level, { acceptance_roles: event.target.checked ? [...item.acceptance_roles, role] : item.acceptance_roles.filter((value) => value !== role) })} />{label}</label> : checked ? <span key={role}>{label}</span> : null; })}</div><small>最低证据：{item.required_evidence.join("、")}</small></article>)}</div>
+    <div className="model-risk-policy-controls"><label><span>治理依据 / 复核意见</span><input value={note} onChange={(event) => onNote(event.target.value)} /></label><div><span>有效接受 {activeAcceptances.filter((item) => item.effective_status === "accepted").length}</span><span>待签署 {activeAcceptances.filter((item) => item.effective_status === "pending").length}</span><span>逾期 {activeAcceptances.filter((item) => item.effective_status === "overdue").length}</span>{canManage && <button disabled={Boolean(busy) || draft.some((item) => item.acceptance_roles.length === 0)} onClick={onCreate}>保存新政策草稿</button>}</div></div>
+    {policies.length > 0 && <div className="model-risk-policy-history">{policies.map((policy) => <article key={policy.id} className={policy.is_active ? "active" : ""}><div><strong>{policy.name}</strong><span>tenant-v{policy.version} · {statusLabels[policy.status] ?? policy.status}</span><small>{policy.created_by_name} · {formatTime(policy.created_at)}</small></div><code>{policy.config_hash.slice(0, 12)}</code><footer>{canManage && ["draft", "rejected"].includes(policy.status) && <button disabled={Boolean(busy)} onClick={() => onPolicyAction(policy, "submit")}>提交复核</button>}{canReview && policy.status === "pending_review" && <><button className="reject" disabled={Boolean(busy)} onClick={() => onPolicyAction(policy, "reject")}>驳回</button><button disabled={Boolean(busy)} onClick={() => onPolicyAction(policy, "publish")}>批准发布</button></>}</footer></article>)}</div>}
+    <div className="model-risk-review-queue unified">
+      <div className="model-risk-review-heading"><div><strong>统一模型风险复核运营工作台</strong><span>实时队列、责任归属、批量分派与 SLA 趋势集中处理</span></div>{canReview && <div className="model-risk-review-actions"><button type="button" disabled={Boolean(busy)} onClick={onScan}>扫描接受到期</button><button type="button" disabled={Boolean(busy)} onClick={onScanReacceptance}>扫描在役续期</button><button type="button" className="secondary" disabled={Boolean(busy)} onClick={onSnapshotReviewTrend}>记录今日快照</button></div>}</div>
+      <div className="model-risk-review-filters"><label><span>责任范围</span><select value={reviewOwnership} onChange={(event) => onReviewOwnership(event.target.value as "all" | "mine" | "unassigned")}><option value="all">全部事项</option><option value="mine">我的待办</option><option value="unassigned">未分派</option></select></label><label><span>来源</span><select value={reviewSource} onChange={(event) => onReviewSource(event.target.value)}><option value="">全部来源</option>{Object.entries(queueSourceLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label><span>优先级</span><select value={reviewPriority} onChange={(event) => onReviewPriority(event.target.value)}><option value="">全部等级</option>{(["P0", "P1", "P2", "P3", "P4"] as const).map((priority) => <option key={priority} value={priority}>{priority} · {priorityLabels[priority]}</option>)}</select></label><label className="wide"><span>关键词</span><input value={reviewQuery} onChange={(event) => onReviewQuery(event.target.value)} placeholder="模型版本、策略、差异摘要" /></label></div>
+      <div className="model-risk-review-view-tools"><label><span>保存当前筛选</span><input value={reviewViewName} onChange={(event) => onReviewViewName(event.target.value)} placeholder="例如：我的 P0 门禁" /></label><button type="button" className="secondary" disabled={Boolean(busy) || !reviewViewName.trim()} onClick={onSaveReviewView}>保存视图</button><span>{reviewViews.filter((item) => item.is_default).map((item) => `默认：${item.name}`).join("")}</span></div>
+      <div className="model-risk-review-summary">{(["P0", "P1", "P2", "P3", "P4"] as const).map((priority) => <span key={priority} className={`priority-${priority.toLowerCase()}`}><b>{reviewWorkbench?.counts[priority.toLowerCase()] ?? workbenchItems.filter((item) => item.priority === priority).length}</b>{priority} {priorityLabels[priority]}</span>)}<span><b>{reviewWorkbench?.counts.unassigned ?? 0}</b>未分派</span><span><b>{reviewWorkbench?.counts.mine ?? 0}</b>我的待办</span></div>
+      {canReview && workbenchItems.length > 0 && <div className="model-risk-review-bulk"><label><span>责任人</span><select value={assignmentTarget} onChange={(event) => { const member = reviewMembers.find((item) => item.subject === event.target.value); setAssignmentTarget(member?.subject ?? ""); setAssignmentName(member?.name ?? ""); setAssignmentRole(member?.roles[0] ?? ""); }}><option value="">选择租户成员</option>{reviewMembers.map((member) => <option key={member.subject} value={member.subject}>{member.name} · {member.subject}</option>)}</select></label><label><span>责任角色</span><select value={assignmentRole} disabled={!assignmentMember} onChange={(event) => setAssignmentRole(event.target.value)}><option value="">选择角色</option>{(assignmentMember?.roles ?? []).map((role) => <option key={role} value={role}>{role}</option>)}</select></label><label className="wide"><span>责任变更原因</span><input value={assignmentReason} onChange={(event) => setAssignmentReason(event.target.value)} /></label><div className="model-risk-review-bulk-actions"><button type="button" disabled={Boolean(busy) || selectedReviewIds.length === 0 || !assignmentTarget || !assignmentRole} onClick={() => onAssignReviewItems(assignmentTarget, assignmentName, assignmentRole, assignmentReason)}>分派 / 交接（{selectedReviewIds.length}）</button><button type="button" className="reject" disabled={Boolean(busy) || !canUnassignSelection} onClick={() => onAssignReviewItems(null, null, assignmentRole || "risk_manager", assignmentReason)}>撤回分派</button></div></div>}
+      {canReview && <div className="model-risk-review-delegation"><header><div><strong>值班代理</strong><span>指定时间窗口内，代理事项自动进入代理人的“我的待办”</span></div><span>{reviewDelegations.filter((item) => item.effective_status === "active").length} 个生效中</span></header><div className="model-risk-review-delegation-form"><label><span>原责任人</span><select value={delegationPrincipal} onChange={(event) => { setDelegationPrincipal(event.target.value); setDelegationRole(""); }}><option value="">选择成员</option>{reviewMembers.map((member) => <option key={member.subject} value={member.subject}>{member.name}</option>)}</select></label><label><span>代理人</span><select value={delegationDelegate} onChange={(event) => { setDelegationDelegate(event.target.value); setDelegationRole(""); }}><option value="">选择成员</option>{reviewMembers.filter((member) => member.subject !== delegationPrincipal).map((member) => <option key={member.subject} value={member.subject}>{member.name}</option>)}</select></label><label><span>共同角色</span><select value={delegationRole} onChange={(event) => setDelegationRole(event.target.value)}><option value="">选择角色</option>{delegationRoles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label><label><span>开始时间</span><input type="datetime-local" value={delegationStartsAt} onChange={(event) => setDelegationStartsAt(event.target.value)} /></label><label><span>结束时间</span><input type="datetime-local" value={delegationEndsAt} onChange={(event) => setDelegationEndsAt(event.target.value)} /></label><label className="wide"><span>代理原因</span><input value={delegationReason} onChange={(event) => setDelegationReason(event.target.value)} /></label><button type="button" disabled={Boolean(busy) || !delegationPrincipal || !delegationDelegate || !delegationRole || delegationReason.trim().length < 5} onClick={() => onCreateReviewDelegation({ principal_subject: delegationPrincipal, delegate_subject: delegationDelegate, assigned_role: delegationRole, starts_at: new Date(delegationStartsAt).toISOString(), ends_at: new Date(delegationEndsAt).toISOString(), reason: delegationReason })}>设置代理</button></div>{reviewDelegations.length > 0 && <div className="model-risk-review-delegation-list">{reviewDelegations.slice(0, 6).map((delegation) => <article key={delegation.id}><div><strong>{delegation.principal_name} → {delegation.delegate_name}</strong><span>{delegation.assigned_role} · {({ active: "生效中", scheduled: "待生效", expired: "已到期", revoked: "已撤销" } as const)[delegation.effective_status]}</span><small>{new Date(delegation.starts_at).toLocaleString("zh-CN")} 至 {new Date(delegation.ends_at).toLocaleString("zh-CN")} · {delegation.reason}</small></div>{delegation.status === "active" && delegation.effective_status !== "expired" && <button type="button" className="reject" disabled={Boolean(busy)} onClick={() => onRevokeReviewDelegation(delegation, "运营安排变化，撤销当前复核代理")}>撤销</button>}</article>)}</div>}</div>}
+      {reviewSlaTrend && <div className="model-risk-review-trend"><span>SLA 趋势</span><strong>{reviewSlaTrend.items.length ? `最近 ${reviewSlaTrend.items.length} 天已有快照` : "尚无历史快照"}</strong><small>{reviewSlaTrend.items[reviewSlaTrend.items.length - 1]?.snapshot_date ?? "等待今日快照"}</small></div>}
+      {workbenchItems.length === 0 ? <p>当前筛选下没有进入复核窗口的风险事项。</p> : workbenchItems.map((item) => <article key={item.id} className={`model-risk-review-item priority-${item.priority.toLowerCase()}`}>
+        <label className="model-risk-review-check"><input type="checkbox" checked={selectedReviewIds.includes(item.id)} onChange={(event) => onReviewSelection(event.target.checked ? [...selectedReviewIds, item.id] : selectedReviewIds.filter((id) => id !== item.id))} /></label>
+        <div className="model-risk-review-priority"><b>{item.priority}</b><span>{priorityLabels[item.priority]}</span></div>
+        <div className="model-risk-review-content"><div><span>{queueSourceLabels[item.source]}</span>{item.delegated && <span className="delegated">代理待办 · 来自 {item.delegated_from?.name}</span>}<strong>{item.title}</strong><small>{item.state}</small></div><p>{item.priority_reason}。{item.summary}</p><small>{item.model_version ? `${item.model_key ?? "模型"} · ${item.model_version}` : item.model_key ?? "当前模型"}{item.due_at ? ` · ${new Date(item.due_at).toLocaleDateString("zh-CN")}${item.days_remaining !== null && item.days_remaining <= 0 ? " 已逾期" : " 到期"}` : " · 当前有效状态"} · {item.responsible.map((person) => person.name).join("、") || "未分派"}{item.evidence_level && item.evidence_level !== "supervised" ? " · 非监督诊断证据" : ""}</small></div>
+        <div className="model-risk-review-item-actions"><button type="button" className="secondary" onClick={() => onLoadReviewAssignmentHistory(item.id)}>责任历史</button><button type="button" onClick={() => document.getElementById(item.action.target)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{item.action.label}</button></div>
+      </article>)}
+      {reviewAssignmentHistory && <div className="model-risk-review-history"><header><strong>责任交接时间线</strong><code>{reviewAssignmentHistory.item_id}</code></header>{reviewAssignmentHistory.items.length === 0 ? <p>该事项尚无人工分派记录。</p> : reviewAssignmentHistory.items.map((event) => <article key={event.id}><i /><div><strong>{event.action === "assign" ? "首次分派" : event.action === "handoff" ? "责任交接" : "撤回分派"}</strong><span>{event.previous.name || "未分派"} → {event.next.name || "恢复实时责任"}</span><small>{event.actor_name || event.actor} · {event.created_at ? new Date(event.created_at).toLocaleString("zh-CN") : ""} · {event.reason}</small><code>{event.event_hash.slice(0, 12)}</code></div></article>)}</div>}
+    </div>
+    <div className="model-risk-reacceptance-evidence">
+      <strong>在役再接受证据快照</strong><small>用于逾期模型的独立再接受；不会延长历史接受期限。</small>
+      <div className="model-risk-reacceptance-fields"><label>观察开始<input type="date" value={observedFrom} onChange={(event) => onObservedFrom(event.target.value)} /></label><label>观察结束<input type="date" value={observedTo} onChange={(event) => onObservedTo(event.target.value)} /></label><label>证据引用<input value={reacceptanceEvidenceReference} onChange={(event) => onEvidenceReference(event.target.value)} /></label></div>
+      <label><span>租户监督评估</span><select value={selectedEvaluationId} onChange={(event) => onEvaluation(event.target.value)}><option value="">未绑定，不能正式签署</option>{supervisedEvaluations.map((item) => <option key={item.id} value={item.id}>{item.evaluation_as_of.slice(0, 10)} · {item.label_watermark.label_count} 条标签 · {item.evidence_hash.slice(0, 10)}</option>)}</select><small>正式续期须使用同租户、同在役模型版本、已批准且标签口径完整的评估。</small></label>
+      <label><span>平台监控运行（辅助诊断）</span><select value={monitoringRunId} onChange={(event) => onMonitoringRun(monitoringRuns.find((run) => run.id === event.target.value) ?? null)}><option value="">不附加监控运行</option>{monitoringRuns.filter((run) => run.status === "completed").map((run) => <option key={run.id} value={run.id}>{run.as_of_period} · {run.model_version} · {run.evidence_level} · {run.evidence_hash.slice(0, 10)}</option>)}</select><small>{monitoringRunId ? `诊断哈希：${monitoringEvidenceHash.slice(0, 16)}；共享监控不能单独作为租户监督证据。` : "可选的 PSI/KS 诊断，不替代租户标签血缘。"}</small></label>
+      <label>运行证据摘要<textarea value={reacceptanceEvidenceSummary} onChange={(event) => onEvidenceSummary(event.target.value)} rows={2} /></label>
+    </div>
+  </section>;
+}
+
+
+function ReleaseApprovalDashboard({ dashboard, reacceptances, reacceptanceQueue, currentRoles, canManage, canReview, busy, onAction, onAcceptanceAction, onReacceptanceAction, onDownloadAuditPackage, onDownloadRegulatoryReport, onDownloadOfflinePackage }: { dashboard: ModelReleaseApprovalDashboard; reacceptances: ModelRiskReacceptance[]; reacceptanceQueue: ModelRiskReacceptanceReviewQueueItem[]; currentRoles: string[]; canManage: boolean; canReview: boolean; busy: string; onAction: (changeId: string, action: "issue" | "revoke" | "reissue", issuance?: NonNullable<ModelReleaseApprovalDashboard["rows"][number]["issuance"]>) => void; onAcceptanceAction: (changeId: string, action: "create" | "sign" | "revoke", acceptance?: ModelRiskAcceptance | null, role?: ModelRiskAcceptanceRole) => void; onReacceptanceAction: (releaseId: string, action: "create" | "sign" | "revoke", reacceptance?: ModelRiskReacceptance | null, role?: ModelRiskAcceptanceRole) => void; onDownloadAuditPackage: (id: string) => void; onDownloadRegulatoryReport: (id: string) => void; onDownloadOfflinePackage: (issuanceId: string) => void }) {
+  const riskLabels = { low: "低风险", medium: "中风险", high: "高风险" } as const;
+  const restartLabels: Record<string, string> = { draft_created: "重启草稿已创建", eligible: "可创建重启草稿", awaiting_release: "待模型发布", awaiting_terminal_policy: "待原灰度结束", not_applicable: "不适用" };
+  const roleLabels: Record<ModelRiskAcceptanceRole, string> = { model_owner: "模型所有者", risk_manager: "风控经理", model_risk_committee: "风险委员会" };
+  const roleBindings: Record<ModelRiskAcceptanceRole, string> = { model_owner: "model_admin", risk_manager: "risk_manager", model_risk_committee: "approver" };
+  return <section id="release-approval-dashboard" className="release-approval-dashboard">
+    <header><div><span>RELEASE CONTROL BOARD</span><h3>模型发布审批看板</h3><p>集中核对监督报告、独立验证、风险等级、可信签发、发布审批和灰度重启状态。</p></div><div className="release-dashboard-counts"><b>{dashboard.counts.total}<small>变更单</small></b><b className={dashboard.counts.blocked ? "blocked" : "pass"}>{dashboard.counts.blocked}<small>阻断</small></b><b>{dashboard.counts.pending_release}<small>待发布</small></b><b>{dashboard.counts.restart_eligible}<small>可重启</small></b></div></header>
+    <div className="release-dashboard-rows">{dashboard.rows.length === 0 && <div className="release-dashboard-empty"><strong>暂无待治理的模型变更</strong><p>创建监督模型变更并完成独立验证后，报告签发、发布门禁与灰度重启状态将在此集中展示。</p></div>}{dashboard.rows.map((row) => {
+      const issuance = row.issuance;
+      const issuanceReady = issuance?.trust_eligible === true;
+      const acceptance = row.risk_acceptance;
+      const reacceptance = row.release ? (row.in_service_risk?.pending_renewal ?? reacceptances.find((item) => item.model_release_id === row.release?.id && item.status === "pending") ?? row.in_service_risk?.reacceptance ?? reacceptances.find((item) => item.model_release_id === row.release?.id && item.status === "accepted") ?? null) : null;
+      const renewalDue = reacceptanceQueue.some((item) => item.model_release_id === row.release?.id);
+      const signedRoles = new Set(acceptance?.approvals.map((item) => item.acceptance_role) ?? []);
+      const signableRoles = (acceptance?.required_roles ?? []).filter((role) => !signedRoles.has(role) && (currentRoles.includes(roleBindings[role]) || currentRoles.includes("admin")));
+      return <article key={row.change_id} className={row.blockers.length ? "blocked" : "ready"}>
+        <header><div><strong>{row.template_key} · {row.candidate_version}</strong><span>{statusLabels[row.change_status] ?? row.change_status} · {row.created_by_name}</span></div><span className={row.blockers.length ? "status-blocked" : "status-ready"}>{row.blockers.length ? `${row.blockers.length} 项阻断` : "门禁就绪"}</span></header>
+        <div className="release-dashboard-evidence">
+          <div><span>监督报告</span><b>{row.supervised ? row.report_hash?.slice(0, 12) ?? "缺失" : "无需监督报告"}</b><small>{row.attachment_count} 个附件</small></div>
+          <div><span>独立验证</span><b>{row.independent_validation_status === "approved" ? "已批准" : row.independent_validation_status === "rejected" ? "已驳回" : row.independent_validation_status === "not_required" ? "不适用" : "待验证"}</b><small>{row.risk_level ? riskLabels[row.risk_level] : "未分级"}</small></div>
+          <div><span>风险接受</span><b>{row.risk_policy.source === "platform_default" ? "兼容模式" : acceptance?.effective_status === "accepted" ? "已完成" : acceptance?.effective_status === "overdue" ? "已逾期" : acceptance ? "待签署" : "未创建"}</b><small>{acceptance ? `${acceptance.approvals.length}/${acceptance.required_roles.length} 席 · ${acceptance.review_due_at ? new Date(acceptance.review_due_at).toLocaleDateString("zh-CN") + " 复核" : "等待签署"}` : row.risk_policy.version}</small></div>
+          <div><span>可信签发</span><b>{issuanceReady ? "有效" : issuance?.status === "revoked" ? "已撤销" : "未签发"}</b><small>{issuance ? `${issuance.signature_algorithm} · ${issuance.signature.slice(0, 10)}` : "等待独立验证完成"}</small></div>
+          <div><span>发布审批</span><b>{row.release_approval_status === "approved" ? "已批准" : row.release_approval_status === "blocked" ? "已阻断" : "待审批"}</b><small>{row.release ? `${row.release.model_version} · ${row.release.is_active ? "当前生效" : "历史版本"}` : "尚未生成发布版本"}</small></div>
+          <div><span>灰度重启</span><b>{restartLabels[row.restart_status] ?? row.restart_status}</b><small>{row.source_policy_id?.slice(0, 12) ?? "无关联策略"}</small></div>
+        </div>
+        {row.blockers.length > 0 && <div className="release-dashboard-blockers">{row.blockers.map((item) => <span key={item}>{item}</span>)}</div>}
+        {row.supervised && <footer>
+          {row.risk_policy.source === "tenant_policy" && !acceptance && canManage && row.independent_validation_status === "approved" && <button disabled={Boolean(busy)} onClick={() => onAcceptanceAction(row.change_id, "create")}>创建风险接受台账</button>}
+          {signableRoles.map((role) => <button key={role} disabled={Boolean(busy)} onClick={() => onAcceptanceAction(row.change_id, "sign", acceptance, role)}>签署：{roleLabels[role]}</button>)}
+          {canReview && acceptance && acceptance.status !== "revoked" && <button className="reject" disabled={Boolean(busy)} onClick={() => onAcceptanceAction(row.change_id, "revoke", acceptance)}>撤销风险接受</button>}
+          {row.release && canManage && reacceptance?.status !== "pending" && (row.in_service_risk?.effective_status === "required" || renewalDue) && <button disabled={Boolean(busy)} onClick={() => onReacceptanceAction(row.release?.id ?? "", "create")}>{renewalDue ? "创建在役续期" : "创建在役再接受"}</button>}
+          {reacceptance?.status === "pending" && reacceptance.required_roles.filter((role) => !reacceptance.approvals.some((item) => item.acceptance_role === role) && (currentRoles.includes(roleBindings[role]) || currentRoles.includes("admin"))).map((role) => <button key={`re-${role}`} disabled={Boolean(busy) || reacceptance.operational_evidence.monitoring_binding?.evidence_level !== "supervised"} title={reacceptance.operational_evidence.monitoring_binding?.evidence_level !== "supervised" ? "非监督证据不能正式签署，请撤销后绑定足量真实结果监控运行" : undefined} onClick={() => onReacceptanceAction(row.release?.id ?? "", "sign", reacceptance, role)}>再接受：{roleLabels[role]}</button>)}
+          {canReview && reacceptance && reacceptance.status !== "revoked" && <button className="reject" disabled={Boolean(busy)} onClick={() => onReacceptanceAction(row.release?.id ?? "", "revoke", reacceptance)}>撤销再接受</button>}
+          {reacceptance && <><button className="secondary" disabled={Boolean(busy)} onClick={() => onDownloadAuditPackage(reacceptance.id)}>下载完整审计包</button><button className="secondary" disabled={Boolean(busy)} onClick={() => onDownloadRegulatoryReport(reacceptance.id)}>下载监管报送视图</button></>}
+          {issuance && <button className="secondary" disabled={Boolean(busy)} onClick={() => onDownloadOfflinePackage(issuance.id)}>下载离线验签包</button>}
+          {canReview && row.independent_validation_status === "approved" && (!issuance || issuance.status === "revoked") && <button disabled={Boolean(busy)} onClick={() => onAction(row.change_id, "issue")}>{issuance ? "按当前政策重新签发" : "签发验证报告"}</button>}
+          {canReview && issuance?.status === "active" && <button className="reject" disabled={Boolean(busy)} onClick={() => onAction(row.change_id, "revoke", issuance)}>撤销签发</button>}
+          {canReview && issuance?.status === "revoked" && !issuance.replacement_issuance_id && row.risk_policy.source === "platform_default" && <button className="secondary" disabled={Boolean(busy)} onClick={() => onAction(row.change_id, "reissue", issuance)}>换发原冻结包</button>}
+        </footer>}
+      </article>;
+    })}</div>
+  </section>;
+}
+
+
+function SupervisedValidationSummary({ change, attachments, onDownload }: { change: ModelChangeRecord; attachments: ModelValidationAttachment[]; onDownload: (item: ModelValidationAttachment) => void }) {
+  const evidence = change.supervised_validation_evidence;
+  if (!evidence.evaluation_id) return null;
+  const independent = evidence.independent_validation;
+  const release = evidence.release_approval;
+  return <aside className={`supervised-validation-binding ${independent?.status ?? "pending"}`}>
+    <div><strong>延迟监督验证绑定</strong><span>报告 {evidence.report_hash?.slice(0, 12) ?? "--"} · 模板 {evidence.report_template_version ?? "--"}</span></div>
+    <div><span>独立验证</span><b>{independent?.status === "approved" ? `已批准 · ${independent.risk_level ?? "未分级"}` : independent?.status === "rejected" ? "已驳回" : "待独立意见"}</b><span>发布审批 {release?.status === "approved" ? "已批准" : release?.status === "blocked" ? "已阻断" : "待模型复核"}</span></div>
+    {independent?.opinion && <p>{independent.opinion}</p>}
+    <small>证据哈希：{evidence.binding_hash ?? "--"}</small>{attachments.length > 0 && <div className="validation-attachment-list"><small>附件 {attachments.filter((item) => item.status === "active").length} 个 · 扫描状态 {attachments.some((item) => item.scan_status === "rejected") ? "已拒绝" : attachments.some((item) => item.scan_status !== "passed") ? "待接入扫描" : "已通过"}</small>{attachments.map((item) => <button type="button" key={item.id} disabled={item.status !== "active"} title={item.scan_engine ? `${item.scan_engine} · ${item.scan_result_reason ?? "已回写扫描结果"}` : "等待外部安全扫描器回写"} onClick={() => onDownload(item)}>{item.name} · {item.scan_status === "passed" ? "已扫描" : item.scan_status === "rejected" ? "扫描拒绝" : "待扫描"}</button>)}</div>}
+  </aside>;
 }
 
 

@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from backend.authority_policy_repository import AuthorityPolicyRepository
 from backend.credit_authority import build_credit_authority, current_authority_slot, ensure_credit_authority, record_authority_signoff
 from backend.decision_governance import build_decision_variance, validate_decision_variance
-from backend.dependencies import get_approval_repository, get_authority_policy_repository, get_credit_facility_repository, get_decision_governance_repository, get_demo_repository, get_document_repository, get_enterprise_data_repository, get_enterprise_indicator_observation_repository, get_model_governance_repository, get_object_storage, get_rating_run_repository
+from backend.counterparty_repository import CounterpartyError, CounterpartyRepository
+from backend.dependencies import get_approval_repository, get_authority_policy_repository, get_counterparty_repository, get_credit_facility_repository, get_decision_governance_repository, get_demo_repository, get_document_repository, get_enterprise_data_repository, get_enterprise_indicator_observation_repository, get_model_governance_repository, get_object_storage, get_rating_run_repository, get_tenant_runtime_asset_resolver
 from backend.document_policy import ALLOWED_DOCUMENT_TYPES, INITIAL_DOCUMENT_TYPES, INITIAL_SUPPORTING_TYPES, SUPPLEMENT_REQUIRED_TYPES, document_type_satisfied, missing_document_types
 from backend.indicator_observations import apply_effective_observations
 from backend.rating_input_mapping import prepare_rating_input, readiness_summary
@@ -18,6 +19,8 @@ from backend.schemas import ApprovalActionRequest, ApprovalAdvanceRequest, Appro
 from backend.security import Principal, enforce_approval_stage_role, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
 from backend.task_lease import assignment_values_are_active
+from backend.tenant_asset_repository import TenantAssetError
+from backend.tenant_runtime_assets import TenantRuntimeAssetResolver
 from rating.approval_workflow import WORKFLOW_STAGES, advance_approval_case, build_workflow_progress, create_approval_case, stage_index, stage_label
 from rating.enterprise_indicator_pool import evaluate_indicator_pool
 from rating.scorecard import rate_counterparty
@@ -44,7 +47,7 @@ def _enforce_personal_task_owner(principal: Principal, case: dict) -> None:
         raise HTTPException(status_code=409, detail=f"当前审批任务已由{case.get('assigned_to_name') or '其他人员'}认领")
 
 
-def _ensure_current_renewal_risk_review(case: dict, facility_repository: CreditFacilityRepository) -> None:
+def _ensure_current_renewal_risk_review(tenant_id: str, case: dict, facility_repository: CreditFacilityRepository) -> None:
     if case.get("application_type") != "renewal":
         return
     review = case.get("data", {}).get("_workflow", {}).get("renewal_risk_review", {})
@@ -53,7 +56,7 @@ def _ensure_current_renewal_risk_review(case: dict, facility_repository: CreditF
     source_facility_id = case.get("source_facility_id")
     if not source_facility_id:
         raise HTTPException(status_code=409, detail="续授信申请缺少来源台账，无法校验风险复核")
-    latest_risk_snapshot = facility_repository.risk_snapshot(source_facility_id)
+    latest_risk_snapshot = facility_repository.risk_snapshot(tenant_id, source_facility_id)
     if review.get("latest_risk_hash") != content_hash(latest_risk_snapshot):
         raise HTTPException(status_code=409, detail="风险状态在复核后已发生变化，请由风控经理重新复核后再继续")
 
@@ -108,7 +111,10 @@ def list_approval_cases(
     repository: ApprovalCaseRepository = Depends(get_approval_repository),
     principal: Principal = Depends(require_permissions("approvals:view")),
 ) -> list[dict]:
-    cases = repository.list(principal.counterparty_id if "client" in principal.roles else None)
+    cases = repository.list(
+        principal.tenant_id,
+        principal.counterparty_id if "client" in principal.roles else None,
+    )
     for case in cases:
         if case["current_stage"] == "final_strategy":
             ensure_credit_authority(case)
@@ -118,15 +124,17 @@ def list_approval_cases(
 @router.post("", status_code=201)
 def create_case(
     request: ApprovalCaseCreate,
-    demo_repository: DemoRepository = Depends(get_demo_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
     principal: Principal = Depends(require_permissions("approvals:create")),
 ) -> dict:
-    counterparty = demo_repository.get_counterparty(request.counterparty_id)
-    if not counterparty:
-        raise HTTPException(status_code=404, detail="客商不存在")
+    try:
+        counterparty = counterparty_repository.get(principal.tenant_id, request.counterparty_id)
+    except CounterpartyError as exc:
+        raise HTTPException(status_code=404, detail="客商不存在") from exc
+    enforce_counterparty_scope(principal, request.counterparty_id)
     case = create_approval_case(counterparty)
-    return approval_repository.save(case, actor=principal.name, event_type="approval_case_created")
+    return approval_repository.save(principal.tenant_id, case, actor=principal.name, event_type="approval_case_created")
 
 
 @router.get("/{case_id}")
@@ -135,7 +143,7 @@ def get_case(
     repository: ApprovalCaseRepository = Depends(get_approval_repository),
     principal: Principal = Depends(require_permissions("approvals:view")),
 ) -> dict:
-    case = repository.get(case_id)
+    case = repository.get(principal.tenant_id, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     enforce_counterparty_scope(principal, case["counterparty_id"])
@@ -153,7 +161,7 @@ def review_renewal_risk(
     authority_policy_repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
-    case = repository.get(case_id)
+    case = repository.get(principal.tenant_id, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     enforce_counterparty_scope(principal, case["counterparty_id"])
@@ -172,7 +180,7 @@ def review_renewal_risk(
     if request.conclusion == "cleared" and request.control_measures:
         raise HTTPException(status_code=422, detail="风险已排除结论不应同时填写未落实的控制措施")
 
-    source_facility = facility_repository.get(case["source_facility_id"])
+    source_facility = facility_repository.get(principal.tenant_id, case["source_facility_id"])
     if not source_facility:
         raise HTTPException(status_code=409, detail="续授信来源台账不存在，无法完成风险复核")
     if source_facility["counterparty_id"] != case["counterparty_id"]:
@@ -181,7 +189,7 @@ def review_renewal_risk(
     workflow = case.get("data", {}).get("_workflow", {})
     renewal_request = workflow.get("renewal_request", {})
     baseline = renewal_request.get("risk_baseline", {"capture_status": "legacy_missing"})
-    latest_snapshot = facility_repository.risk_snapshot(case["source_facility_id"])
+    latest_snapshot = facility_repository.risk_snapshot(principal.tenant_id, case["source_facility_id"])
     review = {
         "status": "completed",
         "conclusion": request.conclusion,
@@ -214,6 +222,7 @@ def review_renewal_risk(
     })
     try:
         saved = repository.save(
+            principal.tenant_id,
             updated,
             actor=principal.name,
             event_type="renewal_risk_review_completed",
@@ -242,7 +251,7 @@ def advance_case(
     decision_repository: DecisionGovernanceRepository = Depends(get_decision_governance_repository),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
-    case = repository.get(case_id)
+    case = repository.get(principal.tenant_id, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     if case["status"] in TERMINAL_STATUSES:
@@ -258,7 +267,7 @@ def advance_case(
     payload = deepcopy(request.payload)
     try:
         if case["current_stage"] == "final_strategy":
-            _ensure_current_renewal_risk_review(case, facility_repository)
+            _ensure_current_renewal_risk_review(principal.tenant_id, case, facility_repository)
             authority = ensure_credit_authority(case)
             if authority["status"] != "approved":
                 pending = current_authority_slot(case)
@@ -288,12 +297,12 @@ def advance_case(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         if case["current_stage"] == "final_strategy":
-            saved = repository.save(updated, actor=principal.name, event_type="approval_stage_completed", expected_row_version=request.expected_row_version, commit=False)
-            decision_record = decision_repository.record(updated, variance or {}, principal.name)
-            facility = facility_repository.create_from_completed_case(updated, principal.name)
+            saved = repository.save(principal.tenant_id, updated, actor=principal.name, event_type="approval_stage_completed", expected_row_version=request.expected_row_version, commit=False)
+            decision_record = decision_repository.record(principal.tenant_id, updated, variance or {}, principal.name)
+            facility = facility_repository.create_from_completed_case(principal.tenant_id, updated, principal.name)
             facility_repository.commit()
             return {**saved, "credit_facility": facility, "decision_variance_record": decision_record}
-        return repository.save(updated, actor=principal.name, event_type="approval_stage_completed", expected_row_version=request.expected_row_version)
+        return repository.save(principal.tenant_id, updated, actor=principal.name, event_type="approval_stage_completed", expected_row_version=request.expected_row_version)
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -308,7 +317,7 @@ def act_on_case(
     repository: ApprovalCaseRepository = Depends(get_approval_repository),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
-    case = repository.get(case_id)
+    case = repository.get(principal.tenant_id, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     enforce_counterparty_scope(principal, case["counterparty_id"])
@@ -363,6 +372,7 @@ def act_on_case(
     )
     try:
         return repository.save(
+            principal.tenant_id,
             updated,
             actor=principal.name,
             event_type=f"approval_{request.action}",
@@ -380,7 +390,7 @@ def signoff_case(
     repository: ApprovalCaseRepository = Depends(get_approval_repository),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
-    case = repository.get(case_id)
+    case = repository.get(principal.tenant_id, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     if case["status"] in TERMINAL_STATUSES:
@@ -423,6 +433,7 @@ def signoff_case(
     )
     try:
         saved = repository.save(
+            principal.tenant_id,
             updated,
             actor=principal.name,
             event_type="approval_authority_signoff_recorded",
@@ -447,6 +458,7 @@ def automate_case_stage(
     case_id: str,
     request: ApprovalAutomateRequest,
     approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     demo_repository: DemoRepository = Depends(get_demo_repository),
     model_governance_repository: ModelGovernanceRepository = Depends(get_model_governance_repository),
     document_repository: DocumentRepository = Depends(get_document_repository),
@@ -456,9 +468,10 @@ def automate_case_stage(
     indicator_observation_repository: EnterpriseIndicatorObservationRepository = Depends(get_enterprise_indicator_observation_repository),
     authority_policy_repository: AuthorityPolicyRepository = Depends(get_authority_policy_repository),
     facility_repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
+    runtime_assets: TenantRuntimeAssetResolver = Depends(get_tenant_runtime_asset_resolver),
     principal: Principal = Depends(require_permissions("approvals:act")),
 ) -> dict:
-    case = approval_repository.get(case_id)
+    case = approval_repository.get(principal.tenant_id, case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     if case["status"] in TERMINAL_STATUSES:
@@ -472,12 +485,13 @@ def automate_case_stage(
     if request.expected_row_version != case["row_version"]:
         raise HTTPException(status_code=409, detail=f"审批记录版本已变化，当前版本为 {case['row_version']}")
 
-    counterparty = demo_repository.get_counterparty(case["counterparty_id"])
-    if not counterparty:
-        raise HTTPException(status_code=404, detail="客商不存在")
+    try:
+        counterparty = counterparty_repository.get(principal.tenant_id, case["counterparty_id"])
+    except CounterpartyError as exc:
+        raise HTTPException(status_code=404, detail="客商不存在") from exc
 
     if stage in {"document_upload", "supplement"}:
-        documents = document_repository.list(case_id=case_id)
+        documents = document_repository.list(principal.tenant_id, case_id=case_id)
         for document in documents:
             if document["counterparty_id"] != case["counterparty_id"]:
                 raise HTTPException(status_code=409, detail="审批资料归属完整性校验失败")
@@ -530,50 +544,79 @@ def automate_case_stage(
             }
     elif stage == "model_selection":
         template_key = request.template_key or "general"
-        config = model_governance_repository.get_config(demo_repository, template_key)
-        if not config:
-            raise HTTPException(status_code=404, detail="模型模板不存在")
-        rating_input, readiness = prepare_rating_input(counterparty, enterprise_data_repository.build_profile(counterparty["id"]), template_key, config)
-        rating_input, readiness = apply_effective_observations(rating_input, readiness, indicator_observation_repository.effective(counterparty["id"]))
+        try:
+            assets = runtime_assets.resolve_rating(principal.tenant_id, template_key)
+        except TenantAssetError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+        config = assets["model"]["config"]
+        rating_input, readiness = prepare_rating_input(counterparty, enterprise_data_repository.build_profile(principal.tenant_id, counterparty["id"]), template_key, config)
+        rating_input, readiness = apply_effective_observations(rating_input, readiness, indicator_observation_repository.effective(principal.tenant_id, counterparty["id"]))
         if not readiness["ready_for_scoring"]:
             missing = ", ".join(readiness["required_missing"][:5])
             raise HTTPException(status_code=422, detail=f"治理数据未达到模型计算门槛，缺少：{missing}")
-        validation_result = rate_counterparty(rating_input, config)
+        validation_result = runtime_assets.execute_rating(rating_input, assets)
         if not validation_result.get("ok"):
             raise HTTPException(status_code=422, detail=f"模型与当前客商数据不兼容：{validation_result.get('error', '无法计算')}")
-        payload = {"template_key": template_key, "model_name": config["name"], "model_version": config["version"], "input_readiness": readiness_summary(readiness)}
+        asset_snapshot = runtime_assets.public_snapshot(assets)
+        payload = {
+            "template_key": template_key,
+            "model_name": config["name"],
+            "model_version": assets["model"]["version"],
+            "input_readiness": readiness_summary(readiness),
+            "asset_resolution": asset_snapshot,
+            "asset_resolution_hash": assets["resolution_hash"],
+            "asset_execution_snapshot": deepcopy(assets),
+            "asset_execution_hash": content_hash(assets),
+        }
     elif stage == "scoring":
-        _ensure_current_renewal_risk_review(case, facility_repository)
+        _ensure_current_renewal_risk_review(principal.tenant_id, case, facility_repository)
         selection = case["data"].get("model_selection", {})
         template_key = selection.get("template_key")
         selected_version = selection.get("model_version")
-        config = model_governance_repository.get_config(demo_repository, template_key, selected_version) if template_key and selected_version else None
-        if not config:
+        frozen_assets = selection.get("asset_execution_snapshot")
+        if frozen_assets:
+            if content_hash(frozen_assets) != selection.get("asset_execution_hash"):
+                raise HTTPException(status_code=409, detail="审批选模冻结资产快照完整性校验失败")
+            assets = deepcopy(frozen_assets)
+        else:
+            try:
+                assets = runtime_assets.resolve_rating(
+                    principal.tenant_id, template_key, selected_version, allow_historical=True
+                ) if template_key and selected_version else None
+            except TenantAssetError as exc:
+                raise HTTPException(status_code=409, detail=f"审批选模资产已失效：{exc.message}") from exc
+        if not assets:
             raise HTTPException(status_code=409, detail="审批单缺少有效的模型选择结果")
-        rating_input, readiness = prepare_rating_input(counterparty, enterprise_data_repository.build_profile(counterparty["id"]), template_key, config)
-        rating_input, readiness = apply_effective_observations(rating_input, readiness, indicator_observation_repository.effective(counterparty["id"]))
+        if selection.get("asset_resolution_hash") and selection["asset_resolution_hash"] != assets["resolution_hash"]:
+            raise HTTPException(status_code=409, detail="审批选模冻结资产解析哈希不一致")
+        config = assets["model"]["config"]
+        rating_input, readiness = prepare_rating_input(counterparty, enterprise_data_repository.build_profile(principal.tenant_id, counterparty["id"]), template_key, config)
+        rating_input, readiness = apply_effective_observations(rating_input, readiness, indicator_observation_repository.effective(principal.tenant_id, counterparty["id"]))
         if not readiness["ready_for_scoring"]:
             missing = ", ".join(readiness["required_missing"][:5])
             raise HTTPException(status_code=422, detail=f"治理数据未达到模型计算门槛，缺少：{missing}")
         selected_data_hash = selection.get("input_readiness", {}).get("data_snapshot_hash")
         if selected_data_hash and selected_data_hash != readiness.get("data_snapshot_hash"):
             raise HTTPException(status_code=409, detail="治理数据已在选模后发生变化，请重新执行模型选择与数据预检")
-        result = rate_counterparty(rating_input, config)
+        result = runtime_assets.execute_rating(rating_input, assets)
         if not result.get("ok"):
             raise HTTPException(status_code=422, detail=result.get("error", "评级计算失败"))
         result["input_readiness"] = readiness_summary(readiness)
         result["enterprise_risk_screening"] = evaluate_indicator_pool(rating_input, config)
-        run = run_repository.save_run(rating_input, template_key, config, result, actor=principal.name, case_id=case_id, commit=False)
+        asset_snapshot = runtime_assets.public_snapshot(assets)
+        run = run_repository.save_run(principal.tenant_id, rating_input, template_key, config, result, actor=principal.name, case_id=case_id, commit=False, asset_snapshot=asset_snapshot)
         payload = {
             "total_score": result["total_score"],
             "rating": result["rating"],
             "rating_run_id": run["id"],
             "model_snapshot_id": run["model_snapshot_id"],
             "result_hash": run["result_hash"],
+            "assets_hash": run["assets_hash"],
+            "asset_resolution_hash": assets["resolution_hash"],
         }
     else:
         scoring = case["data"].get("scoring", {})
-        run = run_repository.get(scoring.get("rating_run_id", ""))
+        run = run_repository.get(principal.tenant_id, scoring.get("rating_run_id", ""))
         if not run or run.get("case_id") != case_id:
             raise HTTPException(status_code=409, detail="审批单缺少可信评级运行结果")
         result = run["result"]
@@ -602,6 +645,6 @@ def automate_case_stage(
                 updated,
                 authority_policy_repository.active_snapshot(),
             )
-        return approval_repository.save(updated, actor=principal.name, event_type=f"approval_{stage}_automated", expected_row_version=request.expected_row_version)
+        return approval_repository.save(principal.tenant_id, updated, actor=principal.name, event_type=f"approval_{stage}_automated", expected_row_version=request.expected_row_version)
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

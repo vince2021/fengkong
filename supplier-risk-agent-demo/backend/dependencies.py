@@ -7,8 +7,23 @@ from backend.authority_policy_repository import AuthorityPolicyRepository
 from backend.database import get_db_session
 from backend.repository import ApprovalCaseRepository, AuditRepository, CreditFacilityRepository, CreditReportRepository, DecisionGovernanceRepository, DecisionPipelineRepository, DemoRepository, DocumentRepository, EnterpriseDataRepository, EnterpriseIndicatorObservationRepository, ModelGovernanceRepository, ModelMonitoringRepository, NotificationRepository, PortfolioRatingBatchRepository, RatingRunRepository, RuleCenterGovernanceRepository, RuleCenterReleasePackageRepository, RuleCenterReplayComparisonRepository, RuleCenterReplayDatasetRepository, RuleDefinitionRepository, RuleSetDefinitionRepository
 from backend.storage import ObjectStorage, build_object_storage
+from backend.supervised_validation_attachment_repository import SupervisedValidationAttachmentRepository
+from backend.model_validation_issuance_repository import ModelValidationIssuanceRepository
+from backend.model_risk_policy_repository import ModelRiskPolicyRepository
 from backend.scorecard_repository import ScorecardRepository
 from backend.credit_calibration_repository import CreditCalibrationRepository
+from backend.counterparty_import_repository import CounterpartyImportRepository
+from backend.counterparty_mapping_repository import CounterpartyImportMappingRepository
+from backend.counterparty_repository import CounterpartyRepository
+from backend.tenant_admin_repository import TenantAdminRepository
+from backend.product_package_repository import ProductPackageRepository
+from backend.governance_evidence import CounterpartyGovernanceEvidenceRepository
+from backend.tenant_asset_repository import TenantAssetRepository
+from backend.tenant_runtime_assets import TenantRuntimeAssetResolver
+from backend.tenant_rollout_repository import TenantRolloutRepository
+from backend.tenant_outcome_repository import TenantOutcomeRepository
+from backend.tenant_usage_repository import TenantUsageRepository
+from backend.notification_delivery_repository import NotificationDeliveryRepository
 
 
 demo_repository = DemoRepository()
@@ -17,6 +32,58 @@ object_storage = build_object_storage()
 
 def get_demo_repository() -> DemoRepository:
     return demo_repository
+
+
+def get_tenant_admin_repository(session: Session = Depends(get_db_session)) -> TenantAdminRepository:
+    return TenantAdminRepository(session)
+
+
+def get_product_package_repository(session: Session = Depends(get_db_session)) -> ProductPackageRepository:
+    return ProductPackageRepository(session)
+
+
+def get_tenant_usage_repository(session: Session = Depends(get_db_session)) -> TenantUsageRepository:
+    return TenantUsageRepository(session)
+
+
+def get_tenant_asset_repository(session: Session = Depends(get_db_session)) -> TenantAssetRepository:
+    return TenantAssetRepository(session)
+
+
+def get_tenant_runtime_asset_resolver(
+    session: Session = Depends(get_db_session),
+    repository: DemoRepository = Depends(get_demo_repository),
+) -> TenantRuntimeAssetResolver:
+    return TenantRuntimeAssetResolver(TenantAssetRepository(session), repository)
+
+
+def get_tenant_rollout_repository(
+    session: Session = Depends(get_db_session),
+    repository: DemoRepository = Depends(get_demo_repository),
+) -> TenantRolloutRepository:
+    return TenantRolloutRepository(session, repository)
+
+
+def get_tenant_outcome_repository(session: Session = Depends(get_db_session)) -> TenantOutcomeRepository:
+    return TenantOutcomeRepository(session)
+
+
+def get_counterparty_repository(session: Session = Depends(get_db_session)) -> CounterpartyRepository:
+    return CounterpartyRepository(session)
+
+
+def get_counterparty_governance_evidence_repository(
+    session: Session = Depends(get_db_session),
+) -> CounterpartyGovernanceEvidenceRepository:
+    return CounterpartyGovernanceEvidenceRepository(session)
+
+
+def get_counterparty_import_repository(session: Session = Depends(get_db_session)) -> CounterpartyImportRepository:
+    return CounterpartyImportRepository(session)
+
+
+def get_counterparty_mapping_repository(session: Session = Depends(get_db_session)) -> CounterpartyImportMappingRepository:
+    return CounterpartyImportMappingRepository(session)
 
 
 def get_approval_repository(session: Session = Depends(get_db_session)) -> ApprovalCaseRepository:
@@ -45,6 +112,10 @@ def get_document_repository(session: Session = Depends(get_db_session)) -> Docum
 
 def get_notification_repository(session: Session = Depends(get_db_session)) -> NotificationRepository:
     return NotificationRepository(session)
+
+
+def get_notification_delivery_repository(session: Session = Depends(get_db_session)) -> NotificationDeliveryRepository:
+    return NotificationDeliveryRepository(session)
 
 
 def get_model_governance_repository(session: Session = Depends(get_db_session)) -> ModelGovernanceRepository:
@@ -77,6 +148,26 @@ def get_enterprise_indicator_observation_repository(session: Session = Depends(g
 
 def get_object_storage() -> ObjectStorage:
     return object_storage
+
+
+def get_supervised_validation_attachment_repository(
+    session: Session = Depends(get_db_session),
+    storage: ObjectStorage = Depends(get_object_storage),
+) -> SupervisedValidationAttachmentRepository:
+    return SupervisedValidationAttachmentRepository(session, storage)
+
+
+def get_model_validation_issuance_repository(
+    session: Session = Depends(get_db_session),
+    storage: ObjectStorage = Depends(get_object_storage),
+) -> ModelValidationIssuanceRepository:
+    return ModelValidationIssuanceRepository(session, storage)
+
+
+def get_model_risk_policy_repository(
+    session: Session = Depends(get_db_session),
+) -> ModelRiskPolicyRepository:
+    return ModelRiskPolicyRepository(session)
 
 
 def get_rule_definition_repository(

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from backend.dependencies import get_approval_repository, get_credit_facility_repository, get_demo_repository
-from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditFacilityRepository, DemoRepository
+from backend.counterparty_repository import CounterpartyError, CounterpartyRepository
+from backend.dependencies import get_approval_repository, get_counterparty_repository, get_credit_facility_repository
+from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditFacilityRepository
 from backend.schemas import AlertDispositionRequest, CreditUsageRequest, FacilityControlConditionCompleteRequest, FacilityControlExtensionCreateRequest, FacilityControlExtensionReviewRequest, FacilityControlRequest, FacilityRenewalRequest, PostCreditReviewRequest, RiskEventCreate
 from backend.security import Principal, enforce_counterparty_scope, require_permissions
 from rating.approval_workflow import create_facility_renewal_case
@@ -17,7 +18,7 @@ def list_facilities(
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("facilities:view")),
 ) -> list[dict]:
-    return repository.list(principal.counterparty_id if "client" in principal.roles else None)
+    return repository.list(principal.tenant_id, principal.counterparty_id if "client" in principal.roles else None)
 
 
 @router.get("/summary")
@@ -25,7 +26,7 @@ def facility_summary(
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("facilities:view")),
 ) -> dict:
-    return repository.summary(principal.counterparty_id if "client" in principal.roles else None)
+    return repository.summary(principal.tenant_id, principal.counterparty_id if "client" in principal.roles else None)
 
 
 @router.get("/alerts")
@@ -33,7 +34,7 @@ def list_facility_alerts(
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("facilities:view")),
 ) -> list[dict]:
-    return repository.list_alerts(principal.counterparty_id if "client" in principal.roles else None)
+    return repository.list_alerts(principal.tenant_id, principal.counterparty_id if "client" in principal.roles else None)
 
 
 @router.get("/risk-events")
@@ -41,7 +42,7 @@ def list_risk_events(
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("facilities:view")),
 ) -> list[dict]:
-    return repository.list_risk_events(counterparty_id=principal.counterparty_id if "client" in principal.roles else None)
+    return repository.list_risk_events(principal.tenant_id, counterparty_id=principal.counterparty_id if "client" in principal.roles else None)
 
 
 @router.post("/alerts/{alert_id}/acknowledge")
@@ -50,7 +51,7 @@ def acknowledge_alert(
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("facility_alerts:act")),
 ) -> dict:
-    alert = repository.acknowledge_alert(alert_id, principal.name)
+    alert = repository.acknowledge_alert(principal.tenant_id, alert_id, principal.name)
     if not alert:
         raise HTTPException(status_code=404, detail="贷后预警不存在")
     return alert
@@ -66,7 +67,7 @@ def dispose_alert(
     if request.action != "monitor" and not principal.can("facilities:control"):
         raise HTTPException(status_code=403, detail="当前角色只能持续监控预警，无权执行授信控制")
     try:
-        return repository.dispose_alert(alert_id, request.expected_alert_version, request.expected_facility_version, request.action, request.target_limit, principal.name, request.conclusion)
+        return repository.dispose_alert(principal.tenant_id, alert_id, request.expected_alert_version, request.expected_facility_version, request.action, request.target_limit, principal.name, request.conclusion)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -80,7 +81,7 @@ def scan_facilities(
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     principal: Principal = Depends(require_permissions("facilities:scan")),
 ) -> dict:
-    return repository.scan(principal.name)
+    return repository.scan(principal.tenant_id, principal.name)
 
 
 @router.get("/{facility_id}")
@@ -91,11 +92,11 @@ def get_facility(
     principal: Principal = Depends(require_permissions("facilities:view")),
 ) -> dict:
     facility = _scoped_facility(repository, facility_id, principal)
-    renewal_case = approval_repository.latest_renewal(facility_id)
+    renewal_case = approval_repository.latest_renewal(principal.tenant_id, facility_id)
     return {
         **facility,
-        "transactions": repository.list_transactions(facility_id),
-        "control_conditions": repository.list_control_conditions(facility_id),
+        "transactions": repository.list_transactions(principal.tenant_id, facility_id),
+        "control_conditions": repository.list_control_conditions(principal.tenant_id, facility_id),
         "renewal_case": _renewal_case_summary(renewal_case, facility),
     }
 
@@ -113,6 +114,7 @@ def complete_control_condition(
         raise HTTPException(status_code=403, detail="授信控制条件必须由风控经理完成闭环")
     try:
         return repository.complete_control_condition(
+            principal.tenant_id,
             facility_id,
             condition_id,
             request.expected_row_version,
@@ -140,6 +142,7 @@ def request_control_extension(
         raise HTTPException(status_code=403, detail="只有风控经理可以发起控制条件延期申请")
     try:
         return repository.request_control_extension(
+            principal.tenant_id,
             facility_id,
             condition_id,
             request.expected_condition_version,
@@ -170,6 +173,7 @@ def review_control_extension(
         raise HTTPException(status_code=403, detail="控制条件延期必须由授信审批人独立审批")
     try:
         return repository.review_control_extension(
+            principal.tenant_id,
             facility_id,
             condition_id,
             extension_id,
@@ -195,12 +199,12 @@ def create_facility_renewal(
     response: Response,
     repository: CreditFacilityRepository = Depends(get_credit_facility_repository),
     approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
-    demo_repository: DemoRepository = Depends(get_demo_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     principal: Principal = Depends(require_permissions("approvals:create")),
 ) -> dict:
     facility = _scoped_facility(repository, facility_id, principal)
     payload = request.model_dump()
-    existing = approval_repository.latest_renewal(facility_id, active_only=True)
+    existing = approval_repository.latest_renewal(principal.tenant_id, facility_id, active_only=True)
     if existing:
         if _renewal_matches(existing, payload):
             response.status_code = 200
@@ -215,10 +219,11 @@ def create_facility_renewal(
             status_code=422,
             detail=f"续授信申请额度不能低于当前已用余额 {facility['used_limit']:.2f}",
         )
-    counterparty = demo_repository.get_counterparty(facility["counterparty_id"])
-    if not counterparty:
-        raise HTTPException(status_code=404, detail="授信对应的客商主体不存在")
-    risk_baseline = repository.risk_snapshot(facility_id)
+    try:
+        counterparty = counterparty_repository.get(principal.tenant_id, facility["counterparty_id"])
+    except CounterpartyError as exc:
+        raise HTTPException(status_code=404, detail="授信对应的客商主体不存在") from exc
+    risk_baseline = repository.risk_snapshot(principal.tenant_id, facility_id)
     case = create_facility_renewal_case(
         counterparty,
         facility,
@@ -230,6 +235,7 @@ def create_facility_renewal(
     )
     try:
         saved = approval_repository.save(
+            principal.tenant_id,
             case,
             actor=principal.name,
             event_type="facility_renewal_case_created",
@@ -260,7 +266,7 @@ def create_facility_renewal(
         return {**saved, "idempotent": False}
     except ConcurrentUpdateError as exc:
         repository.rollback()
-        concurrent = approval_repository.latest_renewal(facility_id, active_only=True)
+        concurrent = approval_repository.latest_renewal(principal.tenant_id, facility_id, active_only=True)
         if concurrent and _renewal_matches(concurrent, payload):
             response.status_code = 200
             return {**concurrent, "idempotent": True}
@@ -276,7 +282,7 @@ def create_credit_transaction(
 ) -> dict:
     _scoped_facility(repository, facility_id, principal)
     try:
-        return repository.transact(facility_id, request.transaction_ref, request.transaction_type, request.amount, request.expected_row_version, principal.name, request.reason)
+        return repository.transact(principal.tenant_id, facility_id, request.transaction_ref, request.transaction_type, request.amount, request.expected_row_version, principal.name, request.reason)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -294,7 +300,7 @@ def create_risk_event(
 ) -> dict:
     _scoped_facility(repository, facility_id, principal)
     try:
-        return repository.create_risk_event(facility_id, request.model_dump(), principal.name)
+        return repository.create_risk_event(principal.tenant_id, facility_id, request.model_dump(), principal.name)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -312,7 +318,7 @@ def control_facility(
 ) -> dict:
     _scoped_facility(repository, facility_id, principal)
     try:
-        return repository.control(facility_id, request.expected_row_version, request.action, request.target_limit, principal.name, request.reason)
+        return repository.control(principal.tenant_id, facility_id, request.expected_row_version, request.action, request.target_limit, principal.name, request.reason)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -330,7 +336,7 @@ def review_facility(
 ) -> dict:
     _scoped_facility(repository, facility_id, principal)
     try:
-        return repository.review(facility_id, request.expected_row_version, request.rating, request.next_review_days, principal.name, request.conclusion)
+        return repository.review(principal.tenant_id, facility_id, request.expected_row_version, request.rating, request.next_review_days, principal.name, request.conclusion)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -340,7 +346,7 @@ def review_facility(
 
 
 def _scoped_facility(repository: CreditFacilityRepository, facility_id: str, principal: Principal) -> dict:
-    facility = repository.get(facility_id)
+    facility = repository.get(principal.tenant_id, facility_id)
     if not facility:
         raise HTTPException(status_code=404, detail="授信台账不存在")
     enforce_counterparty_scope(principal, facility["counterparty_id"])

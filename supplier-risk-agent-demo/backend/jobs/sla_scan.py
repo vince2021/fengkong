@@ -14,6 +14,7 @@ from backend.database import SessionLocal
 from backend.db_models import AuditEventRecord, SlaScanLeaseRecord
 from backend.repository import AuditRepository, NotificationRepository
 from backend.sla_monitor import SLA_SCAN_EXECUTION_TIMEOUT_MINUTES, SLA_SCAN_HEARTBEAT_INTERVAL_SECONDS, SLA_SCAN_LEASE_HARD_EXPIRY_MINUTES, SLA_SCAN_LEASE_KEY, run_sla_scan, sla_scan_scheduler_run_key
+from backend.tenant_registry import PLATFORM_INTERNAL_TENANT_ID
 
 
 SCHEDULER_NAME = "全域 SLA 自动调度器"
@@ -154,6 +155,7 @@ def run_scheduled_sla_scan(
 
 def run_manual_sla_scan(
     session: Session,
+    tenant_id: str,
     actor: str,
     now: datetime | None = None,
 ) -> dict:
@@ -163,6 +165,7 @@ def run_manual_sla_scan(
         with _ScanLeaseHeartbeat(execution["execution_id"]) as heartbeat:
             result = run_sla_scan(
                 session,
+                tenant_id=tenant_id,
                 now=run_at,
                 actor=actor,
                 lease_guard=lambda final: heartbeat.assert_owned(session, final),
@@ -194,6 +197,8 @@ def retry_failed_sla_scan(
         raise ValueError("SLA 扫描任务键长度必须为 1—128 个字符")
     failure = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_failure",
             AuditEventRecord.aggregate_id == run_key,
             AuditEventRecord.event_type == "sla_scan_failed",
@@ -203,6 +208,8 @@ def retry_failed_sla_scan(
         raise SlaScanRetryNotFound("失败扫描记录不存在，无法发起人工重试")
     completed = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan",
             AuditEventRecord.aggregate_id == run_key,
             AuditEventRecord.event_type == "sla_scan_completed",
@@ -216,6 +223,8 @@ def retry_failed_sla_scan(
     audit = AuditRepository(session)
     retry_events = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_failure",
             AuditEventRecord.aggregate_id == run_key,
             AuditEventRecord.event_type.in_({
@@ -337,6 +346,8 @@ def _finish_scan_execution(
         raise ValueError("SLA 扫描执行结果必须为 completed、failed 或 aborted")
     prior_terminal = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_execution",
             AuditEventRecord.aggregate_id == execution["execution_id"],
             AuditEventRecord.event_type.in_({
@@ -406,6 +417,8 @@ def _acquire_scan_lease(session: Session, execution: dict, now: datetime) -> dic
     if lease.execution_id:
         terminal_holder = session.scalars(
             select(AuditEventRecord).where(
+                AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+                AuditEventRecord.scope_type == "platform",
                 AuditEventRecord.aggregate_type == "sla_scan_execution",
                 AuditEventRecord.aggregate_id == lease.execution_id,
                 AuditEventRecord.event_type.in_({
@@ -476,6 +489,8 @@ def _record_expired_scan_execution(session: Session, lease: dict, expired_at: da
     execution_id = lease["execution_id"]
     terminal = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_execution",
             AuditEventRecord.aggregate_id == execution_id,
             AuditEventRecord.event_type.in_({
@@ -616,6 +631,8 @@ def force_release_scan_lease(
     elapsed_seconds = max(0, int((release_at - acquired_at).total_seconds())) if acquired_at else 0
     terminal = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == "sla_scan_execution",
             AuditEventRecord.aggregate_id == expected_execution_id,
             AuditEventRecord.event_type.in_({
@@ -742,6 +759,7 @@ def _record_scan_failure(session: Session, run_key: str, run_at: datetime, error
     notifications = NotificationRepository(session)
     for role in ("operations", "admin"):
         notifications.create_if_absent(
+            PLATFORM_INTERNAL_TENANT_ID,
             {
                 "case_id": None,
                 "counterparty_id": None,

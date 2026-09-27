@@ -304,7 +304,7 @@ export default function PostCreditCenter({ focusCaseId, focusFacilityId, focusCo
           </>}
         </section>}
         {selected.control_conditions.length > 0 && <section className="facility-control-conditions">
-          <header><div><span>APPROVAL CONDITIONS · SLA</span><strong>审批控制条件执行与升级台账</strong><p>控制条件按截止日自动预警；逾期 7 天升级授信审批人，逾期 30 天升级平台管理员。</p></div><i>{selected.pending_control_count} 待完成 · {selected.overdue_control_count} 已逾期</i></header>
+          <header><div><span>APPROVAL CONDITIONS · SLA</span><strong>审批控制条件执行与升级台账</strong><p>控制条件按截止日自动预警；逾期 7 天升级授信审批人，逾期 30 天升级租户运营值班。</p></div><i>{selected.pending_control_count} 待完成 · {selected.overdue_control_count} 已逾期</i></header>
           <div>{selected.control_conditions.map((condition) => <article id={`facility-condition-${condition.id}`} className={`${condition.status} ${condition.sla_status} escalation-${condition.escalation_level} ${focusConditionId === condition.id ? "focused" : ""}`} key={condition.id}>
             <span>{String(condition.sequence).padStart(2, "0")}</span>
             <div>
@@ -456,8 +456,8 @@ function facilityOperationGuide(facility: CreditFacility, alerts: FacilityAlert[
   return { tone: "healthy", title: "当前授信运行正常", priority: "按计划监控", risk: "暂无未闭环预警、临期或高使用率信号。", owner: "客户经理", action: "持续跟踪交易、回款和外部风险，按台账计划准备下一次复评。", completion: `在 ${formatDate(facility.next_review_at)} 前完成例行复评，异常信号及时登记。` };
 }
 
-function conditionRoleLabel(role: "risk_manager" | "approver" | "admin"): string {
-  return { risk_manager: "风控经理", approver: "授信审批人", admin: "平台管理员" }[role];
+function conditionRoleLabel(role: "risk_manager" | "approver" | "operations"): string {
+  return { risk_manager: "风控经理", approver: "授信审批人", operations: "运营值班" }[role];
 }
 
 function extensionStatusLabel(status: "pending" | "approved" | "rejected" | "cancelled"): string {

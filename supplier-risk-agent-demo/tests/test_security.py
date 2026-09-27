@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from backend.security import _extract_roles, validate_security_configuration
+from fastapi import HTTPException
+
+from backend.security import _extract_roles, _required_scope_identifier, validate_security_configuration
 
 
 class SecurityTest(unittest.TestCase):
@@ -23,6 +25,16 @@ class SecurityTest(unittest.TestCase):
             }
         )
         self.assertEqual(roles, ["approver", "auditor", "risk_manager"])
+
+    def test_tenant_claim_is_required_and_validated(self) -> None:
+        self.assertEqual(
+            _required_scope_identifier({"tenant_id": "tenant-cn-east-01"}, "tenant_id"),
+            "tenant-cn-east-01",
+        )
+        with self.assertRaises(HTTPException):
+            _required_scope_identifier({}, "tenant_id")
+        with self.assertRaises(HTTPException):
+            _required_scope_identifier({"tenant_id": "../other-tenant"}, "tenant_id")
 
 
 if __name__ == "__main__":

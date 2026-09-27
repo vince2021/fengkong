@@ -25,6 +25,7 @@ def sla_summary(
 ) -> dict:
     return build_operations_summary(
         session,
+        principal.tenant_id,
         recipient_roles=None if "admin" in principal.roles else principal.roles,
         recipient_subject=None if "admin" in principal.roles else principal.subject,
         counterparty_id=principal.counterparty_id if "client" in principal.roles else None,
@@ -39,6 +40,7 @@ def personal_task_queue(
 ) -> dict:
     return build_personal_task_queue(
         session,
+        principal.tenant_id,
         principal.roles,
         principal.counterparty_id if "client" in principal.roles else None,
         actor_subject=principal.subject,
@@ -81,6 +83,7 @@ def team_task_board(
 ) -> dict:
     return build_team_task_board(
         session,
+        principal.tenant_id,
         limit=limit,
         can_manage=principal.can("tasks:manage"),
     )
@@ -146,7 +149,7 @@ def scan_sla(
     principal: Principal = Depends(require_permissions("sla:scan", "facilities:scan")),
 ) -> dict:
     try:
-        return run_manual_sla_scan(session, actor=principal.name)
+        return run_manual_sla_scan(session, principal.tenant_id, actor=principal.name)
     except SlaScanExecutionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except SlaScanLeaseLost as exc:
@@ -159,7 +162,7 @@ def sla_scan_history(
     session: Session = Depends(get_db_session),
     principal: Principal = Depends(require_permissions("operations:view")),
 ) -> dict:
-    return list_sla_scan_runs(session, limit=limit)
+    return list_sla_scan_runs(session, principal.tenant_id, limit=limit)
 
 
 @router.post("/sla/scans/{run_key}/retry")
@@ -208,7 +211,7 @@ def document_correction_workbench(
     repository: DocumentRepository = Depends(get_document_repository),
     principal: Principal = Depends(require_permissions("operations:view")),
 ) -> list[dict]:
-    return repository.list_correction_workbench(active_only)
+    return repository.list_correction_workbench(principal.tenant_id, active_only)
 
 
 @router.post("/document-corrections/{correction_id}/actions")
@@ -220,6 +223,7 @@ def act_on_document_correction(
 ) -> dict:
     try:
         repository.act_on_correction(
+            principal.tenant_id,
             correction_id,
             request.expected_row_version,
             request.action,
@@ -229,7 +233,7 @@ def act_on_document_correction(
             request.extension_hours,
         )
         return next(
-            item for item in repository.list_correction_workbench(False)
+            item for item in repository.list_correction_workbench(principal.tenant_id, False)
             if item["id"] == correction_id
         )
     except StopIteration as exc:

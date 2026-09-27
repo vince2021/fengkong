@@ -36,9 +36,10 @@ class PersistenceTest(unittest.TestCase):
 
     def test_approval_case_is_persistent_and_audited(self) -> None:
         repository = ApprovalCaseRepository(self.session)
-        case = repository.save(create_approval_case(self.counterparty), actor="客户经理", event_type="approval_case_created")
-        loaded = repository.get(case["case_id"])
-        events = AuditRepository(self.session).list(case["case_id"])
+        tenant_id = "tenant-demo-hengxin"
+        case = repository.save(tenant_id, create_approval_case(self.counterparty), actor="客户经理", event_type="approval_case_created")
+        loaded = repository.get(tenant_id, case["case_id"])
+        events = AuditRepository(self.session).list(tenant_id, case["case_id"])
 
         self.assertEqual(loaded["counterparty_id"], self.counterparty["id"])
         self.assertEqual(loaded["row_version"], 1)
@@ -48,8 +49,9 @@ class PersistenceTest(unittest.TestCase):
     def test_rating_run_binds_input_model_and_result_snapshots(self) -> None:
         result = rate_counterparty(self.counterparty, self.config)
         repository = RatingRunRepository(self.session)
-        run = repository.save_run(self.counterparty, "general", self.config, result)
-        loaded = repository.get(run["id"])
+        tenant_id = "tenant-demo-hengxin"
+        run = repository.save_run(tenant_id, self.counterparty, "general", self.config, result)
+        loaded = repository.get(tenant_id, run["id"])
 
         self.assertEqual(loaded["input"]["id"], self.counterparty["id"])
         self.assertEqual(loaded["result"]["total_score"], result["total_score"])

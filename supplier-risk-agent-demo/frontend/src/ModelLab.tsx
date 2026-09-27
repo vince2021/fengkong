@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import ModelGovernancePanel from "./ModelGovernancePanel";
+import TenantAssetCatalogPanel from "./TenantAssetCatalogPanel";
 import type { Counterparty, EditableIndicator, EnterpriseIndicatorObservation, EnterpriseRiskIndicator, ModelDetail, ModelImpact, ModelSummary, RatingTrace } from "./types";
 
 const money = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", maximumFractionDigits: 0 });
 
 type Notice = { kind: "error" | "success"; text: string };
 
-export default function ModelLab({ focus, counterparties, canView, canSimulate, canManage, canReview, canManageIndicatorData, canReviewIndicatorData, onNotice }: { focus?: { modelKey: string; requestId: number } | null; counterparties: Counterparty[]; canView: boolean; canSimulate: boolean; canManage: boolean; canReview: boolean; canManageIndicatorData: boolean; canReviewIndicatorData: boolean; onNotice: (notice: Notice | null) => void }) {
+export default function ModelLab({ focus, counterparties, currentSubject, currentRoles, canView, canSimulate, canManage, canReview, canManageIndicatorData, canReviewIndicatorData, canViewTenantAssets, canManageTenantAssets, canReviewTenantAssets, onNotice }: { focus?: { modelKey: string; requestId: number } | null; counterparties: Counterparty[]; currentSubject: string; currentRoles: string[]; canView: boolean; canSimulate: boolean; canManage: boolean; canReview: boolean; canManageIndicatorData: boolean; canReviewIndicatorData: boolean; canViewTenantAssets: boolean; canManageTenantAssets: boolean; canReviewTenantAssets: boolean; onNotice: (notice: Notice | null) => void }) {
   const [models, setModels] = useState<ModelSummary[]>([]);
   const [modelKey, setModelKey] = useState("general");
   const [counterpartyId, setCounterpartyId] = useState(counterparties[0]?.id ?? "");
@@ -130,6 +131,7 @@ export default function ModelLab({ focus, counterparties, canView, canSimulate, 
   if (!counterparties.length) return <div className="panel model-empty"><strong>暂无可分析客商</strong><p>当前身份的数据范围内没有可用样本。</p></div>;
 
   return <div className="model-lab">
+    <TenantAssetCatalogPanel currentSubject={currentSubject} canView={canViewTenantAssets} canManage={canManageTenantAssets} canReview={canReviewTenantAssets} onNotice={onNotice} />
     <section className="panel model-toolbar">
       <div><span>MODEL GOVERNANCE</span><h2>模型运算链与指标影响实验室</h2><p>从原始指标、维度扣分、权重汇总到规则覆盖，完整解释最终授信策略。</p></div>
       <div className="model-selectors"><label><span>模型模板</span><select value={modelKey} onChange={(event) => setModelKey(event.target.value)}>{models.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}</select></label><label><span>模拟客商</span><select value={counterpartyId} onChange={(event) => setCounterpartyId(event.target.value)}>{counterparties.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label></div>
@@ -183,7 +185,7 @@ export default function ModelLab({ focus, counterparties, canView, canSimulate, 
 
       <section id="model-governance" className="model-zone governance-zone">
         <ModelZoneHeader index="05" eyebrow="MODEL GOVERNANCE" title="模型配置、验证与发布治理" description="模型管理员在此组合指标、调整配置和提交版本；独立复核角色负责验证、发布、监控与回滚。" tags={["配置", "验证", "发布", "监控"]} />
-      <ModelGovernancePanel model={model} modelKey={modelKey} canManage={canManage} canReview={canReview} onPublished={async () => { await loadAnalysis(); const rows = await api.models(); setModels(rows); }} onNotice={onNotice} />
+      <ModelGovernancePanel model={model} modelKey={modelKey} currentSubject={currentSubject} currentRoles={currentRoles} canManage={canManage} canReview={canReview} onPublished={async () => { await loadAnalysis(); const rows = await api.models(); setModels(rows); }} onNotice={onNotice} />
       </section>
     </>}
   </div>;

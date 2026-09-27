@@ -15,6 +15,8 @@ from backend.scorecard_repository import ScorecardRepository
 from tests.database_support import IsolatedTestDatabase
 from tests.test_scorecard_center import scorecard
 
+TENANT_ID = "tenant-demo-hengxin"
+
 
 class TestModelScorecardBindingApi(unittest.TestCase):
     @classmethod
@@ -53,7 +55,7 @@ class TestModelScorecardBindingApi(unittest.TestCase):
             datasets = RuleCenterReplayDatasetRepository(session)
             snapshots = []
             for split in ("TRAIN", "VALID", "OOT"):
-                dataset = datasets.create_dataset(f"MODEL-{split}-{uuid4().hex[:8]}", f"模型{split}样本", "评分卡模型绑定验证", "validator", "模型验证员")
+                dataset = datasets.create_dataset(TENANT_ID, f"MODEL-{split}-{uuid4().hex[:8]}", f"模型{split}样本", "评分卡模型绑定验证", "validator", "模型验证员")
                 records = []
                 for index in range(8):
                     event = index >= 4
@@ -66,13 +68,13 @@ class TestModelScorecardBindingApi(unittest.TestCase):
                         "outcome": "bad" if event else "good",
                         "predicted_pd": 0.8 if event else 0.2,
                     })
-                snapshots.append(datasets.import_snapshot(dataset["id"], {
+                snapshots.append(datasets.import_snapshot(TENANT_ID, dataset["id"], {
                     "source_name": f"{split}固定样本", "schema_version": "1.0", "as_of_date": date(2026, 6, 30),
                     "evidence_reference": f"test://model-scorecard/{split.lower()}", "data_classification": "synthetic",
                     "field_mapping": {}, "label_field": "outcome", "observed_at_field": "observed_at", "records": records,
                 }, "validator", "模型验证员"))
             scorecards = ScorecardRepository(session)
-            run = scorecards.create_development_run({
+            run = scorecards.create_development_run(TENANT_ID, {
                 "scorecard_asset_id": self.asset["id"], "dataset_snapshot_id": snapshots[0]["id"],
                 "validation_snapshot_id": snapshots[1]["id"], "oot_snapshot_id": snapshots[2]["id"],
                 "subject_id_field": "id", "predicted_probability_field": "predicted_pd",

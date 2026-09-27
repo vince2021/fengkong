@@ -83,7 +83,9 @@ class TestGovernedScorecardRuntime(unittest.TestCase):
         config = model_config(binding)
         counterparty = {"id": "cp-4", "name": "丙企业", "counterparty_type": "supplier", "requested_limit": 800_000, "enterprise_risk": {"shareholder_change": 2}}
         result = rate_governed_scorecard(counterparty, config)
-        saved = RatingRunRepository(self.session).save_run(counterparty, "general", config, result, "测试员")
+        saved = RatingRunRepository(self.session).save_run(
+            "tenant-demo-hengxin", counterparty, "general", config, result, "测试员"
+        )
         snapshot = self.session.get(ModelSnapshotRecord, saved["model_snapshot_id"])
         self.assertEqual(snapshot.config_json["scorecard_binding"]["config_hash"], binding["config_hash"])
         self.assertEqual(snapshot.config_hash, content_hash(snapshot.config_json))

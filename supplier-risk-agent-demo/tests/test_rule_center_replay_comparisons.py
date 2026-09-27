@@ -20,6 +20,8 @@ from backend.main import app
 from backend.repository import RuleCenterReplayComparisonRepository, RuleCenterReplayDatasetRepository
 from tests.database_support import IsolatedTestDatabase
 
+TENANT_ID = "tenant-demo-hengxin"
+
 
 class _Models:
     def get_config(self, _demo, key):
@@ -113,7 +115,8 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
     def _snapshot(self, labels=("good", "bad", "good", "bad")):
         with database.SessionLocal() as session:
             dataset = RuleCenterReplayDataset(
-                id=str(uuid4()), code=f"CMP-{uuid4().hex[:8]}", name="比较样本",
+                id=str(uuid4()), tenant_id=TENANT_ID,
+                code=f"CMP-{uuid4().hex[:8]}", name="比较样本",
                 description="Champion Challenger 验证", status="active",
                 created_by="maker", created_by_name="制作者",
             )
@@ -136,7 +139,8 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
                     "label": labels[index] if labels else None, "observed_at": "2026-06-01",
                 })
             snapshot = RuleCenterReplayDatasetSnapshot(
-                id=str(uuid4()), dataset_id=dataset.id, version=1, source_name="test",
+                id=str(uuid4()), tenant_id=TENANT_ID,
+                dataset_id=dataset.id, version=1, source_name="test",
                 schema_version="1", as_of_date=date(2026, 6, 30), evidence_reference="test://comparison",
                 data_classification="synthetic", field_mapping_json={}, label_field="label" if labels else None,
                 observed_at_field="observed_at", sample_count=len(rows), samples_json=rows,
@@ -170,7 +174,7 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         snapshot_id = self._snapshot()
         with database.SessionLocal() as session:
             result = RuleCenterReplayComparisonRepository(session).run(
-                self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
+                TENANT_ID, self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
             )
         self.assertEqual(result["evidence_level"], "labeled")
         self.assertEqual(result["champion_model_version"], "1.0")
@@ -180,6 +184,10 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         self.assertEqual(result["metrics"]["champion"]["ks"], 1)
         self.assertEqual(result["metrics"]["challenger"]["confusion_matrix"], {"tp": 2, "fp": 0, "tn": 2, "fn": 0})
         self.assertEqual(len(result["evidence_hash"]), 64)
+        self.assertEqual(len(result["assets_hash"]), 64)
+        self.assertEqual(result["asset_snapshot"]["tenant_id"], TENANT_ID)
+        self.assertEqual(result["asset_snapshot"]["champion"]["model"]["key"], "champion")
+        self.assertEqual(result["asset_snapshot"]["challenger"]["model"]["key"], "challenger")
         self.assertFalse(result["gate"]["passed"])
         self.assertTrue(any(item["key"] == "rating_change_rate" for item in result["gate"]["violations"]))
 
@@ -188,7 +196,7 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         snapshot_id = self._snapshot(labels=())
         with database.SessionLocal() as session:
             result = RuleCenterReplayComparisonRepository(session).run(
-                self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
+                TENANT_ID, self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
             )
         self.assertEqual(result["evidence_level"], "unlabeled")
         self.assertIsNone(result["metrics"]["champion"]["ks"])
@@ -201,16 +209,16 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         snapshot_id = self._snapshot()
         with database.SessionLocal() as session:
             repository = RuleCenterReplayComparisonRepository(session)
-            result = repository.run(self._payload(snapshot_id), object(), _Models(), "maker", "制作者")
+            result = repository.run(TENANT_ID, self._payload(snapshot_id), object(), _Models(), "maker", "制作者")
             record = session.get(RuleCenterReplayComparisonRun, result["id"])
             record.gate_json = None
             session.commit()
 
-            listed = repository.list_runs()[0]
+            listed = repository.list_runs(TENANT_ID)[0]
             self.assertFalse(listed["gate"]["passed"])
             self.assertIn("历史比较证据未配置门禁", listed["gate"]["summary"])
             with self.assertRaisesRegex(ValueError, "请使用当前阈值重新运行"):
-                repository.request_exception(result["id"], {
+                repository.request_exception(TENANT_ID, result["id"], {
                     "reason": "旧证据不能直接进入例外审批流程",
                     "business_impact": "必须先基于当前阈值重新生成比较证据",
                     "compensating_controls": "重新运行前维持现有模型和人工复核",
@@ -222,8 +230,8 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         snapshot_id = self._snapshot()
         with database.SessionLocal() as session:
             repository = RuleCenterReplayComparisonRepository(session)
-            result = repository.run(self._payload(snapshot_id), object(), _Models(), "maker", "制作者")
-            exception = repository.request_exception(result["id"], {
+            result = repository.run(TENANT_ID, self._payload(snapshot_id), object(), _Models(), "maker", "制作者")
+            exception = repository.request_exception(TENANT_ID, result["id"], {
                 "reason": "新模型覆盖企业信用数据缺口，需要限期观察",
                 "business_impact": "若立即阻断会延迟重点客户的模型切换计划",
                 "compensating_controls": "例外期间全部进入人工复核并每日监控准入变化",
@@ -231,12 +239,12 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
             }, "maker", "制作者")
             self.assertEqual(exception["status"], "pending_review")
             with self.assertRaisesRegex(PermissionError, "必须分离"):
-                repository.review_exception(result["id"], exception["id"], 1, "approve", "同意限期例外", "maker", "制作者")
+                repository.review_exception(TENANT_ID, result["id"], exception["id"], 1, "approve", "同意限期例外", "maker", "制作者")
             approved = repository.review_exception(
-                result["id"], exception["id"], 1, "approve", "同意限期例外并持续监控", "risk", "风控经理"
+                TENANT_ID, result["id"], exception["id"], 1, "approve", "同意限期例外并持续监控", "risk", "风控经理"
             )
             self.assertEqual(approved["status"], "approved")
-            refreshed = repository.list_runs()[0]
+            refreshed = repository.list_runs(TENANT_ID)[0]
             self.assertEqual(refreshed["effective_status"], "exception_approved")
             self.assertFalse(refreshed["gate"]["passed"])
 
@@ -252,10 +260,10 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         })
         with database.SessionLocal() as session:
             repository = RuleCenterReplayComparisonRepository(session)
-            result = repository.run(payload, object(), _Models(), "maker", "制作者")
+            result = repository.run(TENANT_ID, payload, object(), _Models(), "maker", "制作者")
             self.assertTrue(result["gate"]["passed"])
             with self.assertRaisesRegex(ValueError, "无需申请例外"):
-                repository.request_exception(result["id"], {
+                repository.request_exception(TENANT_ID, result["id"], {
                     "reason": "无需申请但尝试创建例外申请记录",
                     "business_impact": "测试门禁通过时不允许创建例外申请",
                     "compensating_controls": "继续执行常规模型监控和复核机制",
@@ -276,7 +284,7 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
         })
         with database.SessionLocal() as session:
             result = RuleCenterReplayComparisonRepository(session).run(
-                payload, object(), _CrossScaleModels(), "maker", "制作者"
+                TENANT_ID, payload, object(), _CrossScaleModels(), "maker", "制作者"
             )
         self.assertTrue(result["gate"]["passed"])
         self.assertEqual(result["config"]["score_comparison_basis"], "standardized_0_100")
@@ -298,7 +306,7 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
             session.commit()
             with self.assertRaisesRegex(ValueError, "哈希不一致"):
                 RuleCenterReplayComparisonRepository(session).run(
-                    self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
+                    TENANT_ID, self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
                 )
 
     def test_permissions_fail_closed(self):
@@ -316,6 +324,32 @@ class TestRuleCenterReplayComparisons(unittest.TestCase):
             headers={"Authorization": "Bearer dev-model-admin"},
         )
         self.assertEqual(review_forbidden.status_code, 403, review_forbidden.text)
+
+    @patch("rating.scorecard.rate_counterparty", side_effect=_rate)
+    def test_comparison_and_exception_access_are_tenant_scoped(self, _mock):
+        snapshot_id = self._snapshot()
+        with database.SessionLocal() as session:
+            repository = RuleCenterReplayComparisonRepository(session)
+            result = repository.run(
+                TENANT_ID, self._payload(snapshot_id), object(), _Models(), "maker", "制作者"
+            )
+            self.assertEqual(repository.list_runs("tenant-demo-alt"), [])
+            with self.assertRaisesRegex(LookupError, "不存在"):
+                repository.run(
+                    "tenant-demo-alt", self._payload(snapshot_id), object(), _Models(),
+                    "alt-maker", "另一租户制作者",
+                )
+            with self.assertRaisesRegex(LookupError, "不存在"):
+                repository.list_exceptions("tenant-demo-alt", result["id"])
+            with self.assertRaisesRegex(LookupError, "不存在"):
+                repository.request_exception(
+                    "tenant-demo-alt", result["id"], {
+                        "reason": "跨租户证据不能申请例外审批",
+                        "business_impact": "验证所有权边界",
+                        "compensating_controls": "保持现有模型",
+                        "valid_until": date.today() + timedelta(days=30),
+                    }, "alt-maker", "另一租户制作者",
+                )
 
 
 if __name__ == "__main__":

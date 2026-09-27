@@ -7,8 +7,9 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from backend.credit_report import build_credit_report_snapshot, build_report_preview, render_credit_report_pdf
-from backend.dependencies import get_approval_repository, get_credit_report_repository, get_demo_repository, get_document_repository, get_object_storage, get_rating_run_repository
-from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditReportRepository, DemoRepository, DocumentRepository, RatingRunRepository, content_hash
+from backend.counterparty_repository import CounterpartyError, CounterpartyRepository
+from backend.dependencies import get_approval_repository, get_counterparty_repository, get_credit_report_repository, get_document_repository, get_object_storage, get_rating_run_repository
+from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, CreditReportRepository, DocumentRepository, RatingRunRepository, content_hash
 from backend.schemas import CreditReportCreate
 from backend.security import Principal, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
@@ -25,25 +26,25 @@ def list_credit_reports(
     principal: Principal = Depends(require_permissions("reports:view")),
 ) -> list[dict]:
     if case_id:
-        case = approval_repository.get(case_id)
+        case = approval_repository.get(principal.tenant_id, case_id)
         if not case:
             raise HTTPException(status_code=404, detail="审批申请不存在")
         enforce_counterparty_scope(principal, case["counterparty_id"])
-    return [_public_report(item) for item in repository.list(case_id=case_id)]
+    return [_public_report(item) for item in repository.list(principal.tenant_id, case_id=case_id)]
 
 
 @router.post("", status_code=201)
 def create_credit_report(
     request: CreditReportCreate,
     approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     report_repository: CreditReportRepository = Depends(get_credit_report_repository),
-    demo_repository: DemoRepository = Depends(get_demo_repository),
     rating_repository: RatingRunRepository = Depends(get_rating_run_repository),
     document_repository: DocumentRepository = Depends(get_document_repository),
     storage: ObjectStorage = Depends(get_object_storage),
     principal: Principal = Depends(require_permissions("reports:generate")),
 ) -> dict:
-    case = approval_repository.get(request.case_id)
+    case = approval_repository.get(principal.tenant_id, request.case_id)
     if not case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     enforce_counterparty_scope(principal, case["counterparty_id"])
@@ -53,7 +54,7 @@ def create_credit_report(
     scoring = case["data"].get("scoring")
     if not final_strategy or not scoring:
         raise HTTPException(status_code=409, detail="审批单缺少最终策略或可信评级结果")
-    rating_run = rating_repository.get(scoring.get("rating_run_id", ""))
+    rating_run = rating_repository.get(principal.tenant_id, scoring.get("rating_run_id", ""))
     if not rating_run or rating_run.get("case_id") != case["case_id"]:
         raise HTTPException(status_code=409, detail="审批单关联的评级运行不存在或归属不一致")
     if (
@@ -63,26 +64,32 @@ def create_credit_report(
         or content_hash(rating_run["result"]) != rating_run.get("result_hash")
     ):
         raise HTTPException(status_code=409, detail="评级运行输入或结果完整性校验失败")
-    counterparty = demo_repository.get_counterparty(case["counterparty_id"])
-    if not counterparty:
-        raise HTTPException(status_code=404, detail="客商不存在")
-    documents = document_repository.list(case_id=case["case_id"])
+    try:
+        counterparty = counterparty_repository.get(
+            principal.tenant_id,
+            case["counterparty_id"],
+            include_archived=True,
+        )
+    except CounterpartyError as exc:
+        raise HTTPException(status_code=404, detail="客商不存在") from exc
+    documents = document_repository.list(principal.tenant_id, case_id=case["case_id"])
     _verify_documents(documents, case["counterparty_id"], storage)
-    snapshot = build_credit_report_snapshot(case, counterparty, rating_run, documents, demo_repository.get_raw_profile(case["counterparty_id"]))
+    snapshot = build_credit_report_snapshot(case, counterparty, rating_run, documents, counterparty)
     snapshot_hash = content_hash(snapshot)
-    existing = report_repository.get_by_case_snapshot(case["case_id"], snapshot_hash)
+    existing = report_repository.get_by_case_snapshot(principal.tenant_id, case["case_id"], snapshot_hash)
     if existing:
         return {**_public_report(existing), "idempotent": True}
 
-    report_version = report_repository.next_version(case["case_id"])
+    report_version = report_repository.next_version(principal.tenant_id, case["case_id"])
     report_id = str(uuid4())
     report_no = f"CR-{case['case_id'][-72:]}-{snapshot_hash[:10]}"
-    object_key = f"reports/{case['counterparty_id']}/{case['case_id']}/{snapshot_hash}.pdf"
+    object_key = f"reports/{principal.tenant_id}/{case['counterparty_id']}/{case['case_id']}/{snapshot_hash}.pdf"
     pdf_content = render_credit_report_pdf(snapshot, report_no, report_version)
     pdf_sha256 = hashlib.sha256(pdf_content).hexdigest()
     storage.put(object_key, pdf_content, "application/pdf")
     try:
         report, idempotent = report_repository.create(
+            principal.tenant_id,
             {
                 "id": report_id,
                 "report_no": report_no,
@@ -187,7 +194,7 @@ def _verify_documents(documents: list[dict], counterparty_id: str, storage: Obje
 
 
 def _get_scoped_report(report_id: str, repository: CreditReportRepository, principal: Principal) -> dict:
-    report = repository.get(report_id)
+    report = repository.get(principal.tenant_id, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="信用报告不存在")
     enforce_counterparty_scope(principal, report["counterparty_id"])

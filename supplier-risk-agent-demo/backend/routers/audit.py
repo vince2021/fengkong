@@ -16,4 +16,4 @@ def list_audit_events(
     repository: AuditRepository = Depends(get_audit_repository),
     principal: Principal = Depends(require_permissions("audit:view")),
 ) -> list[dict]:
-    return repository.list(aggregate_id)
+    return repository.list(principal.tenant_id, aggregate_id)

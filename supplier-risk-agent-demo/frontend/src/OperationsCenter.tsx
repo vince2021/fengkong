@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import type { DocumentCorrection, DocumentCorrectionTask, NotificationRecord, OperationsSummary, PersonalTask, PersonalTaskQueue, SlaScanExecution, SlaScanHistory, SlaScanRun, TaskAction, TeamTask, TeamTaskBoard } from "./types";
+import type { DocumentCorrection, DocumentCorrectionTask, NotificationDeliveryOperations, NotificationRecord, OperationsSummary, PersonalTask, PersonalTaskQueue, SlaScanExecution, SlaScanHistory, SlaScanRun, TaskAction, TeamTask, TeamTaskBoard } from "./types";
 
 type Notice = { kind: "error" | "success"; text: string };
 
-export default function OperationsCenter({ canViewTasks, canViewOperations, canManageTasks, canViewNotifications, canScan, canActCorrections, onNavigate, onNotice }: { canViewTasks: boolean; canViewOperations: boolean; canManageTasks: boolean; canViewNotifications: boolean; canScan: boolean; canActCorrections: boolean; onNavigate: (action: TaskAction) => void; onNotice: (notice: Notice) => void }) {
+export default function OperationsCenter({ canViewTasks, canViewOperations, canManageTasks, canViewNotifications, canViewDeliveryOperations, canScan, canActCorrections, onNavigate, onNotice }: { canViewTasks: boolean; canViewOperations: boolean; canManageTasks: boolean; canViewNotifications: boolean; canViewDeliveryOperations: boolean; canScan: boolean; canActCorrections: boolean; onNavigate: (action: TaskAction) => void; onNotice: (notice: Notice) => void }) {
   const [taskQueue, setTaskQueue] = useState<PersonalTaskQueue | null>(null);
   const [teamBoard, setTeamBoard] = useState<TeamTaskBoard | null>(null);
   const [summary, setSummary] = useState<OperationsSummary | null>(null);
   const [scanHistory, setScanHistory] = useState<SlaScanHistory | null>(null);
   const [notifications, setNotifications] = useState<NotificationRecord[]>([]);
   const [correctionTasks, setCorrectionTasks] = useState<DocumentCorrectionTask[]>([]);
+  const [deliveryOperations, setDeliveryOperations] = useState<NotificationDeliveryOperations | null>(null);
   const [unreadOnly, setUnreadOnly] = useState(true);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -22,13 +23,14 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const [taskResult, teamResult, summaryResult, scanHistoryResult, notificationRows, correctionRows] = await Promise.all([
+      const [taskResult, teamResult, summaryResult, scanHistoryResult, notificationRows, correctionRows, deliveryResult] = await Promise.all([
         canViewTasks ? api.personalTasks() : Promise.resolve(null),
         canViewOperations ? api.teamTasks() : Promise.resolve(null),
         canViewOperations ? api.operationsSummary() : Promise.resolve(null),
         canViewOperations ? api.slaScanHistory() : Promise.resolve(null),
         canViewNotifications ? api.notifications(unreadOnly) : Promise.resolve([]),
         canViewOperations ? api.documentCorrectionWorkbench() : Promise.resolve([]),
+        canViewDeliveryOperations ? api.notificationDeliveryOperations() : Promise.resolve(null),
       ]);
       setTaskQueue(taskResult);
       setTeamBoard(teamResult);
@@ -36,12 +38,13 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
       setScanHistory(scanHistoryResult);
       setNotifications(notificationRows);
       setCorrectionTasks(correctionRows);
+      setDeliveryOperations(deliveryResult);
     } catch (error) {
       onNotice({ kind: "error", text: error instanceof Error ? error.message : "运营数据加载失败" });
     } finally {
       setLoading(false);
     }
-  }, [canViewNotifications, canViewOperations, canViewTasks, onNotice, unreadOnly]);
+  }, [canViewDeliveryOperations, canViewNotifications, canViewOperations, canViewTasks, onNotice, unreadOnly]);
 
   useEffect(() => { void reload(); }, [reload]);
 
@@ -189,7 +192,7 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
     }
   }
 
-  if (!canViewTasks && !canViewOperations && !canViewNotifications) return <div className="panel operations-empty"><strong>当前身份无运营监控权限</strong><p>请切换为业务处理、风控、审计或运营角色。</p></div>;
+  if (!canViewTasks && !canViewOperations && !canViewNotifications && !canViewDeliveryOperations) return <div className="panel operations-empty"><strong>当前身份无运营监控权限</strong><p>请切换为业务处理、风控、审计或运营角色。</p></div>;
   if (loading && !taskQueue && !summary && !notifications.length) return <div className="panel operations-loading">正在汇总个人待办、SLA 与通知数据…</div>;
 
   const activeScanCount = scanHistory?.execution_summary.running ?? 0;
@@ -201,6 +204,8 @@ export default function OperationsCenter({ canViewTasks, canViewOperations, canM
       <div><span>RISK OPERATIONS</span><h2>个人待办与 SLA 运营监控</h2><p>统一汇总审批、补件、贷后控制与延期审批任务，并识别即将超时、已超时及升级处置事项。</p></div>
       {canScan && <button className="primary-button" disabled={scanBusy} onClick={() => void scan()}>{scanning ? "正在扫描…" : leaseActive || activeScanCount > 0 ? "已有扫描执行中" : "运行全域 SLA 扫描"}</button>}
     </section>
+
+    {deliveryOperations && <NotificationDeliveryOperationsPanel operations={deliveryOperations} />}
 
     {taskQueue && <PersonalTaskPanel queue={taskQueue} assigningId={assigningId} onAssign={assignTask} onNavigate={onNavigate} />}
     {teamBoard && <TeamTaskBoardPanel board={teamBoard} canManage={canManageTasks} supervisingId={supervisingId} onRelease={supervisorRelease} onRemind={supervisorRemind} onNavigate={onNavigate} />}
@@ -346,6 +351,28 @@ function TeamTaskBoardPanel({ board, canManage, supervisingId, onRelease, onRemi
 }
 
 function OpsMetric({ label, value, detail, tone, unit = "笔" }: { label: string; value: number; detail: string; tone: string; unit?: string }) { return <div className={`ops-metric ${tone}`}><span>{label}</span><strong>{value}<small>{unit}</small></strong><p>{detail}</p><i /></div>; }
+
+function NotificationDeliveryOperationsPanel({ operations }: { operations: NotificationDeliveryOperations }) {
+  const healthLabels = { healthy: "投递运行正常", degraded: "存在待处理风险", incident: "死信 SLA 事故", not_configured: "尚未配置渠道" } as const;
+  const rate = operations.deliveries.delivery_rate;
+  const latency = operations.deliveries.p95_end_to_end_latency_ms;
+  return <section className={`panel notification-operations-panel ${operations.health}`}>
+    <div className="ops-section-head"><div><span>NOTIFICATION DELIVERY</span><h2>外部通知投递运行健康</h2></div><div className={`notification-operations-health ${operations.health}`}><i /><span><strong>{healthLabels[operations.health]}</strong><small>{operations.window_hours} 小时窗口 · 截至 {formatTime(operations.observed_at)}</small></span></div></div>
+    <details className="function-note"><summary>指标说明</summary><p><b>送达率</b>只统计已送达与死信的终态记录；<b>P95</b>为通知进入投递账本至收到有效回执的端到端耗时；<b>到期重试</b>表示已到计划时间但尚未再次执行；<b>死信 SLA</b>为死信超过 {operations.sla.dead_letter_minutes} 分钟仍未人工处理。</p></details>
+    <div className="notification-operations-metrics">
+      <span><small>活动渠道</small><strong>{operations.channels.active}<i> / {operations.channels.total}</i></strong></span>
+      <span><small>终态送达率</small><strong>{rate === null ? "-" : `${(rate * 100).toFixed(1)}%`}</strong></span>
+      <span><small>端到端 P95</small><strong>{latency === null ? "-" : formatDuration(latency / 1000)}</strong></span>
+      <span className={operations.deliveries.retry_due ? "warning" : ""}><small>到期重试</small><strong>{operations.deliveries.retry_due}</strong></span>
+      <span className={operations.deliveries.dead_letter ? "danger" : ""}><small>死信 / SLA</small><strong>{operations.deliveries.dead_letter}<i> / {operations.deliveries.dead_letter_sla_breaches}</i></strong></span>
+      <span><small>最近扫描</small><strong>{operations.last_dispatch_at ? formatTime(operations.last_dispatch_at) : "尚未执行"}</strong></span>
+    </div>
+    <div className="notification-operations-grid">
+      <div><header><strong>分渠道健康</strong><span>当前窗口业务投递，不含测试发送</span></header>{operations.channels.items.length ? operations.channels.items.map((channel) => <article key={channel.channel_id}><div><b>{channel.name}</b><small>{channel.delivery_mode === "live" ? "正式" : "沙箱"} · {channel.status === "active" ? "启用" : "停用"}{channel.delivery_mode === "live" ? ` · ${channel.preflight_status === "passed" ? "测试通过" : "待测试"}` : ""}</small></div><div><strong>{channel.delivery_rate === null ? "-" : `${(channel.delivery_rate * 100).toFixed(0)}%`}</strong><small>{channel.delivered} 送达 · {channel.retry_scheduled} 重试 · {channel.dead_letter} 死信</small></div></article>) : <p>尚未配置外部通知渠道。</p>}</div>
+      <div><header><strong>最近失败</strong><span>优先处理死信和到期重试</span></header>{operations.recent_failures.length ? operations.recent_failures.map((failure) => <article key={failure.delivery_id}><div><b>{operations.channels.items.find((item) => item.channel_id === failure.channel_id)?.name ?? failure.channel_id}</b><small>{failure.error}</small></div><div><strong>{failure.status_code ? `HTTP ${failure.status_code}` : "网络异常"}</strong><small>{formatTime(failure.occurred_at)} · {failure.attempt_count} 次</small></div></article>) : <p>当前窗口没有失败投递。</p>}</div>
+    </div>
+  </section>;
+}
 
 function ScanGovernancePanel({ history, canRetry, canReleaseLease, scanBusy, retryingRunKey, releasingLease, onRetry, onReleaseLease }: { history: SlaScanHistory; canRetry: boolean; canReleaseLease: boolean; scanBusy: boolean; retryingRunKey: string; releasingLease: boolean; onRetry: (runKey: string, reason: string) => Promise<boolean>; onReleaseLease: (executionId: string, reason: string) => Promise<boolean> }) {
   const schedulerState = history.scheduler_health.state;

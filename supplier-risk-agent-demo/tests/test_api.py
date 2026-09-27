@@ -90,14 +90,21 @@ class ApiTest(unittest.TestCase):
         return response.json()
 
     def _bind_model_comparison(self, change: dict, headers: dict[str, str]) -> dict:
+        tenant_id = (
+            "tenant-platform-internal"
+            if headers.get("Authorization") == "Bearer dev-admin"
+            else "tenant-demo-hengxin"
+        )
         with database.SessionLocal() as session:
             dataset = RuleCenterReplayDataset(
-                id=str(uuid4()), code=f"MODEL-CMP-{uuid4().hex[:8]}", name="模型候选比较样本",
+                id=str(uuid4()), tenant_id=tenant_id,
+                code=f"MODEL-CMP-{uuid4().hex[:8]}", name="模型候选比较样本",
                 description="模型治理发布门禁自动化测试样本", status="active",
                 created_by="test", created_by_name="自动化测试",
             )
             snapshot = RuleCenterReplayDatasetSnapshot(
-                id=str(uuid4()), dataset_id=dataset.id, version=1, source_name="test-suite",
+                id=str(uuid4()), tenant_id=tenant_id,
+                dataset_id=dataset.id, version=1, source_name="test-suite",
                 schema_version="1.0", as_of_date=date(2026, 6, 30), evidence_reference="test://model-comparison",
                 data_classification="synthetic", field_mapping_json={}, label_field="label",
                 observed_at_field=None, sample_count=1,
@@ -136,6 +143,7 @@ class ApiTest(unittest.TestCase):
         with database.SessionLocal() as session:
             record = ApprovalCaseRecord(
                 case_id=case_id,
+                tenant_id="tenant-demo-hengxin",
                 counterparty_id=self.counterparty["id"],
                 counterparty_name=self.counterparty["name"],
                 current_stage="final_strategy",
@@ -150,7 +158,15 @@ class ApiTest(unittest.TestCase):
             )
             session.add(record)
             session.commit()
-            run = RatingRunRepository(session).save_run(self.counterparty, "general", config, result, actor="风控经理", case_id=case_id)
+            run = RatingRunRepository(session).save_run(
+                "tenant-demo-hengxin",
+                self.counterparty,
+                "general",
+                config,
+                result,
+                actor="风控经理",
+                case_id=case_id,
+            )
             record = session.get(ApprovalCaseRecord, case_id)
             record.case_data = {
                 "registration": {"registered_name": self.counterparty["name"], "unified_social_credit_code": self.counterparty["credit_code"]},
@@ -603,7 +619,10 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(downloaded.headers["x-report-pdf-sha256"], report["pdf_sha256"])
         self.assertTrue(downloaded.content.startswith(b"%PDF-"))
 
-        object_key = f"reports/{self.counterparty['id']}/{seeded['case_id']}/{report['snapshot_hash']}.pdf"
+        object_key = (
+            f"reports/tenant-demo-hengxin/{self.counterparty['id']}/"
+            f"{seeded['case_id']}/{report['snapshot_hash']}.pdf"
+        )
         LocalObjectStorage(self.temp_storage.name).put(object_key, b"tampered-report", "application/pdf")
         failed_integrity = self.client.get(f"/api/v1/credit-reports/{report['id']}/integrity", headers=auditor)
         blocked_download = self.client.get(f"/api/v1/credit-reports/{report['id']}/download", headers=auditor)
@@ -781,6 +800,7 @@ class ApiTest(unittest.TestCase):
     def test_observed_outcome_ingestion_and_monitoring_issue_closure(self) -> None:
         model_admin = {"Authorization": "Bearer dev-model-admin"}
         risk = {"Authorization": "Bearer dev-risk"}
+        admin = {"Authorization": "Bearer dev-admin"}
         model = self.client.get("/api/v1/models/general", headers=model_admin).json()
         now = datetime.now(timezone.utc)
         outcome_payload = {
@@ -864,7 +884,7 @@ class ApiTest(unittest.TestCase):
         rescanned_issue = next(item for item in rescanned.json() if item["metric_key"] == "calibration_gap")
         self.assertEqual(rescanned_issue["status"], "open")
 
-        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={issue['id']}", headers=risk)
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={issue['id']}", headers=admin)
         self.assertEqual(audit.status_code, 200)
         self.assertEqual(
             [event["event_type"] for event in audit.json()],
@@ -1124,6 +1144,7 @@ class ApiTest(unittest.TestCase):
         model_admin = {"Authorization": "Bearer dev-model-admin"}
         risk = {"Authorization": "Bearer dev-risk"}
         manager = {"Authorization": "Bearer dev-manager"}
+        admin = {"Authorization": "Bearer dev-admin"}
         active = self.client.get("/api/v1/models/general", headers=model_admin).json()
         candidate_version = f"{active['version']}-GOV-01"
         payload = {
@@ -1209,7 +1230,7 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(rolled_back.json()["is_active"])
         self.assertEqual(self.client.get("/api/v1/models/general", headers=risk).json()["version"], active["version"])
 
-        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={created.json()['id']}", headers=risk)
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={created.json()['id']}", headers=admin)
         self.assertEqual([item["event_type"] for item in audit.json()], ["model_change_created", "model_change_updated", "model_change_comparison_evidence_bound", "model_change_submitted", "model_change_published"])
 
         tech = self.client.get("/api/v1/models/tech_enterprise_basic", headers=model_admin).json()
@@ -1939,12 +1960,14 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(escalated_scan.json()["control_alerts_opened"], 1)
         self.assertEqual(escalated_scan.json()["control_conditions_escalated"], 1)
         self.assertEqual(escalated_scan.json()["control_notifications_created"], 1)
-        admin_notifications = self.client.get("/api/v1/notifications", headers=self.headers).json()
+        admin_notifications = self.client.get(
+            "/api/v1/notifications", headers={"Authorization": "Bearer dev-operations"}
+        ).json()
         self.assertTrue(any(item["category"] == "facility_control" and item["level"] == "escalated" for item in admin_notifications))
         escalated_detail = self.client.get(f"/api/v1/credit-facilities/{successor['id']}", headers=risk).json()
         escalated_condition = next(item for item in escalated_detail["control_conditions"] if item["id"] == pending_condition["id"])
         self.assertEqual(escalated_condition["escalation_level"], 3)
-        self.assertEqual(escalated_condition["escalation_role"], "admin")
+        self.assertEqual(escalated_condition["escalation_role"], "operations")
         completed_escalated = self.client.post(
             f"/api/v1/credit-facilities/{successor['id']}/control-conditions/{pending_condition['id']}/complete",
             json={"expected_row_version": escalated_condition["row_version"], "conclusion": "已补齐最终审批会签核验记录并落实督办要求"},
@@ -1984,6 +2007,7 @@ class ApiTest(unittest.TestCase):
                 [
                     ApprovalCaseRecord(
                         case_id=source_case_id,
+                        tenant_id="tenant-demo-hengxin",
                         counterparty_id=self.counterparty["id"],
                         counterparty_name=self.counterparty["name"],
                         application_type="new_credit",
@@ -1995,6 +2019,7 @@ class ApiTest(unittest.TestCase):
                     ),
                     ApprovalCaseRecord(
                         case_id=renewal_case_id,
+                        tenant_id="tenant-demo-hengxin",
                         counterparty_id=self.counterparty["id"],
                         counterparty_name=self.counterparty["name"],
                         application_type="renewal",
@@ -2627,7 +2652,7 @@ class ApiTest(unittest.TestCase):
         self.assertIn("只有已撤销", active_anchor_replacement.json()["detail"])
         anchor_audit = self.client.get(
             f"/api/v1/audit-events?aggregate_id={anchor['id']}",
-            headers=auditor,
+            headers=admin,
         )
         self.assertEqual(anchor_audit.status_code, 200, anchor_audit.text)
         self.assertEqual(
@@ -2838,7 +2863,7 @@ class ApiTest(unittest.TestCase):
         self.assertIn("已经撤销", repeated_revocation.json()["detail"])
         revoked_audit = self.client.get(
             f"/api/v1/audit-events?aggregate_id={anchor['id']}",
-            headers=auditor,
+            headers=admin,
         )
         self.assertEqual(
             [item["event_type"] for item in revoked_audit.json()],
@@ -2911,7 +2936,7 @@ class ApiTest(unittest.TestCase):
         )
         replacement_audit = self.client.get(
             f"/api/v1/audit-events?aggregate_id={replacement['id']}",
-            headers=auditor,
+            headers=admin,
         )
         self.assertEqual(
             [item["event_type"] for item in replacement_audit.json()],
@@ -3009,7 +3034,7 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(rejected_stale.status_code, 200, rejected_stale.text)
         self.assertEqual(rejected_stale.json()["status"], "rejected")
-        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={first.json()['id']}", headers=risk).json()
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={first.json()['id']}", headers=admin).json()
         self.assertEqual(
             [item["event_type"] for item in audit],
             ["authority_policy_draft_created", "authority_policy_submitted", "authority_policy_published"],
@@ -3037,6 +3062,7 @@ class ApiTest(unittest.TestCase):
         model_admin = {"Authorization": "Bearer dev-model-admin"}
         approver = {"Authorization": "Bearer dev-approver"}
         risk = {"Authorization": "Bearer dev-risk"}
+        admin = {"Authorization": "Bearer dev-admin"}
 
         forbidden = self.client.post(
             "/api/v1/authority-policies/restore-drafts",
@@ -3127,7 +3153,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(active["policy_version"], "AUTH-R-BUILTIN")
         self.assertEqual(active["config"], DEFAULT_AUTHORITY_POLICY_CONFIG)
 
-        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={restore_record['id']}", headers=risk).json()
+        audit = self.client.get(f"/api/v1/audit-events?aggregate_id={restore_record['id']}", headers=admin).json()
         self.assertEqual(
             [item["event_type"] for item in audit],
             ["authority_policy_restore_draft_created", "authority_policy_submitted", "authority_policy_published"],
@@ -3162,6 +3188,7 @@ class ApiTest(unittest.TestCase):
         model_admin = {"Authorization": "Bearer dev-model-admin"}
         approver = {"Authorization": "Bearer dev-approver"}
         risk = {"Authorization": "Bearer dev-risk"}
+        admin = {"Authorization": "Bearer dev-admin"}
 
         config = deepcopy(DEFAULT_AUTHORITY_POLICY_CONFIG)
         config["standard_limit"] = 4_000_000
@@ -3344,7 +3371,7 @@ class ApiTest(unittest.TestCase):
         )
         schedule_audit = self.client.get(
             f"/api/v1/audit-events?aggregate_id={second['id']}",
-            headers=risk,
+            headers=admin,
         ).json()
         self.assertEqual(
             [item["event_type"] for item in schedule_audit],
@@ -3597,7 +3624,7 @@ class ApiTest(unittest.TestCase):
         )
         incident_audit = self.client.get(
             f"/api/v1/audit-events?aggregate_id={blocked_scan.json()['run']['id']}",
-            headers=risk,
+            headers=admin,
         ).json()
         self.assertEqual(
             [item["event_type"] for item in incident_audit],
@@ -4088,7 +4115,7 @@ class ApiTest(unittest.TestCase):
 
     def test_sla_scan_notifications_escalation_and_read_tracking(self) -> None:
         manager = {"Authorization": "Bearer dev-manager"}
-        admin = {"Authorization": "Bearer dev-admin"}
+        admin = {"Authorization": "Bearer dev-operations"}
         created = self.client.post("/api/v1/approval-cases", json={"counterparty_id": self.counterparty["id"]}, headers=manager).json()
         with database.SessionLocal() as session:
             record = session.get(ApprovalCaseRecord, created["case_id"])
@@ -4158,6 +4185,7 @@ class ApiTest(unittest.TestCase):
             session.add(
                 CreditFacilityRecord(
                     id=facility_id,
+                    tenant_id="tenant-demo-hengxin",
                     case_id=case["case_id"],
                     counterparty_id=self.counterparty["id"],
                     counterparty_name=self.counterparty["name"],
@@ -4178,6 +4206,7 @@ class ApiTest(unittest.TestCase):
             session.add(
                 FacilityControlConditionRecord(
                     id=condition_id,
+                    tenant_id="tenant-demo-hengxin",
                     facility_id=facility_id,
                     source_case_id=case["case_id"],
                     source_review_hash="unified-scan-review-hash",
@@ -4192,6 +4221,7 @@ class ApiTest(unittest.TestCase):
             session.add(
                 FacilityControlExtensionRecord(
                     id=extension_id,
+                    tenant_id="tenant-demo-hengxin",
                     condition_id=condition_id,
                     facility_id=facility_id,
                     extension_days=30,
@@ -5310,24 +5340,25 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(locked_advance.status_code, 409)
         self.assertIn("其他客户经理", locked_advance.json()["detail"])
-        admin = {"Authorization": "Bearer dev-admin"}
+        operations = {"Authorization": "Bearer dev-operations"}
         admin_locked_task = next(
             task
-            for task in self.client.get("/api/v1/operations/my-tasks", headers=admin).json()["tasks"]
+            for task in self.client.get("/api/v1/operations/team-tasks", headers=operations).json()["tasks"]
             if task["case_id"] == normal_case["case_id"]
         )
         self.assertEqual(admin_locked_task["assignment_state"], "assigned_other")
-        self.assertTrue(admin_locked_task["can_release"])
+        self.assertFalse(admin_locked_task["can_release"])
+        self.assertTrue(admin_locked_task["can_force_release"])
         admin_takeover = self.client.post(
             f"/api/v1/operations/my-tasks/approval/{normal_case['case_id']}/assignment",
             json={"action": "claim", "expected_row_version": admin_locked_task["row_version"]},
-            headers=admin,
+            headers=operations,
         )
-        self.assertEqual(admin_takeover.status_code, 409)
+        self.assertEqual(admin_takeover.status_code, 403)
         admin_release = self.client.post(
-            f"/api/v1/operations/my-tasks/approval/{normal_case['case_id']}/assignment",
-            json={"action": "release", "expected_row_version": admin_locked_task["row_version"]},
-            headers=admin,
+            f"/api/v1/operations/team-tasks/approval/{normal_case['case_id']}/release",
+            json={"expected_row_version": admin_locked_task["row_version"], "reason": "值班运营释放长期占用任务"},
+            headers=operations,
         )
         self.assertEqual(admin_release.status_code, 200, admin_release.text)
         self.assertIsNone(admin_release.json()["assigned_to"])
@@ -5400,15 +5431,13 @@ class ApiTest(unittest.TestCase):
         self.assertGreaterEqual(scanned.json()["expired_assignments_released"], 1)
         with database.SessionLocal() as session:
             self.assertIsNone(session.get(ApprovalCaseRecord, normal_case["case_id"]).assigned_to)
-        expired_notification = next(
-            item
-            for item in self.client.get(
-                "/api/v1/notifications",
-                headers={"Authorization": "Bearer dev-admin"},
-            ).json()
-            if item["case_id"] == normal_case["case_id"] and item["level"] == "lease_expired"
-        )
-        self.assertEqual(expired_notification["recipient_subject"], "absent-manager")
+        with database.SessionLocal() as session:
+            expired_notification = session.scalars(select(NotificationRecord).where(
+                NotificationRecord.tenant_id == "tenant-demo-hengxin",
+                NotificationRecord.case_id == normal_case["case_id"],
+                NotificationRecord.level == "lease_expired",
+            )).one()
+        self.assertEqual(expired_notification.recipient_subject, "absent-manager")
 
         original = self.client.post(
             "/api/v1/documents",
@@ -5535,6 +5564,7 @@ class ApiTest(unittest.TestCase):
             session.add(
                 CreditFacilityRecord(
                     id=facility_id,
+                    tenant_id="tenant-demo-hengxin",
                     case_id=case["case_id"],
                     counterparty_id=self.counterparty["id"],
                     counterparty_name=self.counterparty["name"],
@@ -5555,6 +5585,7 @@ class ApiTest(unittest.TestCase):
             session.add(
                 FacilityControlConditionRecord(
                     id=condition_id,
+                    tenant_id="tenant-demo-hengxin",
                     facility_id=facility_id,
                     source_case_id=case["case_id"],
                     source_review_hash="unified-task-review-hash",
@@ -5572,6 +5603,7 @@ class ApiTest(unittest.TestCase):
             session.add(
                 FacilityControlExtensionRecord(
                     id=extension_id,
+                    tenant_id="tenant-demo-hengxin",
                     condition_id=condition_id,
                     facility_id=facility_id,
                     extension_days=30,
@@ -5822,6 +5854,8 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(forbidden.status_code, 403)
         self.assertEqual(current_user.status_code, 200)
         self.assertIn("risk_manager", current_user.json()["roles"])
+        self.assertEqual(current_user.json()["tenant_id"], "tenant-demo-hengxin")
+        self.assertEqual(current_user.json()["client_id"], "platform-console")
 
     def test_document_upload_download_and_client_data_scope(self) -> None:
         client_headers = {"Authorization": "Bearer dev-client"}

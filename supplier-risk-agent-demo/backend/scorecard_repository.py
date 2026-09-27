@@ -16,6 +16,7 @@ from backend.db_models import DecisionPipelineDefinition, ModelChangeRecord, Mod
 from backend.repository import AuditRepository, ConcurrentUpdateError, NotificationRepository, RuleCenterReplayDatasetRepository, content_hash
 from backend.scorecard_development import DEFAULT_VALIDATION_THRESHOLDS, analyze_scorecard_validation
 from backend.scorecard_validation import validate_scorecard
+from backend.tenant_registry import active_business_tenant_ids
 
 
 class ScorecardRepository:
@@ -53,10 +54,17 @@ class ScorecardRepository:
             "config": deepcopy(record.config_json),
         }
 
-    def approved_validation_evidence(self, run_id: str, scorecard_binding: dict) -> dict:
+    def approved_validation_evidence(
+        self, tenant_id: str, run_id: str, scorecard_binding: dict
+    ) -> dict:
         record = self.session.get(ScorecardDevelopmentRun, run_id)
         if record is None:
             raise LookupError("评分卡开发验证运行不存在")
+        self._verified_snapshot(tenant_id, record.dataset_snapshot_id, "训练集")
+        if record.validation_snapshot_id:
+            self._verified_snapshot(tenant_id, record.validation_snapshot_id, "验证集")
+        if record.oot_snapshot_id:
+            self._verified_snapshot(tenant_id, record.oot_snapshot_id, "时间外集")
         run = self._development_run(record)
         gate = run["report"].get("validation_gate") or {}
         if run["report"].get("schema_version") != "scorecard-development-report-v4":
@@ -345,8 +353,20 @@ class ScorecardRepository:
         self.session.refresh(record)
         return self._monitoring_plan(record)
 
-    def run_monitoring_plan(self, plan_id: str, expected: int, actor: str, actor_name: str, *, scheduled_for: datetime | None = None, advance: bool = False) -> dict:
+    def run_monitoring_plan(
+        self, plan_id: str, expected: int, actor: str, actor_name: str, *,
+        tenant_id: str | None = None, scheduled_for: datetime | None = None,
+        advance: bool = False,
+    ) -> dict:
         record = self._get_monitoring_plan(plan_id, expected)
+        training_dataset = self.session.get(
+            RuleCenterReplayDataset, record.training_dataset_id
+        )
+        if training_dataset is None:
+            raise LookupError("持续验证计划绑定的数据集不存在或未启用")
+        if tenant_id is not None and training_dataset.tenant_id != tenant_id:
+            raise LookupError("持续验证计划不存在")
+        tenant_id = training_dataset.tenant_id
         due_at = self._as_utc(scheduled_for or datetime.now(timezone.utc))
         run_key = f"{record.id}:{due_at.isoformat()}"
         if record.last_run_key == run_key and record.last_run_id:
@@ -354,16 +374,16 @@ class ScorecardRepository:
             return {"plan": self._monitoring_plan(record), "run": self._development_run(run) if run else None, "events": [], "idempotent": True}
         try:
             snapshot_ids = {
-                "dataset_snapshot_id": self._latest_dataset_snapshot(record.training_dataset_id, due_at).id,
-                "validation_snapshot_id": self._latest_dataset_snapshot(record.validation_dataset_id, due_at).id if record.validation_dataset_id else None,
-                "oot_snapshot_id": self._latest_dataset_snapshot(record.oot_dataset_id, due_at).id if record.oot_dataset_id else None,
+                "dataset_snapshot_id": self._latest_dataset_snapshot(tenant_id, record.training_dataset_id, due_at).id,
+                "validation_snapshot_id": self._latest_dataset_snapshot(tenant_id, record.validation_dataset_id, due_at).id if record.validation_dataset_id else None,
+                "oot_snapshot_id": self._latest_dataset_snapshot(tenant_id, record.oot_dataset_id, due_at).id if record.oot_dataset_id else None,
             }
             payload = {
                 **deepcopy(record.run_config_json), **snapshot_ids,
                 "scorecard_asset_id": record.scorecard_asset_id, "validation_policy_id": record.validation_policy_id,
                 "validation_thresholds": {}, "observation_start": None, "observation_end": None,
             }
-            run = self.create_development_run(payload, actor, actor_name)
+            run = self.create_development_run(tenant_id, payload, actor, actor_name)
             events = self._scan_monitoring_run(record, run, actor)
             record = self.session.get(ScorecardValidationMonitoringPlan, plan_id)
             record.last_scheduled_for = due_at if advance else record.last_scheduled_for
@@ -1052,15 +1072,17 @@ class ScorecardRepository:
         self.session.refresh(record)
         return self._validation_policy(record)
 
-    def create_development_run(self, payload: dict, actor: str, actor_name: str) -> dict:
+    def create_development_run(
+        self, tenant_id: str, payload: dict, actor: str, actor_name: str
+    ) -> dict:
         asset = self.session.get(ScorecardDefinition, payload["scorecard_asset_id"])
         if asset is None or asset.status != "published":
             raise LookupError("已发布评分卡资产不存在")
         if content_hash(asset.config_json) != asset.config_hash:
             raise ValueError("评分卡资产配置哈希不一致")
-        snapshot = self._verified_snapshot(payload["dataset_snapshot_id"], "训练集")
-        validation_snapshot = self._verified_snapshot(payload.get("validation_snapshot_id"), "验证集") if payload.get("validation_snapshot_id") else None
-        oot_snapshot = self._verified_snapshot(payload.get("oot_snapshot_id"), "时间外集") if payload.get("oot_snapshot_id") else None
+        snapshot = self._verified_snapshot(tenant_id, payload["dataset_snapshot_id"], "训练集")
+        validation_snapshot = self._verified_snapshot(tenant_id, payload.get("validation_snapshot_id"), "验证集") if payload.get("validation_snapshot_id") else None
+        oot_snapshot = self._verified_snapshot(tenant_id, payload.get("oot_snapshot_id"), "时间外集") if payload.get("oot_snapshot_id") else None
         selected_ids = [item.id for item in (snapshot, validation_snapshot, oot_snapshot) if item]
         if len(selected_ids) != len(set(selected_ids)):
             raise ValueError("训练、验证和时间外集合必须选择不同的不可变快照")
@@ -1186,14 +1208,17 @@ class ScorecardRepository:
             raise ConcurrentUpdateError("持续验证计划已被更新，请刷新后重试")
         return record
 
-    def _latest_dataset_snapshot(self, dataset_id: str, as_of: datetime) -> RuleCenterReplayDatasetSnapshot:
+    def _latest_dataset_snapshot(
+        self, tenant_id: str, dataset_id: str, as_of: datetime
+    ) -> RuleCenterReplayDatasetSnapshot:
         snapshot = self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
             RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id,
             RuleCenterReplayDatasetSnapshot.as_of_date <= self._as_utc(as_of).date(),
         ).order_by(RuleCenterReplayDatasetSnapshot.as_of_date.desc(), RuleCenterReplayDatasetSnapshot.version.desc(), RuleCenterReplayDatasetSnapshot.created_at.desc())).first()
         if snapshot is None:
             raise LookupError("数据集在计划执行截面前没有可用不可变快照")
-        return self._verified_snapshot(snapshot.id, "计划选择的")
+        return self._verified_snapshot(tenant_id, snapshot.id, "计划选择的")
 
     def _scan_monitoring_run(self, plan: ScorecardValidationMonitoringPlan, run: dict, actor: str) -> list[dict]:
         events: list[dict] = []
@@ -1297,17 +1322,18 @@ class ScorecardRepository:
         severity = "critical" if stage in {"overdue", "escalated"} or record.severity == "critical" else "warning"
         created_count = 0
         notifications = NotificationRepository(self.session)
-        for role, subject in recipients:
-            _, created = notifications.create_if_absent({
-                "case_id": None, "counterparty_id": None,
-                "recipient_role": role, "recipient_subject": subject,
-                "category": "scorecard_monitoring", "level": stage, "severity": severity,
-                "title": titles[stage], "message": messages[stage],
-                "action_json": {"page": "indicators", "monitoring_event_id": record.id, "run_id": record.run_id, "plan_id": record.plan_id},
-                "dedup_key": f"scorecard-monitoring:{record.id}:{stage}:{role}:{subject or 'broadcast'}",
-                "status": "unread",
-            })
-            created_count += int(created)
+        for tenant_id in active_business_tenant_ids(self.session):
+            for role, subject in recipients:
+                _, created = notifications.create_if_absent(tenant_id, {
+                    "case_id": None, "counterparty_id": None,
+                    "recipient_role": role, "recipient_subject": subject,
+                    "category": "scorecard_monitoring", "level": stage, "severity": severity,
+                    "title": titles[stage], "message": messages[stage],
+                    "action_json": {"page": "indicators", "monitoring_event_id": record.id, "run_id": record.run_id, "plan_id": record.plan_id},
+                    "dedup_key": f"scorecard-monitoring:{record.id}:{stage}:{role}:{subject or 'broadcast'}",
+                    "status": "unread",
+                })
+                created_count += int(created)
         return created_count
 
     def _monitoring_plan(self, record: ScorecardValidationMonitoringPlan) -> dict:
@@ -1520,8 +1546,13 @@ class ScorecardRepository:
         month_days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
         return value.replace(year=year, month=month, day=min(value.day, month_days[month - 1]))
 
-    def _verified_snapshot(self, snapshot_id: str, label: str) -> RuleCenterReplayDatasetSnapshot:
-        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, snapshot_id)
+    def _verified_snapshot(
+        self, tenant_id: str, snapshot_id: str, label: str
+    ) -> RuleCenterReplayDatasetSnapshot:
+        snapshot = self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
+            RuleCenterReplayDatasetSnapshot.id == snapshot_id,
+        )).first()
         if snapshot is None:
             raise LookupError(f"{label}不可变数据快照不存在")
         if RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot) != snapshot.content_hash:

@@ -1,15 +1,21 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { api, devIdentities, getToken, setToken } from "./api";
+import { API_STATUS_EVENT, api, devIdentities, getToken, setToken } from "./api";
 import AuthorityPolicyCenter from "./AuthorityPolicyCenter";
 import ModelLab from "./ModelLab";
 import RuleCenter from "./RuleCenter";
 import IndicatorCenter from "./IndicatorCenter";
+import SalesDemoHome from "./SalesDemoHome";
+import DecisionSandbox from "./DecisionSandbox";
+import CounterpartyImportPanel from "./CounterpartyImportPanel";
+import CounterpartyMasterPanel from "./CounterpartyMasterPanel";
+import CounterpartyGovernanceEvidencePanel from "./CounterpartyGovernanceEvidencePanel";
+import TenantProductAdminPanel from "./TenantProductAdminPanel";
 import type { ApprovalAction, ApprovalCase, Counterparty, CreditAuthority, CreditFacility, CreditReport, DecisionGovernanceSummary, DecisionVariance, DocumentCheckResult, DocumentChecklist, DocumentCorrection, DocumentPrecheck, DocumentRecord, DocumentVersionComparison, EnterpriseDataConflict, EnterpriseDataImport, EnterpriseDataProfile, EnterpriseDataResolution, EnterpriseFieldLineage, ModelSummary, PortfolioRatingBatch, PortfolioRatingResult, Principal, RatingReadiness, RatingResult, RawEnterpriseProfile, RenewalDocumentCarryover, RenewalRiskBaseline, RenewalRiskReview, TaskAction } from "./types";
 
 const PostCreditCenter = lazy(() => import("./PostCreditCenter"));
 const OperationsCenter = lazy(() => import("./OperationsCenter"));
 
-type PageKey = "overview" | "counterparties" | "approvals" | "indicators" | "models" | "rules" | "documents" | "operations" | "facilities";
+type PageKey = "overview" | "counterparties" | "approvals" | "indicators" | "models" | "rules" | "sandbox" | "documents" | "operations" | "facilities" | "tenants";
 type ApprovalQueueFilter = "all" | "active" | "mine" | "urgent" | "supplement" | "completed";
 
 const navItems: Array<{ key: PageKey; label: string; caption: string; icon: string }> = [
@@ -19,9 +25,11 @@ const navItems: Array<{ key: PageKey; label: string; caption: string; icon: stri
   { key: "indicators", label: "指标配置", caption: "分箱、权重与评分卡", icon: "▦" },
   { key: "models", label: "模型实验室", caption: "运算链与影响模拟", icon: "⌬" },
   { key: "rules", label: "决策规则", caption: "规则与管线编排", icon: "≋" },
+  { key: "sandbox", label: "接入沙箱", caption: "Decision API 联调", icon: "⌘" },
   { key: "documents", label: "资料中心", caption: "可信资料与归档", icon: "▤" },
   { key: "operations", label: "运营监控", caption: "SLA 与催办通知", icon: "◉" },
   { key: "facilities", label: "贷后管理", caption: "额度台账与风险预警", icon: "▥" },
+  { key: "tenants", label: "租户与产品", caption: "产品包、授权与配额", icon: "▣" },
 ];
 
 const pageMeta: Record<PageKey, { eyebrow: string; description: string; zones: string[]; actionHint: string }> = {
@@ -31,9 +39,11 @@ const pageMeta: Record<PageKey, { eyebrow: string; description: string; zones: s
   indicators: { eyebrow: "INDICATOR FACTORY", description: "从指标目录选择固定版本，配置分箱、分值和权重，形成经独立复核的评分卡资产。", zones: ["指标目录", "分箱设计", "权重刻度", "变更治理"], actionHint: "先完成分箱校验，再提交独立复核" },
   models: { eyebrow: "MODEL WORKSPACE", description: "从结果概览向下追溯运算链、风险指标、决策规则与模型发布治理。", zones: ["结果概览", "评分与模拟", "风险指标", "决策规则", "治理发布"], actionHint: "先看结果，再逐层解释与配置" },
   rules: { eyebrow: "DECISION ORCHESTRATION", description: "集中配置规则、规则集与决策管线，通过测试、模拟和独立复核控制生产生效。", zones: ["规则资产", "规则集", "管线编排", "变更治理"], actionHint: "配置先保存为治理草稿，由独立复核人批准后生效" },
+  sandbox: { eyebrow: "INTEGRATION SANDBOX", description: "固定输入、模型、管线和规则版本在线试跑，验证幂等响应、执行轨迹与证据哈希。", zones: ["请求配置", "版本锁定", "在线执行", "证据核验"], actionHint: "使用唯一 request_id；重试时保持请求内容完全一致" },
   documents: { eyebrow: "DOCUMENT WORKSPACE", description: "区分资料承接、当期更新、独立核验、退补任务与可信归档，逐项消除流程阻断。", zones: ["资料承接", "逐项核验", "退补追踪", "可信归档"], actionHint: "绿色已满足，黄色待处理，红色为缺口" },
-  operations: { eyebrow: "OPERATIONS WORKSPACE", description: "统一处理个人任务、SLA 风险、补件队列和通知催办，避免责任与时限失焦。", zones: ["任务队列", "SLA 风险", "补件运营", "通知催办"], actionHint: "优先处理超时与升级任务" },
+  operations: { eyebrow: "OPERATIONS WORKSPACE", description: "统一处理个人任务、SLA 风险、补件队列、通知催办和外部投递，避免责任与时限失焦。", zones: ["任务队列", "SLA 风险", "补件运营", "通知投递"], actionHint: "优先处理超时、升级和投递死信" },
   facilities: { eyebrow: "POST-CREDIT WORKSPACE", description: "从任务雷达定位高风险授信，再完成额度、复评、风险事件、续授信和控制处置。", zones: ["任务雷达", "授信台账", "业务操作", "风险处置"], actionHint: "风险操作使用红色边界并要求明确依据" },
+  tenants: { eyebrow: "COMMERCIAL CONTROL PLANE", description: "将平台治理资产组装为可销售产品包，通过授权台账统一管理客户目录、期限与调用配额。", zones: ["产品包", "独立复核", "租户授权", "运行门禁"], actionHint: "产品发布与授权开通均执行四眼复核" },
 };
 
 const stageMeta: Record<string, { label: string; owner: string }> = {
@@ -85,6 +95,7 @@ function App() {
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<ApprovalCase | null>(null);
   const [busy, setBusy] = useState(true);
+  const [apiConnected, setApiConnected] = useState(false);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   const can = useCallback((permission: string) => principal?.permissions.includes("*") || principal?.permissions.includes(permission), [principal]);
@@ -115,7 +126,17 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    const updateApiStatus = (event: Event) => setApiConnected(Boolean((event as CustomEvent<{ connected: boolean }>).detail.connected));
+    window.addEventListener(API_STATUS_EVENT, updateApiStatus);
+    return () => window.removeEventListener(API_STATUS_EVENT, updateApiStatus);
+  }, []);
+
   useEffect(() => { void loadWorkspace(); }, [loadWorkspace]);
+
+  useEffect(() => {
+    if (principal && page === "tenants" && !can("tenant_admin:view")) setPage("overview");
+  }, [principal, page, can]);
 
   useEffect(() => {
     if (!selectedCaseId || !can("approvals:view")) {
@@ -179,6 +200,7 @@ function App() {
 
   const selectedIdentity = devIdentities.find((identity) => identity.token === getToken()) ?? devIdentities[0];
   const currentPageMeta = pageMeta[page];
+  const visibleNavItems = navItems.filter((item) => item.key !== "tenants" || can("tenant_admin:view"));
 
   return (
     <div className="app-shell">
@@ -189,15 +211,15 @@ function App() {
         </div>
         <div className="nav-label">业务工作台</div>
         <nav>
-          {navItems.map((item) => (
+          {visibleNavItems.map((item) => (
             <button key={item.key} className={`nav-item ${page === item.key ? "active" : ""}`} onClick={() => setPage(item.key)}>
               <span className="nav-icon">{item.icon}</span>
               <span><b>{item.label}</b><small>{item.caption}</small></span>
             </button>
           ))}
         </nav>
-        <div className="sidebar-foot">
-          <span className="pulse-dot" /> API 已连接
+        <div className={`sidebar-foot ${apiConnected ? "connected" : "disconnected"}`}>
+          <span className="pulse-dot" /> {apiConnected ? "API 已连接" : "API 连接中断"}
           <small>FastAPI · v0.1</small>
         </div>
       </aside>
@@ -223,15 +245,17 @@ function App() {
         {busy ? <LoadingState /> : (
           <div className="page-content">
             <PageContextBar page={page} meta={currentPageMeta} role={selectedIdentity.label} />
-            {page === "overview" && <Overview counterparties={counterparties} cases={cases} documents={documents} identity={selectedIdentity} onNavigate={setPage} />}
-            {page === "counterparties" && <CounterpartyCenter rows={counterparties} canRate={Boolean(can("ratings:run"))} canViewDataGovernance={Boolean(can("data_governance:view"))} canImportData={Boolean(can("data_governance:import"))} canResolveData={Boolean(can("data_governance:resolve"))} canReviewData={Boolean(can("data_governance:review"))} onResult={(text) => setNotice({ kind: "success", text })} onError={(text) => setNotice({ kind: "error", text })} />}
+            {page === "overview" && <SalesDemoHome counterparties={counterparties} cases={cases} documents={documents} identity={selectedIdentity} canViewDemo={Boolean(can("models:view"))} onNavigate={setPage} onNotice={setNotice} />}
+            {page === "counterparties" && <CounterpartyCenter rows={counterparties} canManageCounterparties={Boolean(can("counterparties:manage"))} canViewGovernanceEvidence={Boolean(can("governance_evidence:view"))} canRate={Boolean(can("ratings:run"))} canViewDataGovernance={Boolean(can("data_governance:view"))} canImportData={Boolean(can("data_governance:import"))} canResolveData={Boolean(can("data_governance:resolve"))} canReviewData={Boolean(can("data_governance:review"))} onRefresh={async () => setCounterparties(await api.counterparties())} onResult={(text) => setNotice({ kind: "success", text })} onError={(text) => setNotice({ kind: "error", text })} />}
             {page === "approvals" && <ApprovalCenter rows={cases} counterparties={counterparties} selected={selectedCase} principal={principal} canCreate={Boolean(can("approvals:create"))} canAdvance={Boolean(can("approvals:act"))} canViewDocuments={Boolean(can("documents:view"))} canViewReports={Boolean(can("reports:view"))} canGenerateReports={Boolean(can("reports:generate"))} canViewFacilities={Boolean(can("facilities:view"))} canViewDecisionGovernance={Boolean(can("decisions:view"))} canViewAuthorityPolicy={Boolean(can("authority_policy:view"))} canManageAuthorityPolicy={Boolean(can("authority_policy:manage"))} canReviewAuthorityPolicy={Boolean(can("authority_policy:review"))} canAnchorAuthorityPolicy={Boolean(can("authority_policy:anchor"))} canRevokeAuthorityPolicyAnchor={Boolean(can("authority_policy:anchor_revoke"))} onSelect={setSelectedCaseId} onRefresh={refreshCases} onOpenDocuments={openDocuments} onOpenFacilities={(caseId) => { setFacilityFocus({ caseId }); setPage("facilities"); }} onSwitchIdentity={switchIdentity} onNotice={setNotice} />}
             {page === "indicators" && <IndicatorCenter currentSubject={principal?.subject ?? ""} focusMonitoringEventId={indicatorFocus?.monitoringEventId} focusRunId={indicatorFocus?.runId} canView={Boolean(can("models:view"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} onOpenModelGovernance={openModelGovernance} onNotice={setNotice} />}
-            {page === "models" && <ModelLab focus={modelFocus} counterparties={counterparties} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} onNotice={setNotice} />}
+            {page === "models" && <ModelLab focus={modelFocus} counterparties={counterparties} currentSubject={principal?.subject ?? ""} currentRoles={principal?.roles ?? []} canView={Boolean(can("models:view"))} canSimulate={Boolean(can("ratings:run"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} canManageIndicatorData={Boolean(can("indicator_data:manage"))} canReviewIndicatorData={Boolean(can("indicator_data:review"))} canViewTenantAssets={Boolean(can("tenant_assets:view"))} canManageTenantAssets={Boolean(can("tenant_assets:manage"))} canReviewTenantAssets={Boolean(can("tenant_assets:review"))} onNotice={setNotice} />}
             {page === "rules" && <RuleCenter counterparties={counterparties} currentSubject={principal?.subject ?? ""} canView={Boolean(can("models:view"))} canManage={Boolean(can("models:manage"))} canReview={Boolean(can("models:review"))} onNotice={setNotice} />}
+            {page === "sandbox" && <DecisionSandbox canView={Boolean(can("decision_api:view"))} canExecute={Boolean(can("decision_api:execute"))} onNotice={setNotice} />}
             {page === "documents" && <DocumentCenter rows={documents} counterparties={counterparties} cases={cases} principal={principal} focus={documentFocus} canUpload={Boolean(can("documents:upload"))} canReview={Boolean(can("documents:review"))} onSwitchToReviewer={() => switchIdentity("dev-risk")} onRefresh={async () => setDocuments(await api.documents())} onNotice={setNotice} />}
-            {page === "operations" && <Suspense fallback={<LoadingState />}><OperationsCenter canViewTasks={Boolean(can("approvals:view"))} canViewOperations={Boolean(can("operations:view"))} canManageTasks={Boolean(can("tasks:manage"))} canViewNotifications={Boolean(can("notifications:view"))} canScan={Boolean(can("sla:scan"))} canActCorrections={Boolean(can("corrections:act"))} onNavigate={openNotificationTarget} onNotice={setNotice} /></Suspense>}
+            {page === "operations" && <Suspense fallback={<LoadingState />}><OperationsCenter canViewTasks={Boolean(can("approvals:view"))} canViewOperations={Boolean(can("operations:view"))} canManageTasks={Boolean(can("tasks:manage"))} canViewNotifications={Boolean(can("notifications:view"))} canViewDeliveryOperations={Boolean(can("notification_channels:view"))} canScan={Boolean(can("sla:scan"))} canActCorrections={Boolean(can("corrections:act"))} onNavigate={openNotificationTarget} onNotice={setNotice} /></Suspense>}
             {page === "facilities" && <Suspense fallback={<LoadingState />}><PostCreditCenter key={principal?.subject ?? "anonymous"} focusCaseId={facilityFocus?.caseId} focusFacilityId={facilityFocus?.facilityId} focusConditionId={facilityFocus?.conditionId} canView={Boolean(can("facilities:view"))} canTransact={Boolean(can("facilities:transact"))} canReview={Boolean(can("facilities:review"))} canApproveControlExtensions={Boolean(principal?.roles.some((role) => ["approver", "admin"].includes(role)))} canScan={Boolean(can("facilities:scan"))} canActAlerts={Boolean(can("facility_alerts:act"))} canCreateRiskEvents={Boolean(can("risk_events:create"))} canControl={Boolean(can("facilities:control"))} canCreateRenewal={Boolean(can("approvals:create"))} onOpenApproval={async (caseId) => { await refreshCases(caseId); setPage("approvals"); }} onNotice={setNotice} /></Suspense>}
+            {page === "tenants" && can("tenant_admin:view") && <TenantProductAdminPanel currentSubject={principal?.subject ?? ""} onNotice={setNotice} />}
           </div>
         )}
       </main>
@@ -253,46 +277,11 @@ function LoadingState() {
   return <div className="loading"><span /><p>正在加载可信风险工作台…</p></div>;
 }
 
-function Overview({ counterparties, cases, documents, identity, onNavigate }: { counterparties: Counterparty[]; cases: ApprovalCase[]; documents: DocumentRecord[]; identity: typeof devIdentities[number]; onNavigate: (page: PageKey) => void }) {
-  const highRisk = counterparties.filter((item) => ["B", "C", "D"].includes(item.current_rating)).length;
-  const processing = cases.filter((item) => ["处理中", "待补件"].includes(item.status)).length;
-  const overdue = cases.filter((item) => item.sla_status === "已超时").length;
-  const exposure = counterparties.reduce((sum, item) => sum + item.current_limit, 0);
-  const recent = cases.slice(0, 5);
-  return <>
-    <section className="hero-card">
-      <div>
-        <span className="hero-kicker">今日风险驾驶舱</span>
-        <h2>让每一次授信，都有数据依据与责任边界</h2>
-        <p>当前身份：{identity.label}。{identity.description}，所有关键动作均写入可追溯审计链。</p>
-      </div>
-      <button className="primary-button" onClick={() => onNavigate("approvals")}>进入审批工作台 <span>→</span></button>
-    </section>
-    <section className="metric-grid">
-      <Metric label="在管客商" value={String(counterparties.length)} suffix="户" trend="客户与供应商统一视图" tone="blue" />
-      <Metric label="流程处理中" value={String(processing)} suffix="单" trend={overdue ? `${overdue} 单已超过环节 SLA` : "当前无 SLA 超时申请"} tone="amber" />
-      <Metric label="高风险客商" value={String(highRisk)} suffix="户" trend="B 级及以下重点关注" tone="red" />
-      <Metric label="当前授信敞口" value={(exposure / 10_000).toFixed(0)} suffix="万元" trend={`${documents.length} 份资料已可信归档`} tone="green" />
-    </section>
-    <section className="dashboard-grid">
-      <div className="panel span-2">
-        <PanelHeader eyebrow="WORKFLOW" title="近期授信申请" action={<button className="text-button" onClick={() => onNavigate("approvals")}>查看全部 →</button>} />
-        {recent.length ? <div className="compact-list">{recent.map((item) => <div key={item.case_id} className="compact-row"><div className="entity-monogram">{item.counterparty_name.slice(0, 1)}</div><div className="grow"><strong>{item.counterparty_name}</strong><span>{item.case_id}</span></div><StageBadge stage={item.current_stage} /><StatusBadge value={item.status} /></div>)}</div> : <EmptyState title="暂无审批申请" detail="由客户经理发起第一笔授信申请。" />}
-      </div>
-      <div className="panel">
-        <PanelHeader eyebrow="RISK SIGNAL" title="组合风险分布" />
-        <div className="risk-ring" style={{ "--risk-share": `${counterparties.length ? (highRisk / counterparties.length) * 360 : 0}deg` } as React.CSSProperties}><div><strong>{counterparties.length ? Math.round((highRisk / counterparties.length) * 100) : 0}%</strong><span>高风险占比</span></div></div>
-        <div className="legend"><span><i className="risk" />重点关注 {highRisk}</span><span><i className="normal" />正常经营 {counterparties.length - highRisk}</span></div>
-      </div>
-    </section>
-  </>;
-}
-
 function Metric({ label, value, suffix, trend, tone }: { label: string; value: string; suffix: string; trend: string; tone: string }) {
   return <div className={`metric-card ${tone}`}><div className="metric-head"><span>{label}</span><i /></div><div className="metric-value">{value}<small>{suffix}</small></div><p>{trend}</p></div>;
 }
 
-function CounterpartyCenter({ rows, canRate, canViewDataGovernance, canImportData, canResolveData, canReviewData, onResult, onError }: { rows: Counterparty[]; canRate: boolean; canViewDataGovernance: boolean; canImportData: boolean; canResolveData: boolean; canReviewData: boolean; onResult: (text: string) => void; onError: (text: string) => void }) {
+function CounterpartyCenter({ rows, canManageCounterparties, canViewGovernanceEvidence, canRate, canViewDataGovernance, canImportData, canResolveData, canReviewData, onRefresh, onResult, onError }: { rows: Counterparty[]; canManageCounterparties: boolean; canViewGovernanceEvidence: boolean; canRate: boolean; canViewDataGovernance: boolean; canImportData: boolean; canResolveData: boolean; canReviewData: boolean; onRefresh: () => Promise<void>; onResult: (text: string) => void; onError: (text: string) => void }) {
   const [query, setQuery] = useState("");
   const [rating, setRating] = useState<Record<string, RatingResult>>({});
   const [runningId, setRunningId] = useState<string | null>(null);
@@ -307,6 +296,7 @@ function CounterpartyCenter({ rows, canRate, canViewDataGovernance, canImportDat
   const [batchReviewOnly, setBatchReviewOnly] = useState(false);
   const [profile, setProfile] = useState<RawEnterpriseProfile | null>(null);
   const [profileLoadingId, setProfileLoadingId] = useState<string | null>(null);
+  const [masterRequest, setMasterRequest] = useState<{ id: string; nonce: number } | null>(null);
   const batchResults = useMemo(() => Object.fromEntries((batch?.results ?? []).map((item) => [item.counterparty_id, item])), [batch]);
   const batchSkipped = useMemo(() => Object.fromEntries((batch?.skipped ?? []).map((item) => [item.counterparty_id, item])), [batch]);
   const filtered = rows.filter((item) => {
@@ -361,6 +351,9 @@ function CounterpartyCenter({ rows, canRate, canViewDataGovernance, canImportDat
     finally { setProfileLoadingId(null); }
   }
   return <div className="counterparty-center">
+    {canManageCounterparties && <CounterpartyMasterPanel rows={rows} requestedCounterparty={masterRequest} onChanged={onRefresh} onNotice={(notice) => notice.kind === "success" ? onResult(notice.text) : onError(notice.text)} />}
+    {canManageCounterparties && <CounterpartyImportPanel onCommitted={onRefresh} onNotice={(notice) => notice.kind === "success" ? onResult(notice.text) : onError(notice.text)} />}
+    {canViewGovernanceEvidence && <CounterpartyGovernanceEvidencePanel rows={rows} onNotice={(notice) => notice.kind === "success" ? onResult(notice.text) : onError(notice.text)} />}
     <section className="panel portfolio-rating-panel">
       <div className="portfolio-rating-head"><div><span>PORTFOLIO RATING</span><h2>组合批量评级与风险驾驶舱</h2><p>按同一模型快照批量重算客商，形成可回放的评级分布、待复核队列与贷策影响。</p></div><div className="portfolio-run-controls"><label><span>模型</span><select value={batchModel} onChange={(event) => setBatchModel(event.target.value)}>{models.map((item) => <option key={item.key} value={item.key}>{item.name}</option>)}</select></label><label><span>组合范围</span><select value={batchScope} onChange={(event) => setBatchScope(event.target.value as typeof batchScope)}><option value="all">全部客商</option><option value="supplier">仅供应商</option><option value="customer">仅客户</option></select></label><label className="batch-key"><span>批次编号</span><input value={batchKey} onChange={(event) => setBatchKey(event.target.value)} /></label><button disabled={!canRate || batchRunning || batchKey.trim().length < 5} onClick={() => void runBatch()}>{!canRate ? "当前身份只读" : batchRunning ? "组合重算中…" : "运行组合评级"}</button></div></div>
       {batches.length > 0 && <div className="portfolio-history"><label><span>历史批次</span><select value={batch?.id ?? ""} onChange={(event) => { setBatch(batches.find((item) => item.id === event.target.value) ?? null); setBatchRatingFilter("all"); setBatchReviewOnly(false); }}><option value="">不引用历史批次</option>{batches.map((item) => <option key={item.id} value={item.id}>{item.batch_key} · {item.model_version} · {portfolioScopeLabel(item.scope_type)}</option>)}</select></label>{batch && <div><span>{batch.status === "completed" ? "完整完成" : "含不适用样本"}</span><code>{batch.result_hash.slice(0, 12)}</code><small>{batch.created_by_name} · {dateTime.format(new Date(batch.created_at))}</small></div>}</div>}
@@ -373,7 +366,7 @@ function CounterpartyCenter({ rows, canRate, canViewDataGovernance, canImportDat
     <div className="panel">
       <PanelHeader eyebrow="COUNTERPARTY 360" title="客商统一风险视图" action={<div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索企业名称或信用代码" /></div>} />
       <div className="table-wrap"><table><thead><tr><th>企业主体</th><th>类型</th><th>当前评级</th><th>批次策略</th><th>授信额度</th><th>逾期率</th><th>合作状态</th><th>操作</th></tr></thead><tbody>
-        {filtered.map((item) => { const batchResult = batchResults[item.id] as PortfolioRatingResult | undefined; const result = rating[item.id] ?? batchResult; const skipped = batchSkipped[item.id]; return <tr key={item.id}><td><strong>{item.name}</strong><small>{item.credit_code}</small>{item.data_quality?.raw_profile_id && <i className="material-chip">材料样本</i>}</td><td>{item.counterparty_type === "customer" ? "客户" : "供应商"}</td><td><RatingBadge value={result?.rating ?? item.current_rating} /><small>{result ? `${result.total_score} 分` : item.current_segment}</small></td><td>{batchResult ? <span className={`portfolio-strategy ${batchResult.review_required ? "review" : "pass"}`}><strong>{batchResult.access_strategy}</strong><small>{batchResult.risk_policy_changed ? `${batchResult.risk_policy_hits.length} 条贷策命中` : "模型结论未收紧"}</small></span> : skipped ? <span className="portfolio-strategy skipped"><strong>未评级</strong><small>{skipped.reason}</small></span> : <span className="muted">—</span>}</td><td>{money.format(result?.suggested_limit ?? item.current_limit)}</td><td className={Number(item.financial.overdue_rate) >= .15 ? "danger-text" : ""}>{item.data_quality?.internal_transaction_complete === false ? "待接入" : `${(Number(item.financial.overdue_rate) * 100).toFixed(1)}%`}</td><td><StatusBadge value={item.cooperation_status} /></td><td><div className="row-actions">{item.data_quality?.raw_profile_id && <button className="mini-button secondary" disabled={profileLoadingId === item.id} onClick={() => void openProfile(item)}>{profileLoadingId === item.id ? "加载中…" : profile?.counterparty_id === item.id ? "收起原始数据" : "查看原始数据"}</button>}{canRate ? <button className="mini-button" disabled={runningId === item.id} onClick={() => void run(item)}>{runningId === item.id ? "计算中…" : "重新评级"}</button> : <span className="muted">只读</span>}</div></td></tr>; })}
+        {filtered.map((item) => { const batchResult = batchResults[item.id] as PortfolioRatingResult | undefined; const result = rating[item.id] ?? batchResult; const skipped = batchSkipped[item.id]; const overdueRate = Number(item.financial.overdue_rate); const hasOverdueRate = Number.isFinite(overdueRate); return <tr key={item.id}><td><strong>{item.name}</strong><small>{item.credit_code}</small>{item.data_quality?.raw_profile_id && <i className="material-chip">材料样本</i>}</td><td>{item.counterparty_type === "customer" ? "客户" : "供应商"}</td><td><RatingBadge value={result?.rating ?? item.current_rating} /><small>{result ? `${result.total_score} 分` : item.current_segment}</small></td><td>{batchResult ? <span className={`portfolio-strategy ${batchResult.review_required ? "review" : "pass"}`}><strong>{batchResult.access_strategy}</strong><small>{batchResult.risk_policy_changed ? `${batchResult.risk_policy_hits.length} 条贷策命中` : "模型结论未收紧"}</small></span> : skipped ? <span className="portfolio-strategy skipped"><strong>未评级</strong><small>{skipped.reason}</small></span> : <span className="muted">—</span>}</td><td>{money.format(result?.suggested_limit ?? item.current_limit)}</td><td className={hasOverdueRate && overdueRate >= .15 ? "danger-text" : ""}>{item.data_quality?.internal_transaction_complete === false || !hasOverdueRate ? "待接入" : `${(overdueRate * 100).toFixed(1)}%`}</td><td><StatusBadge value={item.cooperation_status} /></td><td><div className="row-actions">{canManageCounterparties && <button className="mini-button secondary" onClick={() => setMasterRequest({ id: item.id, nonce: Date.now() })}>维护</button>}{item.data_quality?.raw_profile_id && <button className="mini-button secondary" disabled={profileLoadingId === item.id} onClick={() => void openProfile(item)}>{profileLoadingId === item.id ? "加载中…" : profile?.counterparty_id === item.id ? "收起原始数据" : "查看原始数据"}</button>}{canRate ? <button className="mini-button" disabled={runningId === item.id} onClick={() => void run(item)}>{runningId === item.id ? "计算中…" : "重新评级"}</button> : <span className="muted">只读</span>}</div></td></tr>; })}
       </tbody></table></div>
     </div>
     {profile && <RawProfilePanel profile={profile} canViewDataGovernance={canViewDataGovernance} canImportData={canImportData} canResolveData={canResolveData} canReviewData={canReviewData} onNotice={(notice) => notice.kind === "success" ? onResult(notice.text) : onError(notice.text)} onClose={() => setProfile(null)} />}
@@ -1531,7 +1524,7 @@ function portfolioScopeLabel(scope: PortfolioRatingBatch["scope_type"]): string 
 function PanelHeader({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) { return <div className="panel-header"><div><span>{eyebrow}</span><h2>{title}</h2></div>{action}</div>; }
 function StageBadge({ stage }: { stage: string }) { return <span className="stage-badge">{stageMeta[stage]?.label ?? stage}</span>; }
 function StatusBadge({ value }: { value: string }) { const tone = ["已完成", "active", "已上传", "已核验", "通过"].includes(value) ? "success" : ["blocked", "拒绝", "已拒绝", "已驳回", "已撤回", "高风险客商"].includes(value) ? "danger" : "pending"; return <span className={`status-badge ${tone}`}>{value}</span>; }
-function RatingBadge({ value }: { value: string }) { const tone = ["AAA", "AA", "A"].includes(value) ? "good" : ["BBB", "BB"].includes(value) ? "watch" : "bad"; return <span className={`rating-badge ${tone}`}>{value}</span>; }
+function RatingBadge({ value }: { value: string | null | undefined }) { const label = value ?? "未评级"; const tone = ["AAA", "AA", "A"].includes(label) ? "good" : ["BBB", "BB"].includes(label) ? "watch" : "bad"; return <span className={`rating-badge ${tone}`}>{label}</span>; }
 function EmptyState({ title, detail }: { title: string; detail: string }) { return <div className="empty-state"><div>⌁</div><strong>{title}</strong><p>{detail}</p></div>; }
 
 function canHandleStage(principal: Principal | null, stage: string): boolean {

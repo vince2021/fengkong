@@ -12,6 +12,7 @@ from backend.database import Base
 from backend.db_models import CreditCalibrationPlan, CreditCalibrationRun, ModelChangeRecord, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot
 from backend.main import app
 from backend.repository import DemoRepository, RuleCenterReplayDatasetRepository, content_hash
+from backend.security import Principal, ROLE_PERMISSIONS, get_current_principal
 from tests.database_support import IsolatedTestDatabase
 
 
@@ -136,13 +137,15 @@ def test_governed_calibration_plan_requires_run_and_independent_review_before_mo
         Base.metadata.create_all(isolated.engine)
         with database.SessionLocal() as session:
             dataset = RuleCenterReplayDataset(
-                id=str(uuid4()), code="CREDIT-CALIBRATION-TEST", name="企业授信校准样本",
+                id=str(uuid4()), tenant_id="tenant-demo-hengxin",
+                code="CREDIT-CALIBRATION-TEST", name="企业授信校准样本",
                 description="固定校准证据测试", status="active", created_by="model-admin",
                 created_by_name="模型管理员",
             )
             rows = _samples()
             snapshot = RuleCenterReplayDatasetSnapshot(
-                id=str(uuid4()), dataset_id=dataset.id, version=1, source_name="test",
+                id=str(uuid4()), tenant_id="tenant-demo-hengxin",
+                dataset_id=dataset.id, version=1, source_name="test",
                 schema_version="1", as_of_date=date(2026, 8, 31), evidence_reference="test://calibration",
                 data_classification="synthetic", field_mapping_json={}, label_field="label",
                 observed_at_field=None, sample_count=len(rows), samples_json=rows,
@@ -156,6 +159,12 @@ def test_governed_calibration_plan_requires_run_and_independent_review_before_mo
             snapshot_id = snapshot.id
             session.commit()
 
+        tenant_admin = Principal(
+            subject="tenant-admin", name="租户管理员", roles=("admin",),
+            permissions=frozenset(ROLE_PERMISSIONS["admin"]),
+            tenant_id="tenant-demo-hengxin", client_id="calibration-tests",
+        )
+        app.dependency_overrides[get_current_principal] = lambda: tenant_admin
         headers = {"Authorization": "Bearer dev-admin"}
         review_headers = {"Authorization": "Bearer dev-risk"}
         request = _request({"score_threshold_shift": 2, "limit_multiplier_scale": 0.8, "payment_term_scale": 0.8})
@@ -195,12 +204,14 @@ def test_governed_calibration_plan_requires_run_and_independent_review_before_mo
         assert before_approval.status_code == 422
         assert "已批准" in before_approval.json()["detail"]
 
+        app.dependency_overrides.clear()
         approved_response = client.post(f"/api/v1/indicator-center/credit-calibration/plans/{plan['id']}/review", json={"expected_row_version": submitted["row_version"], "decision": "approve", "comment": "证据充分，同意进入模型候选比较"}, headers=review_headers)
         assert approved_response.status_code == 200, approved_response.text
         approved = approved_response.json()
         assert approved["status"] == "approved"
         assert approved["reviewed_by"] == "risk-demo"
 
+        app.dependency_overrides[get_current_principal] = lambda: tenant_admin
         created_response = client.post(f"/api/v1/indicator-center/credit-calibration/plans/{plan['id']}/model-changes", json={"expected_row_version": approved["row_version"], "run_id": run["id"], "candidate_version": "CORP-20260903-CAL1", "change_reason": plan_payload["business_basis"]}, headers=headers)
         assert created_response.status_code == 201, created_response.text
         created = created_response.json()
@@ -254,5 +265,6 @@ def test_governed_calibration_plan_requires_run_and_independent_review_before_mo
         assert listed[0]["calibration_evidence"]["current_valid"] is False
         assert "哈希不一致" in listed[0]["calibration_evidence"]["current_error"]
     finally:
+        app.dependency_overrides.clear()
         client.close()
         isolated.stop()

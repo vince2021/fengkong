@@ -128,7 +128,7 @@ def analyze_credit_calibration(config: dict, snapshot: dict, request: dict) -> d
         },
         "snapshot": {
             key: snapshot.get(key)
-            for key in ("id", "dataset_id", "dataset_code", "dataset_name", "version", "as_of_date", "content_hash", "sample_count")
+            for key in ("id", "tenant_id", "dataset_id", "dataset_code", "dataset_name", "version", "as_of_date", "content_hash", "sample_count")
         },
         "baseline_parameters": calibration_configuration(config)["default_candidate"],
         "sample": {

@@ -182,6 +182,7 @@ class CreditCalibrationRepository:
         snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, run.dataset_snapshot_id)
         return bool(
             snapshot and snapshot.content_hash == run.dataset_snapshot_hash
+            and snapshot.tenant_id == run.report_json.get("snapshot", {}).get("tenant_id")
             and run.report_json.get("evidence_hash") == run.evidence_hash
             and run.report_json.get("model", {}).get("baseline_config_hash") == run.baseline_config_hash
         )

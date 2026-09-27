@@ -27,6 +27,8 @@ from backend.repository import (
 )
 from tests.database_support import IsolatedTestDatabase
 
+TENANT_ID = "tenant-demo-hengxin"
+
 
 class _Demo:
     def get_template(self, key):
@@ -70,7 +72,8 @@ class TestModelChangeComparisonEvidence(unittest.TestCase):
     def _snapshot(self):
         with database.SessionLocal() as session:
             dataset = RuleCenterReplayDataset(
-                id=str(uuid4()), code=f"GOV-{uuid4().hex[:8]}", name="模型治理比较样本",
+                id=str(uuid4()), tenant_id=TENANT_ID,
+                code=f"GOV-{uuid4().hex[:8]}", name="模型治理比较样本",
                 description="验证候选配置与发布证据绑定", status="active",
                 created_by="maker", created_by_name="制作者",
             )
@@ -79,7 +82,8 @@ class TestModelChangeComparisonEvidence(unittest.TestCase):
                 {"sample": {"id": "B", "counterparty_type": "customer", "champion_score": 30, "challenger_score": 15, "champion_rating": "C", "challenger_rating": "D", "champion_admission": "reject", "challenger_admission": "reject"}, "label": "bad"},
             ]
             snapshot = RuleCenterReplayDatasetSnapshot(
-                id=str(uuid4()), dataset_id=dataset.id, version=1, source_name="test",
+                id=str(uuid4()), tenant_id=TENANT_ID,
+                dataset_id=dataset.id, version=1, source_name="test",
                 schema_version="1", as_of_date=date(2026, 6, 30), evidence_reference="test://governance",
                 data_classification="synthetic", field_mapping_json={}, label_field="label",
                 observed_at_field=None, sample_count=len(rows), samples_json=rows,
@@ -129,7 +133,7 @@ class TestModelChangeComparisonEvidence(unittest.TestCase):
         with database.SessionLocal() as session:
             repository = ModelGovernanceRepository(session)
             bound = repository.run_and_bind_comparison_evidence(
-                change_id, 1, self._payload(snapshot_id), _Demo(), "maker", "制作者"
+                change_id, 1, self._payload(snapshot_id), TENANT_ID, _Demo(), "maker", "制作者"
             )
             self.assertTrue(bound["comparison_evidence"]["gate"]["passed"])
             self.assertEqual(bound["comparison_evidence"]["challenger_model_version"], "2.0")
@@ -149,7 +153,7 @@ class TestModelChangeComparisonEvidence(unittest.TestCase):
         snapshot_id, change_id = self._snapshot(), self._change()
         with database.SessionLocal() as session:
             repository = ModelGovernanceRepository(session)
-            bound = repository.run_and_bind_comparison_evidence(change_id, 1, self._payload(snapshot_id), _Demo(), "maker", "制作者")
+            bound = repository.run_and_bind_comparison_evidence(change_id, 1, self._payload(snapshot_id), TENANT_ID, _Demo(), "maker", "制作者")
             record = session.get(ModelChangeRecord, change_id)
             binding = deepcopy(record.comparison_evidence_json)
             binding.pop("binding_hash")
@@ -166,7 +170,7 @@ class TestModelChangeComparisonEvidence(unittest.TestCase):
         snapshot_id, change_id = self._snapshot(), self._change()
         with database.SessionLocal() as session:
             repository = ModelGovernanceRepository(session)
-            bound = repository.run_and_bind_comparison_evidence(change_id, 1, self._payload(snapshot_id), _Demo(), "maker", "制作者")
+            bound = repository.run_and_bind_comparison_evidence(change_id, 1, self._payload(snapshot_id), TENANT_ID, _Demo(), "maker", "制作者")
             submitted = repository.submit_change(change_id, bound["row_version"], "maker", "制作者")
             record = session.get(ModelChangeRecord, change_id)
             run = session.get(RuleCenterReplayComparisonRun, record.comparison_evidence_json["comparison_run_id"])
@@ -181,17 +185,17 @@ class TestModelChangeComparisonEvidence(unittest.TestCase):
         snapshot_id, change_id = self._snapshot(), self._change()
         with database.SessionLocal() as session:
             governance = ModelGovernanceRepository(session)
-            bound = governance.run_and_bind_comparison_evidence(change_id, 1, self._payload(snapshot_id, permissive=False), _Demo(), "maker", "制作者")
+            bound = governance.run_and_bind_comparison_evidence(change_id, 1, self._payload(snapshot_id, permissive=False), TENANT_ID, _Demo(), "maker", "制作者")
             self.assertFalse(bound["comparison_evidence"]["gate"]["passed"])
             comparison_id = bound["comparison_evidence"]["comparison_run_id"]
             comparisons = RuleCenterReplayComparisonRepository(session)
-            exception = comparisons.request_exception(comparison_id, {
+            exception = comparisons.request_exception(TENANT_ID, comparison_id, {
                 "reason": "候选模型用于受控观察并需要保留原始门禁失败证据",
                 "business_impact": "立即阻断会中断已批准的受控验证计划",
                 "compensating_controls": "限期内全部结果进入人工复核并每日监控",
                 "valid_until": date.today() + timedelta(days=30),
             }, "maker", "制作者")
-            comparisons.review_exception(comparison_id, exception["id"], 1, "approve", "同意限期观察并保持原门禁结论", "risk", "风控经理")
+            comparisons.review_exception(TENANT_ID, comparison_id, exception["id"], 1, "approve", "同意限期观察并保持原门禁结论", "risk", "风控经理")
             refreshed = governance.get_change(change_id)
             self.assertFalse(refreshed["comparison_evidence"]["current_gate"]["passed"])
             self.assertEqual(refreshed["comparison_evidence"]["current_effective_status"], "exception_approved")

@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database import AUTO_CREATE_SCHEMA, initialize_database
-from backend.routers import approvals, audit, auth, authority_policies, counterparties, credit_facilities, credit_reports, decision_governance, documents, enterprise_data, health, indicator_center, indicator_observations, model_governance, models, notifications, operations, rule_center
+from backend.routers import approvals, audit, auth, authority_policies, counterparties, credit_facilities, credit_reports, decision_governance, decision_jobs, decisions, documents, enterprise_data, governance_evidence, health, indicator_center, indicator_observations, model_governance, models, notifications, operations, product_packages, rule_center, sales_demo, tenant_admin, tenant_assets, tenant_rollouts
 from backend.security import validate_security_configuration
 
 
@@ -21,7 +21,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:3000", "http://localhost:3000", "http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_origin_regex=r"^http://(?:127\.0\.0\.1|localhost):(?:300\d|51\d{2})$",
+    allow_origin_regex=r"^http://(?:127\.0\.0\.1|localhost):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,6 +30,7 @@ app.add_middleware(
 API_PREFIX = "/api/v1"
 app.include_router(health.router, prefix=API_PREFIX)
 app.include_router(counterparties.router, prefix=API_PREFIX)
+app.include_router(governance_evidence.router, prefix=API_PREFIX)
 app.include_router(models.router, prefix=API_PREFIX)
 app.include_router(approvals.router, prefix=API_PREFIX)
 app.include_router(authority_policies.router, prefix=API_PREFIX)
@@ -46,6 +47,14 @@ app.include_router(enterprise_data.router, prefix=API_PREFIX)
 app.include_router(indicator_observations.router, prefix=API_PREFIX)
 app.include_router(indicator_center.router, prefix=API_PREFIX)
 app.include_router(rule_center.router, prefix=API_PREFIX)
+app.include_router(sales_demo.router, prefix=API_PREFIX)
+app.include_router(decision_jobs.router, prefix=API_PREFIX)
+app.include_router(decisions.router, prefix=API_PREFIX)
+app.include_router(tenant_admin.router, prefix=API_PREFIX)
+app.include_router(product_packages.router, prefix=API_PREFIX)
+app.include_router(tenant_assets.router, prefix=API_PREFIX)
+app.include_router(tenant_rollouts.router, prefix=API_PREFIX)
+app.include_router(tenant_rollouts.definition_router, prefix=API_PREFIX)
 
 
 @app.get("/", include_in_schema=False)

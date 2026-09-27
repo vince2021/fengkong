@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from backend.db_models import AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, NotificationRecord
-from backend.repository import AuditRepository, ConcurrentUpdateError, NotificationRepository
+from backend.repository import AuditRepository, ConcurrentUpdateError, NotificationRepository, audit_event_hash
+from backend.tenant_registry import PLATFORM_INTERNAL_TENANT_ID, active_business_tenant_ids
 
 
 BUILTIN_POLICY_VERSION = "BUILTIN-2026.07"
@@ -1110,22 +1111,24 @@ class AuthorityPolicyRepository:
 
     def _create_activation_blocked_notifications(self, run: AuthorityPolicyActivationRunRecord) -> None:
         notifications = NotificationRepository(self.session)
-        for role in ("approver", "model_admin", "risk_manager"):
-            notifications.create_if_absent(
-                {
-                    "case_id": None,
-                    "counterparty_id": None,
-                    "recipient_role": role,
-                    "recipient_subject": None,
-                    "category": "authority_policy",
-                    "level": "policy_blocked",
-                    "severity": "critical",
-                    "title": "授权策略到期切换被阻断",
-                    "message": f"{run.scheduled_policy_version} 未能按预约时间生效：{run.error_message}",
-                    "action_json": {"page": "approvals"},
-                    "dedup_key": f"authority-policy-activation:{run.id}:{role}:blocked",
-                }
-            )
+        for tenant_id in active_business_tenant_ids(self.session):
+            for role in ("approver", "model_admin", "risk_manager"):
+                notifications.create_if_absent(
+                    tenant_id,
+                    {
+                        "case_id": None,
+                        "counterparty_id": None,
+                        "recipient_role": role,
+                        "recipient_subject": None,
+                        "category": "authority_policy",
+                        "level": "policy_blocked",
+                        "severity": "critical",
+                        "title": "授权策略到期切换被阻断",
+                        "message": f"{run.scheduled_policy_version} 未能按预约时间生效：{run.error_message}",
+                        "action_json": {"page": "approvals"},
+                        "dedup_key": f"authority-policy-activation:{run.id}:{role}:blocked",
+                    }
+                )
 
     def _commit_activation_run(
         self,
@@ -1255,6 +1258,7 @@ class AuthorityPolicyRepository:
     ) -> None:
         notifications = self.session.scalars(
             select(NotificationRecord).where(
+                NotificationRecord.tenant_id.in_(active_business_tenant_ids(self.session)),
                 NotificationRecord.dedup_key.like(
                     f"authority-policy-activation:{incident.id}:%:blocked"
                 ),
@@ -1479,6 +1483,8 @@ def _audit_chain_evidence(
 ) -> dict:
     records = session.scalars(
         select(AuditEventRecord).where(
+            AuditEventRecord.tenant_id == PLATFORM_INTERNAL_TENANT_ID,
+            AuditEventRecord.scope_type == "platform",
             AuditEventRecord.aggregate_type == aggregate_type,
             AuditEventRecord.aggregate_id == aggregate_id,
         )
@@ -1496,6 +1502,8 @@ def _audit_chain_evidence(
     hashes_valid = all(item["hash_valid"] for item in serialized)
     complete = len(ordered) == len(records)
     return {
+        "tenant_id": PLATFORM_INTERNAL_TENANT_ID,
+        "scope_type": "platform",
         "aggregate_type": aggregate_type,
         "aggregate_id": aggregate_id,
         "valid": bool(records) and complete and hashes_valid,
@@ -1572,17 +1580,21 @@ def _activation_audit_complete(
 
 
 def _audit_event_evidence(record: AuditEventRecord) -> dict:
-    expected_hash = policy_config_hash({
-        "id": record.id,
-        "aggregate_type": record.aggregate_type,
-        "aggregate_id": record.aggregate_id,
-        "event_type": record.event_type,
-        "actor": record.actor,
-        "payload": record.payload,
-        "previous_hash": record.previous_hash,
-    })
+    expected_hash = audit_event_hash(
+        event_id=record.id,
+        tenant_id=record.tenant_id,
+        scope_type=record.scope_type,
+        aggregate_type=record.aggregate_type,
+        aggregate_id=record.aggregate_id,
+        event_type=record.event_type,
+        actor=record.actor,
+        payload=record.payload,
+        previous_hash=record.previous_hash,
+    )
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
+        "scope_type": record.scope_type,
         "event_type": record.event_type,
         "actor": record.actor,
         "payload": deepcopy(record.payload),
@@ -2191,6 +2203,8 @@ def verify_authority_policy_evidence_package(
     policy = package.get("policy") if isinstance(package.get("policy"), dict) else {}
     lifecycle_valid = (
         _verify_serialized_audit_chain(lifecycle_chain)
+        and lifecycle_chain.get("tenant_id") == PLATFORM_INTERNAL_TENANT_ID
+        and lifecycle_chain.get("scope_type") == "platform"
         and lifecycle_chain.get("aggregate_type") == "authority_policy"
         and lifecycle_chain.get("aggregate_id") == policy.get("id")
     )
@@ -2199,6 +2213,8 @@ def verify_authority_policy_evidence_package(
         and set(activation_chains) == activation_run_ids
         and all(
             _verify_serialized_audit_chain(chain)
+            and chain.get("tenant_id") == PLATFORM_INTERNAL_TENANT_ID
+            and chain.get("scope_type") == "platform"
             and chain.get("aggregate_type") == "authority_policy_activation_run"
             and chain.get("aggregate_id") == run_id
             for run_id, chain in activation_chains.items()
@@ -2330,10 +2346,17 @@ def _verify_serialized_audit_chain(chain: object) -> bool:
         return False
     previous_hash = ""
     for event in events:
-        if not isinstance(event, dict) or event.get("previous_hash") != previous_hash:
+        if (
+            not isinstance(event, dict)
+            or event.get("previous_hash") != previous_hash
+            or event.get("tenant_id") != chain.get("tenant_id")
+            or event.get("scope_type") != chain.get("scope_type")
+        ):
             return False
         expected_hash = policy_config_hash({
             "id": event.get("id"),
+            "tenant_id": event.get("tenant_id"),
+            "scope_type": event.get("scope_type"),
             "aggregate_type": chain.get("aggregate_type"),
             "aggregate_id": chain.get("aggregate_id"),
             "event_type": event.get("event_type"),

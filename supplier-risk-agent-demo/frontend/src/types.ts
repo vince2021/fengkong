@@ -3,11 +3,14 @@ export type Principal = {
   name: string;
   roles: string[];
   permissions: string[];
+  tenant_id: string;
+  client_id: string;
   counterparty_id: string | null;
 };
 
 export type Counterparty = {
   id: string;
+  tenant_id?: string;
   name: string;
   credit_code: string;
   counterparty_type: "supplier" | "customer";
@@ -17,12 +20,195 @@ export type Counterparty = {
   requested_limit: number;
   current_limit: number;
   current_payment_term_days: number;
-  current_rating: string;
-  current_segment: string;
-  external: Record<string, string | number | boolean>;
-  internal: Record<string, string | number | boolean>;
-  financial: Record<string, string | number | boolean>;
+  current_rating: string | null;
+  current_segment: string | null;
+  external: Record<string, unknown>;
+  internal: Record<string, unknown>;
+  financial: Record<string, unknown>;
+  status?: "active" | "archived";
+  source_type?: "manual" | "batch_import" | string;
+  profile_hash?: string;
+  row_version?: number;
+  archived_at?: string | null;
+  archived_by?: string | null;
+  archive_reason?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
   data_quality?: { raw_profile_id?: string; recommended_model?: string; internal_transaction_complete?: boolean; missing_critical_fields?: string[] };
+};
+
+export type CounterpartyHistoryEvent = {
+  id: string;
+  event_type: "counterparty_created" | "counterparty_updated" | "counterparty_archived";
+  actor: string;
+  actor_name: string;
+  reason: string;
+  changed_fields: string[];
+  row_version: number | null;
+  previous_hash: string;
+  event_hash: string;
+  created_at: string | null;
+};
+
+export type CounterpartyPage = {
+  items: Counterparty[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type CounterpartyImportRowReceipt = {
+  row_number: number;
+  counterparty_id: string | null;
+  credit_code: string | null;
+  action: "create" | "update" | "skip" | "reject";
+  errors: Array<{ field: string; code: string; message: string }>;
+  warnings: Array<{ code: string; message: string }>;
+};
+
+export type CounterpartyImportBatch = {
+  id: string;
+  tenant_id: string;
+  import_key: string;
+  file_name: string;
+  file_format: "json" | "csv";
+  duplicate_strategy: "reject" | "skip" | "update";
+  field_mapping: Record<string, string>;
+  source_hash: string;
+  request_hash: string;
+  preview_hash: string;
+  status: "prechecked" | "blocked" | "committed";
+  total_count: number;
+  valid_count: number;
+  invalid_count: number;
+  create_count: number;
+  update_count: number;
+  skip_count: number;
+  committed_count: number;
+  row_receipts: CounterpartyImportRowReceipt[];
+  precheck_reason: string;
+  commit_reason: string | null;
+  created_by: string;
+  created_by_name: string;
+  committed_by: string | null;
+  committed_by_name: string | null;
+  committed_at: string | null;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+  idempotent: boolean;
+};
+
+export type CounterpartyImportPage = {
+  items: CounterpartyImportBatch[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type CounterpartyImportCorrectionDraft = {
+  source_batch_id: string;
+  source_import_key: string;
+  source_hash: string;
+  suggested_import_key: string;
+  file_name: string;
+  file_format: "json" | "csv";
+  content: string;
+  duplicate_strategy: "reject" | "skip" | "update";
+  field_mapping: Record<string, string>;
+};
+
+export type CounterpartyImportMappingTemplate = {
+  id: string;
+  tenant_id: string;
+  template_key: string;
+  name: string;
+  file_format: "json" | "csv";
+  mapping: Record<string, string>;
+  mapping_hash: string;
+  description: string;
+  status: "active" | "archived";
+  created_by: string;
+  updated_by: string;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type GovernanceEvidenceCheck = {
+  key: string;
+  label: string;
+  passed: boolean;
+  applicable: boolean;
+  detail: string;
+};
+
+export type CounterpartyGovernanceEvidence = {
+  schema_version: "counterparty-governance-evidence-v1";
+  tenant_id: string;
+  counterparty_id: string;
+  generated_at: string;
+  package_hash_algorithm: "SHA-256";
+  package_hash: string;
+  scope: {
+    type: "single_counterparty";
+    tenant_boundary: string;
+    platform_assets: string;
+    documents: string;
+  };
+  counterparty: Record<string, unknown> & { id: string; name: string; tenant_id: string; profile_hash: string };
+  records: Record<string, Array<Record<string, unknown>>>;
+  audit: {
+    tenant_business_chains: Array<{
+      tenant_id: string;
+      scope_type: "tenant";
+      aggregate_type: string;
+      aggregate_id: string;
+      valid: boolean;
+      event_count: number;
+      terminal_hash: string;
+      events: Array<Record<string, unknown>>;
+    }>;
+    platform_asset_checkpoints: Array<{
+      evidence_scope: "platform_shared";
+      tenant_id: string;
+      aggregate_type: string;
+      aggregate_id: string;
+      event_count: number;
+      terminal_hash: string;
+      valid: boolean;
+    }>;
+  };
+  platform_asset_references: Array<{
+    asset_type: string;
+    evidence_scope: "platform_shared";
+    id?: string;
+    code: string;
+    version: string | number;
+    config_hash: string;
+    assets_hash?: string;
+    source_execution_id?: string;
+  }>;
+  record_hash_checks: GovernanceEvidenceCheck[];
+  evidence_assessment: {
+    level: "complete" | "partial" | "limited";
+    domain_count: number;
+    present_domain_count: number;
+    completeness_ratio: number;
+    domains: Record<string, boolean>;
+    missing_domains: string[];
+    note: string;
+  };
+  integrity: { passed: boolean; checks: GovernanceEvidenceCheck[] };
+};
+
+export type CounterpartyGovernanceEvidenceVerification = {
+  verified: boolean;
+  trust_level: "invalid" | "self_sealed" | "externally_anchored";
+  computed_package_hash: string;
+  expected_package_hash: string | null;
+  checks: GovernanceEvidenceCheck[];
+  note: string;
 };
 
 export type RawEnterpriseProfile = {
@@ -61,6 +247,7 @@ export type RawEnterpriseProfile = {
 
 export type EnterpriseDataImport = {
   id: string;
+  tenant_id: string;
   import_key: string;
   counterparty_id: string;
   source_type: "internal_erp" | "official_registry" | "audited_financial" | "external_risk" | "credit_report" | "management_submission";
@@ -84,6 +271,7 @@ export type EnterpriseDataImport = {
 
 export type EnterpriseDataField = {
   id: string;
+  tenant_id: string;
   import_id: string;
   counterparty_id: string;
   field_path: string;
@@ -109,6 +297,7 @@ export type EnterpriseDataField = {
 
 export type EnterpriseDataResolution = {
   id: string;
+  tenant_id: string;
   counterparty_id: string;
   field_path: string;
   selected_field_id: string;
@@ -133,6 +322,7 @@ export type EnterpriseDataResolution = {
 };
 
 export type EnterpriseDataConflict = {
+  tenant_id: string;
   counterparty_id: string;
   field_path: string;
   status: "unresolved" | "pending_review" | "resolved" | "reopened";
@@ -146,6 +336,7 @@ export type EnterpriseDataConflict = {
 };
 
 export type EnterpriseDataProfile = {
+  tenant_id: string;
   counterparty_id: string;
   profile: Record<string, unknown>;
   summary: {
@@ -174,6 +365,7 @@ export type EnterpriseDataProfile = {
 };
 
 export type EnterpriseFieldLineage = {
+  tenant_id: string;
   counterparty_id: string;
   field_path: string;
   effective_field_id: string | null;
@@ -582,6 +774,8 @@ export type AuthorityPolicyEvidenceAnchorReceipt = {
 };
 
 export type AuthorityPolicyEvidenceAuditChain = {
+  tenant_id: string;
+  scope_type: "tenant" | "platform";
   aggregate_type: string;
   aggregate_id: string;
   valid: boolean;
@@ -589,6 +783,8 @@ export type AuthorityPolicyEvidenceAuditChain = {
   terminal_hash: string;
   events: Array<{
     id: string;
+    tenant_id: string;
+    scope_type: "tenant" | "platform";
     event_type: string;
     actor: string;
     payload: Record<string, unknown>;
@@ -687,6 +883,7 @@ export type DecisionVarianceSnapshot = {
 
 export type DecisionVariance = DecisionVarianceSnapshot & {
   id: string;
+  tenant_id: string;
   case_id: string;
   counterparty_id: string;
   counterparty_name: string;
@@ -993,6 +1190,273 @@ export type RatingResult = {
   submodel_scores?: Record<string, number>;
   enterprise_risk_screening?: EnterpriseRiskScreening;
   risk_screening_policy?: RiskScreeningPolicyResult;
+  access_strategy?: string;
+  risk_segment?: string;
+  monitoring_frequency?: string;
+  review_required?: boolean;
+  strong_rule_hits?: Array<Record<string, unknown>>;
+  main_deductions?: Array<Record<string, unknown> | string>;
+};
+
+export type SalesDemoStory = {
+  key: string;
+  label: string;
+  counterparty_id: string;
+  intent: string;
+};
+
+export type SalesDemoScenario = {
+  key: string;
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  audience: string;
+  template_key: string;
+  primary_story: string;
+  value_points: string[];
+  stories: SalesDemoStory[];
+  preview?: {
+    total_score: number;
+    rating: string;
+    risk_segment: string;
+    access_strategy: string;
+    suggested_limit: number;
+    suggested_payment_term_days: number;
+    review_required: boolean;
+  };
+  evidence_hash?: string;
+};
+
+export type SalesDemoOverview = {
+  schema_version: "sales-demo-overview-v1";
+  generated_at: string;
+  headline: string;
+  subheadline: string;
+  metrics: {
+    scenario_count: number;
+    sample_count: number;
+    indicator_count: number;
+    model_count: number;
+    traceable_rate: number;
+    requested_total: number;
+    suggested_total: number;
+  };
+  decision_mix: Record<string, number>;
+  scenarios: SalesDemoScenario[];
+  audience_tracks: Array<{ key: string; label: string; message: string; minutes: number }>;
+  overview_hash: string;
+};
+
+export type SalesDemoRun = {
+  schema_version: "sales-demo-run-v1";
+  scenario: SalesDemoScenario;
+  story: SalesDemoStory;
+  counterparty: {
+    id: string;
+    name: string;
+    credit_code: string;
+    counterparty_type: "supplier" | "customer";
+    industry: string;
+    requested_limit: number;
+  };
+  result: RatingResult;
+  decision_path: Array<{
+    key: string;
+    kind: string;
+    title: string;
+    status: "complete" | "attention" | "blocked";
+    summary: string;
+    detail: string;
+    proof: string;
+    target_page: "counterparties" | "indicators" | "models" | "rules" | "approvals" | "facilities";
+  }>;
+  business_summary: {
+    risk_summary: string;
+    limit_summary: string;
+    review_summary: string;
+    disclaimer: string;
+  };
+  evidence: {
+    input_snapshot_hash: string;
+    model_config_hash: string;
+    result_hash: string;
+    evidence_hash: string;
+    hash_algorithm: "SHA-256";
+    model_key: string;
+    model_name: string;
+    model_version: string;
+  };
+};
+
+export type SalesDemoDistribution = {
+  key: string;
+  label: string;
+  count: number;
+  rate: number;
+};
+
+export type SalesDemoComparisonSide = {
+  average_score: number;
+  average_limit: number;
+  total_limit: number;
+  average_payment_term_days: number;
+  rating_distribution: SalesDemoDistribution[];
+  admission_distribution: SalesDemoDistribution[];
+  score_distribution: SalesDemoDistribution[];
+  ks: null;
+  confusion_matrix: null;
+};
+
+export type SalesDemoValueDashboard = {
+  schema_version: "sales-demo-value-dashboard-v1";
+  generated_at: string;
+  evidence_scope: {
+    data_classification: "synthetic_demo";
+    label_status: "unlabeled";
+    evidence_level: "non_supervised";
+    display_label: string;
+    statement: string;
+  };
+  metrics: {
+    fixed_case_count: number;
+    source_counterparty_count: number;
+    model_count: number;
+    execution_success_rate: number;
+    automatic_admission_rate: number;
+    manual_review_rate: number;
+    reject_rate: number;
+    average_score: number;
+    average_suggested_limit: number;
+    total_requested_limit: number;
+    total_suggested_limit: number;
+    average_payment_term_days: number;
+    risk_capture_rate: number | null;
+  };
+  distributions: {
+    rating: SalesDemoDistribution[];
+    admission: SalesDemoDistribution[];
+    limit: SalesDemoDistribution[];
+  };
+  top_rule_hits: Array<{ name: string; count: number; rate: number }>;
+  model_breakdown: Array<{
+    key: string;
+    label: string;
+    name: string;
+    version: string;
+    config_hash: string;
+    case_count: number;
+    average_score: number;
+    average_limit: number;
+    review_rate: number;
+    evidence_hash: string;
+  }>;
+  supervised_metrics: {
+    status: "not_available";
+    risk_capture_rate: null;
+    ks: null;
+    confusion_matrix: null;
+    reason: string;
+  };
+  evidence: {
+    snapshot_hash: string;
+    case_set_hash: string;
+    evidence_hash: string;
+    hash_algorithm: "SHA-256";
+  };
+};
+
+export type SalesDemoChampionChallenger = {
+  schema_version: "sales-demo-champion-challenger-v1";
+  generated_at: string;
+  data_classification: "synthetic_demo";
+  evidence_level: "unlabeled";
+  champion: { key: string; label: string; name: string; version: string; config_hash: string };
+  challenger: { key: string; label: string; name: string; version: string; config_hash: string };
+  metrics: {
+    sample_count: number;
+    failure_count: number;
+    average_score_delta: number;
+    rating_change_rate: number;
+    admission_change_rate: number;
+    suggested_limit_delta: number;
+    psi: number | null;
+    champion: SalesDemoComparisonSide;
+    challenger: SalesDemoComparisonSide;
+    segments: Array<{
+      segment: string;
+      label: string;
+      sample_count: number;
+      champion_average_score: number;
+      challenger_average_score: number;
+      average_score_delta: number;
+      rating_change_rate: number;
+      admission_change_rate: number;
+    }>;
+  };
+  supervised_metrics: {
+    status: "degraded_to_unsupervised";
+    champion_ks: null;
+    challenger_ks: null;
+    champion_confusion_matrix: null;
+    challenger_confusion_matrix: null;
+    warning: string;
+  };
+  evidence: {
+    input_snapshot_hash: string;
+    champion_model_hash: string;
+    challenger_model_hash: string;
+    comparison_hash: string;
+    hash_algorithm: "SHA-256";
+  };
+};
+
+export type SalesDemoPostCreditAlert = {
+  schema_version: "sales-demo-post-credit-alert-v1";
+  generated_at: string;
+  data_classification: "synthetic_demo";
+  record_status: "read_only_demo";
+  alert: {
+    id: string;
+    title: string;
+    alert_type: string;
+    severity: "critical";
+    severity_label: string;
+    status: string;
+    observed_at: string;
+    counterparty_id: string;
+    counterparty_name: string;
+    current_exposure: number;
+    latest_rating: string;
+    latest_admission: string;
+    recommended_action: string;
+    owner_role: string;
+    sla_hours: number;
+    escalation_role: string;
+  };
+  triggers: Array<{
+    rule_id: string;
+    rule_name: string;
+    indicator: string;
+    field: string;
+    actual_value: unknown;
+  }>;
+  decision_trace: {
+    score: number;
+    rating: string;
+    admission: string;
+    suggested_limit: number;
+    monitoring_frequency: string;
+    model_name: string;
+    model_version: string;
+  };
+  evidence: {
+    counterparty_hash: string;
+    model_config_hash: string;
+    result_hash: string;
+    alert_evidence_hash: string;
+    hash_algorithm: "SHA-256";
+  };
+  disclaimer: string;
 };
 
 export type PortfolioRatingResult = {
@@ -1036,6 +1500,7 @@ export type PortfolioRatingSummary = {
 
 export type PortfolioRatingBatch = {
   id: string;
+  tenant_id: string;
   batch_key: string;
   request_hash: string;
   template_key: string;
@@ -1242,6 +1707,7 @@ export type RuleCenterReleasePackage = {
 
 export type RuleCenterReplayRun = {
   id: string;
+  tenant_id: string;
   package_id: string;
   package_config_hash: string;
   dataset_snapshot_id: string;
@@ -1276,6 +1742,8 @@ export type RuleCenterReplayRun = {
   };
   details: Array<Record<string, unknown>>;
   gate: { passed: boolean; errors: string[]; warnings: string[]; summary: string };
+  asset_snapshot: Record<string, unknown>;
+  assets_hash: string;
   evidence_hash: string;
   created_by: string;
   created_by_name: string;
@@ -1284,6 +1752,7 @@ export type RuleCenterReplayRun = {
 
 export type RuleCenterReplaySnapshot = {
   id: string;
+  tenant_id: string;
   dataset_id: string;
   version: number;
   source_name: string;
@@ -1314,6 +1783,7 @@ export type RuleCenterReplaySnapshot = {
 
 export type RuleCenterReplayDataset = {
   id: string;
+  tenant_id: string;
   code: string;
   name: string;
   description: string;
@@ -1334,7 +1804,7 @@ export type RuleCenterReplayComparisonSide = {
 };
 
 export type RuleCenterReplayComparisonException = {
-  id: string; comparison_run_id: string; comparison_evidence_hash: string;
+  id: string; tenant_id: string; comparison_run_id: string; comparison_evidence_hash: string;
   status: "pending_review" | "approved" | "rejected";
   reason: string; business_impact: string; compensating_controls: string;
   valid_until: string; request_hash: string;
@@ -1345,10 +1815,10 @@ export type RuleCenterReplayComparisonException = {
 };
 
 export type RuleCenterReplayComparison = {
-  id: string; dataset_snapshot_id: string; dataset_snapshot_hash: string;
+  id: string; tenant_id: string; dataset_snapshot_id: string; dataset_snapshot_hash: string;
   champion_model_key: string; champion_model_version: string; challenger_model_key: string; challenger_model_version: string;
   challenger_change_id: string | null; challenger_config_hash: string | null;
-  champion_pipeline_code: string; champion_pipeline_version: number | null; challenger_pipeline_code: string; challenger_pipeline_version: number | null;
+  champion_pipeline_code: string; champion_pipeline_version: string | null; challenger_pipeline_code: string; challenger_pipeline_version: string | null;
   segment_field: string; evidence_level: "labeled" | "unlabeled";
   config: {
     sample_limit: number; max_execution_failure_rate: number; positive_labels: string[]; positive_admissions: string[];
@@ -1365,6 +1835,7 @@ export type RuleCenterReplayComparison = {
   gate: { passed: boolean; summary: string; violations: Array<{ key: string; label: string; actual: number; threshold: number; direction: "maximum" | "required"; message: string }>; warnings: string[] };
   effective_status: "passed" | "blocked" | "exception_pending" | "exception_approved";
   latest_exception: RuleCenterReplayComparisonException | null;
+  asset_snapshot: Record<string, unknown>; assets_hash: string;
   evidence_hash: string; created_by_name: string; created_at: string | null;
 };
 
@@ -1956,6 +2427,203 @@ export type ModelValidationReport = {
   calculation_errors: Array<{ counterparty_id: string; reason: string }>;
 };
 
+export type ModelRiskCatalog = {
+  code: string; level: "low" | "medium" | "high"; name: string; basis: string[];
+  acceptance_roles: string[]; review_days: number; regulatory_mapping: string[]; required_evidence: string[];
+};
+
+export type ModelRiskPolicy = {
+  id: string; tenant_id: string; version: number; name: string; description: string;
+  levels: ModelRiskCatalog[]; config_hash: string;
+  status: "draft" | "pending_review" | "published" | "rejected" | "retired"; is_active: boolean;
+  change_reason: string; created_by: string; created_by_name: string; submitted_at: string | null;
+  reviewed_by: string | null; reviewed_by_name: string | null; reviewed_at: string | null;
+  review_comment: string | null; published_at: string | null; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type ModelRiskCatalogResponse = {
+  source: "platform_default" | "tenant_policy"; version: string; policy: ModelRiskPolicy | null;
+  items: ModelRiskCatalog[]; config_hash: string;
+};
+
+export type ModelRiskAcceptanceRole = "model_owner" | "risk_manager" | "model_risk_committee";
+
+export type ModelRiskAcceptance = {
+  id: string; tenant_id: string; model_change_id: string; policy_id: string; policy_version: number;
+  policy_config_hash: string; evidence_binding_hash: string; risk_level: "low" | "medium" | "high";
+  required_roles: ModelRiskAcceptanceRole[];
+  approvals: Array<{ acceptance_role: ModelRiskAcceptanceRole; platform_role: string; actor_subject: string; actor_name: string; note: string; accepted_at: string }>;
+  status: "pending" | "accepted" | "revoked";
+  effective_status: "pending" | "accepted" | "revoked" | "overdue" | "policy_stale" | "evidence_stale";
+  rationale: string; created_by: string; created_by_name: string; accepted_at: string | null;
+  review_due_at: string | null; revoked_by: string | null; revoked_by_name: string | null;
+  revoked_at: string | null; revocation_reason: string | null; row_version: number; created_at: string | null;
+  idempotent?: boolean;
+};
+
+export type ModelRiskReviewQueueItem = {
+  acceptance_id: string; model_change_id: string; risk_level: "low" | "medium" | "high";
+  policy_version: number; review_due_at: string; days_remaining: number;
+  level: "upcoming" | "due_soon" | "overdue";
+  responsible: Array<{ subject: string; role: string; name: string }>;
+};
+
+export type ModelRiskReacceptanceReviewQueueItem = {
+  reacceptance_id: string; model_release_id: string; model_change_id: string;
+  risk_level: "low" | "medium" | "high"; model_version: string | null;
+  review_due_at: string; days_remaining: number; level: "upcoming" | "due_soon" | "overdue";
+  runtime_impact: "at_risk" | "blocked"; pending_renewal_id: string | null;
+  evidence_level: string;
+  responsible: Array<{ subject: string; role: string; name: string }>;
+};
+
+export type ModelRiskUnifiedReviewQueueItem = {
+  id: string;
+  source: "risk_acceptance" | "risk_reacceptance" | "monitoring_gate" | "monitoring_diff_case";
+  priority: "P0" | "P1" | "P2" | "P3" | "P4";
+  priority_reason: string;
+  state: string;
+  title: string;
+  summary: string;
+  due_at: string | null;
+  days_remaining: number | null;
+  model_key: string | null;
+  model_version: string | null;
+  model_change_id: string | null;
+  model_release_id: string | null;
+  policy_id: string | null;
+  monitoring_run_id: string | null;
+  diff_case_id: string | null;
+  evidence_level: string | null;
+  source_row_version?: number;
+  responsible: Array<{ subject: string | null; role: string; name: string }>;
+  action: { target: "model-risk-policy" | "release-approval-dashboard" | "tenant-rollout-governance"; label: string };
+};
+
+export type ModelRiskReviewAssignment = {
+  id: string; item_id: string; source: string; assigned_role: string;
+  assigned_to: string | null; assigned_to_name: string | null; reason: string;
+  assigned_by: string; assigned_by_name: string; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type ModelRiskReviewWorkbench = {
+  schema_version: "model-risk-review-queue-v2"; as_of: string;
+  filters: { template_key: string | null; horizon_days: number; source: string | null; priority: string | null; owner_subject: string | null; owner_role: string | null; ownership: string; evidence_level: string | null; query: string | null };
+  counts: { total: number; p0: number; p1: number; p2: number; p3: number; p4: number; mine: number; unassigned: number; [key: string]: number };
+  items: Array<ModelRiskUnifiedReviewQueueItem & { assignment: ModelRiskReviewAssignment | null; delegated: boolean; delegated_from: { subject: string; name: string; role: string } | null; delegation_id: string | null }>;
+  available_owners: Array<{ subject: string; role: string; name: string }>;
+  available_roles: string[];
+};
+
+export type ModelRiskReviewMember = {
+  subject: string; name: string; roles: string[]; expires_at: string | null;
+};
+
+export type ModelRiskReviewDelegation = {
+  id: string; principal_subject: string; principal_name: string; delegate_subject: string; delegate_name: string;
+  assigned_role: string; starts_at: string; ends_at: string; status: "active" | "revoked";
+  effective_status: "scheduled" | "active" | "expired" | "revoked"; reason: string;
+  created_by: string; created_by_name: string; revoked_by: string | null; revoked_by_name: string | null;
+  revoked_at: string | null; revocation_reason: string | null; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type ModelRiskReviewAssignmentHistory = {
+  item_id: string;
+  items: Array<{
+    id: string; event_type: string; actor: string; actor_name: string | null; action: "assign" | "handoff" | "unassign";
+    previous: { subject: string | null; name: string | null; role: string | null };
+    next: { subject: string | null; name: string | null; role: string | null };
+    reason: string; batch_id: string; event_hash: string; created_at: string | null;
+  }>;
+};
+
+export type ModelRiskReviewSavedView = {
+  id: string; tenant_id: string; owner_subject: string; name: string;
+  filters: Record<string, unknown>; is_default: boolean; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type ModelRiskReviewSlaTrend = {
+  schema_version: "model-risk-review-sla-trend-v1"; days: number; template_key: string | null;
+  items: Array<{ id: string; snapshot_date: string; template_key: string | null; counts: Record<string, number>; source_counts: Record<string, number>; owner_counts: Record<string, number>; evidence_hash: string; created_at: string | null }>;
+};
+
+export type ModelRiskReacceptance = {
+  id: string; tenant_id: string; model_release_id: string; model_change_id: string; prior_acceptance_id: string;
+  policy_id: string; policy_version: number; policy_config_hash: string; source_evidence_binding_hash: string;
+  release_config_hash: string; operational_evidence: { evidence_reference: string; evidence_summary: string; observed_from: string; observed_to: string; captured_at: string; monitoring_binding?: { evidence_level: "supervised" | "non_supervised"; status: string }; [key: string]: unknown };
+  operational_evidence_hash: string; risk_level: "low" | "medium" | "high"; required_roles: ModelRiskAcceptanceRole[];
+  monitoring_run_id: string | null; monitoring_evidence_hash: string | null; label_evidence_id: string | null;
+  approvals: ModelRiskAcceptance["approvals"]; status: "pending" | "accepted" | "revoked";
+  effective_status: "pending" | "accepted" | "revoked" | "overdue" | "policy_stale" | "evidence_stale" | "release_stale";
+  rationale: string; created_by: string; created_by_name: string; accepted_at: string | null; review_due_at: string | null;
+  revoked_by: string | null; revoked_by_name: string | null; revoked_at: string | null; revocation_reason: string | null;
+  row_version: number; created_at: string | null; idempotent?: boolean;
+};
+
+export type ModelRiskReacceptanceAuditPackage = {
+  schema_version: "model-risk-reacceptance-audit-package-v1";
+  tenant_id: string; generated_at: string; package_hash: string;
+  reacceptance: ModelRiskReacceptance;
+  prior_acceptance: ModelRiskAcceptance | null;
+  release: { id: string; template_key: string; model_version: string; config_hash: string; published_at: string | null } | null;
+  policy: ModelRiskPolicy | null;
+  model_change: { id: string; candidate_version: string; supervised_validation_binding_hash: string } | null;
+  monitoring_run: ModelMonitoringRun | null;
+  supervised_evaluation: { id: string; tenant_id: string; policy_id: string; status: string; evidence_level: string; evidence_hash: string; label_definition_id: string | null; label_definition_version: number | null; label_definition_hash: string | null; label_watermark: Record<string, unknown>; coverage: Record<string, unknown>; metrics: Record<string, unknown>; reviewed_at: string | null } | null;
+  audit_events: Array<{ id: string; event_type: string; actor: string; payload: Record<string, unknown>; previous_hash: string; event_hash: string; created_at: string | null }>;
+};
+
+export type ModelRiskReacceptanceRegulatoryReport = {
+  schema_version: "model-risk-reacceptance-regulatory-report-v1";
+  tenant_id: string; generated_at: string; reacceptance_id: string; report_hash: string;
+  model: { release_id: string | null; template_key: string | null; model_version: string | null; config_hash: string | null; published_at: string | null };
+  observation_window: { observed_from: string | null; observed_to: string | null; captured_at: string | null; evidence_reference: string | null };
+  governance: { risk_level: string; policy_id: string; policy_version: number; policy_config_hash: string; required_evidence: string[]; required_roles: string[]; signed_roles: string[]; four_eyes: { required: boolean; passed: boolean; distinct_signer_count: number }; approvals: ModelRiskAcceptance["approvals"] };
+  evidence: { level: string; source: string; coverage: Record<string, unknown>; metrics: Record<string, unknown>; tenant_supervised_evaluation_id: string | null; supervised_evidence_hash: string | null; label_definition_id: string | null; label_definition_version: number | null; downgrade: { status: string; reason: string } | null };
+  runtime_impact: { status: "accepted" | "at_risk" | "blocked" | "evidence_stale"; effective_status: string; review_due_at: string | null };
+  integrity: { package_hash: string; operational_evidence_hash: string; monitoring_evidence_hash: string | null; supervised_evidence_hash: string | null; audit_event_count: number; audit_chain_scope: string };
+  signing: { signature_algorithm: string; signing_key_id: string | null; signing_public_key: string | null; public_key_fingerprint: string | null; signature: string; signature_body: Record<string, unknown>; key_metadata: { status: string; trust_class: string; issuer: string | null; rotation_id: string | null; not_before: string | null; not_after: string | null; trust_directory_id: string | null; revocation_reference: string | null }; signature_valid: boolean; timestamp_mode: string };
+};
+
+export type ModelValidationAttachment = {
+  id: string; tenant_id: string; model_change_id: string; name: string; reference: string;
+  content_type: string; size_bytes: number; sha256: string; status: "active" | "revoked"; scan_status: "not_scanned" | "pending" | "passed" | "rejected";
+  scan_engine: string | null; scan_result_reason: string | null; scan_completed_by: string | null; scan_completed_by_name: string | null; scan_completed_at: string | null; row_version: number;
+  uploaded_by_name: string; uploaded_at: string | null; revoked_at: string | null;
+};
+
+export type ModelValidationReportIssuance = {
+  id: string; tenant_id: string; model_change_id: string; report_template_version: string;
+  report_hash: string; evidence_binding_hash: string; package_hash: string;
+  signature_algorithm: string; signing_key_id: string | null; public_key_fingerprint: string | null; signature: string; issued_by: string; issued_by_name: string;
+  issued_at: string; status: "active" | "revoked"; revoked_by: string | null;
+  revoked_by_name: string | null; revoked_at: string | null; revocation_reason: string | null;
+  supersedes_issuance_id: string | null; replacement_issuance_id: string | null; reissue_reason: string | null;
+  package_hash_valid: boolean; signature_valid: boolean; registry_valid: boolean; trust_eligible: boolean;
+  row_version: number; package?: Record<string, unknown>; idempotent?: boolean;
+};
+
+export type ModelReleaseApprovalDashboard = {
+  schema_version: "model-release-approval-dashboard-v1"; tenant_id: string;
+  counts: { total: number; blocked: number; pending_validation: number; pending_release: number; published: number; restart_eligible: number };
+  rows: Array<{
+    change_id: string; template_key: string; base_version: string; candidate_version: string;
+    change_status: string; created_by_name: string; created_at: string | null; supervised: boolean;
+    report_hash: string | null; risk_level: "low" | "medium" | "high" | null;
+    independent_validation_status: string; release_approval_status: string;
+    attachment_count: number; attachment_hashes: string[]; issuance: ModelValidationReportIssuance | null;
+    risk_policy: { source: "platform_default" | "tenant_policy"; version: string; config_hash: string };
+    risk_acceptance: ModelRiskAcceptance | null;
+    release: { id: string; model_version: string; is_active: boolean } | null;
+    restart_status: "draft_created" | "eligible" | "awaiting_release" | "awaiting_terminal_policy" | "not_applicable";
+    source_policy_id: string | null; in_service_risk?: { required?: boolean; effective_status: string; release_id?: string; reacceptance: ModelRiskReacceptance | null; pending_renewal?: ModelRiskReacceptance | null } | null; blockers: string[]; ready_for_submit: boolean; ready_for_release: boolean;
+  }>;
+};
+
 export type ModelChangeRecord = {
   id: string;
   template_key: string;
@@ -2028,6 +2696,15 @@ export type ModelChangeRecord = {
     candidate_config_hash?: string; analysis?: CreditCalibrationResult;
     bound_at?: string; bound_by?: string; bound_by_name?: string; binding_hash?: string;
     current_valid?: boolean; current_error?: string;
+  };
+  supervised_validation_evidence: {
+    schema_version?: string; tenant_id?: string; policy_id?: string; evaluation_id?: string;
+    evaluation_evidence_hash?: string; report_hash?: string; report_template_version?: string;
+    evidence_level?: "supervised" | "insufficient_maturity" | "insufficient_labels";
+    candidate_version?: string; model_change_id?: string; binding_hash?: string;
+    risk_classification?: { proposed_level?: "low" | "medium" | "high"; method?: string; manual_confirmation_required?: boolean };
+    independent_validation?: { status?: "pending" | "approved" | "rejected"; risk_level?: "low" | "medium" | "high"; opinion?: string; reviewed_by_name?: string; reviewed_at?: string; attachments?: Array<{ name: string; reference: string; sha256: string }> };
+    release_approval?: { status?: "pending" | "approved" | "blocked"; approved_by_name?: string; approved_at?: string; comment?: string };
   };
   change_reason: string;
   created_by: string;
@@ -2157,6 +2834,7 @@ export type ModelMonitoringRun = {
   effective_source: string;
   evidence_level: string;
   dataset_id: string;
+  evidence_hash: string;
   readiness: MonitoringSummary["readiness"];
   monitoring: ModelValidationReport["monitoring"] | Record<string, never>;
   issue_ids: string[];
@@ -2211,7 +2889,489 @@ export type ModelGovernanceNotification = {
   read_by: string | null;
 };
 
-export type ApiErrorShape = { detail?: string };
+export type ApiErrorShape = {
+  detail?: string | { code?: string; message?: string };
+  error?: { code: string; message: string; trace_id: string; details: Record<string, unknown> };
+};
+
+export type DecisionResolvedAssetRef = {
+  asset_type: "model" | "scorecard" | "pipeline" | "rule_set" | "rule";
+  key?: string;
+  code?: string;
+  version: string | number;
+  config_hash: string;
+  runtime_config_hash?: string;
+  source_scope: TenantAssetResolution["source_scope"] | "platform_execution_pin";
+  asset_id: string;
+  binding_id?: string;
+  override_id?: string;
+  resolution_hash: string;
+};
+
+export type TenantRolloutPolicy = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  status: "draft" | "pending_review" | "scheduled" | "active" | "paused" | "rolled_back" | "completed" | "rejected";
+  effective_status: string;
+  champion: { model_key: string; model_version: string; pipeline_code: string; pipeline_version: string | null };
+  challenger: { model_key: string; model_version: string; pipeline_code: string; pipeline_version: string | null };
+  comparison: { run_id: string; evidence_hash: string; assets_hash: string };
+  routing_key_field: "counterparty_id";
+  traffic_basis_points: number;
+  traffic_percent: number;
+  observation_window_minutes: number;
+  min_sample_size: number;
+  thresholds: { max_challenger_failure_rate: number; max_latency_increase_ratio: number; max_score_psi: number; max_admission_distribution_shift: number };
+  config_hash: string;
+  assets_hash: string;
+  starts_at: string;
+  ends_at: string;
+  change_reason: string;
+  created_by: string;
+  created_by_name: string;
+  reviewed_by_name: string | null;
+  review_comment: string | null;
+  terminal_reason: string | null;
+  incident_status: "not_applicable" | "open" | "acknowledged" | "resolution_pending" | "resolved";
+  incident_evaluation_id: string | null;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  acknowledgement_note: string | null;
+  resolution_requested_by: string | null;
+  resolution_requested_at: string | null;
+  resolution_note: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  row_version: number;
+  created_at: string | null;
+};
+
+export type TenantRoutingDecision = {
+  id: string; policy_id: string; channel: string; request_ref: string; routing_key_hash: string;
+  bucket: number; selected_arm: "champion" | "challenger"; selected_assets_hash: string;
+  status: "selected" | "completed" | "failed"; elapsed_ms: number | null; score: number | null;
+  rating: string | null; admission: string | null; error_code: string | null; evidence_hash: string | null;
+  created_at: string | null; completed_at: string | null;
+};
+
+export type TenantRolloutEvaluation = {
+  id: string; policy_id: string; trigger_type: "manual" | "automatic" | "scheduler"; sample_count: number;
+  evidence_level: "unlabeled_online"; metrics: {
+    champion: { sample_count: number; failure_rate: number | null; average_latency_ms: number | null };
+    challenger: { sample_count: number; failure_rate: number | null; average_latency_ms: number | null };
+    latency_increase_ratio: number | null; score_psi: number | null; admission_distribution_shift: number | null;
+    supervised_metrics_available: false; degraded_reason: string;
+  };
+  gate: { eligible: boolean; passed: boolean; summary: string; violations: Array<{ key: string; label: string; actual: number; threshold: number }> };
+  action: "continue" | "insufficient_evidence" | "automatic_rollback";
+  evidence_hash: string; created_at: string | null;
+};
+
+export type TenantOutcomeLabel = {
+  id: string; tenant_id: string; policy_id: string; routing_decision_id: string; decision_execution_id: string | null;
+  source: string; external_label_id: string; counterparty_id: string; label_definition: string;
+  label_definition_id: string | null; label_definition_version: number | null; label_definition_hash: string | null;
+  observed_event: boolean; observation_end: string; maturity_status: "mature" | "immature";
+  loss_amount: number | null; exposure_amount: number | null; evidence_reference: string;
+  link_status: "route_only" | "decision_execution"; selected_arm: "champion" | "challenger";
+  model_key: string; model_version: string; predicted_score: number; risk_score: number;
+  rating: string | null; admission: string | null; routing_evidence_hash: string;
+  execution_evidence_hash: string | null; selected_assets_hash: string; evidence_hash: string;
+  evidence_schema_version: "tenant-outcome-label-v3" | "tenant-outcome-label-v4" | null;
+  import_batch_id: string | null; record_status: "active" | "superseded";
+  supersedes_label_id: string | null; superseded_by_label_id: string | null;
+  correction_reason: string | null; corrected_by: string | null; corrected_at: string | null;
+  verification_status: "pending_verification" | "verified" | "rejected";
+  verified_by_name: string | null; verified_at: string | null; verification_note: string | null;
+  row_version: number; created_by_name: string; created_at: string | null; idempotent?: boolean;
+};
+
+export type TenantOutcomeImport = {
+  id: string; tenant_id: string; policy_id: string; import_key: string; source: string; label_definition: string;
+  label_definition_id: string | null; label_definition_version: number | null; label_definition_hash: string | null;
+  expected_count: number; received_count: number; created_count: number; idempotent_count: number;
+  rejected_count: number; corrected_count: number; payload_hash: string;
+  results: Array<{ index: number; external_label_id: string; status: "created" | "idempotent" | "rejected"; label_id: string | null; error_code: string | null; error: string | null }>;
+  status: "processing" | "completed" | "completed_with_exceptions" | "failed";
+  evidence_hash: string; created_by_name: string; completed_at: string | null; created_at: string;
+  idempotent?: boolean;
+};
+
+export type TenantMonitoringRun = {
+  id: string; tenant_id: string; policy_id: string; run_key: string;
+  model_key: string; model_version: string; observed_from: string; observed_to: string;
+  dataset_id: string; evidence_level: "supervised" | "non_supervised";
+  status: "completed" | "failed" | "cancelled"; label_definition_id: string | null;
+  governance_status: "draft" | "pending_review" | "published" | "rejected" | "retracted";
+  label_definition_version: number | null; label_definition_hash: string | null;
+  label_watermark: Record<string, unknown>; monitoring: Record<string, unknown>;
+  evidence_hash: string; submitted_by: string | null; submitted_by_name: string | null; submitted_at: string | null;
+  reviewed_by: string | null; reviewed_by_name: string | null; reviewed_at: string | null; review_comment: string | null;
+  retracted_by: string | null; retracted_by_name: string | null; retracted_at: string | null; retraction_reason: string | null;
+  row_version: number; created_by_name: string; created_at: string | null;
+  monitoring_gate?: {
+    schema_version: "tenant-monitoring-gate-v1";
+    status: "accepted" | "at_risk" | "blocked" | "evidence_stale";
+    reasons: string[]; gate_hash: string;
+    checks: Array<{ key: string; label: string; direction: "min" | "max"; value: number | null; threshold: number | null; testable: boolean; passed: boolean | null }>;
+  };
+  idempotent?: boolean;
+};
+
+export type TenantMonitoringDiffCase = {
+  id: string; tenant_id: string; policy_id: string;
+  base_run_id: string; against_run_id: string;
+  base_evidence_hash: string; against_evidence_hash: string; diff_hash: string;
+  comparison: Record<string, unknown>;
+  status: "open" | "assigned" | "recomputing" | "pending_disposition" | "resolved" | "rejected";
+  severity: "info" | "warning" | "critical"; reason: string;
+  assigned_role: string; assigned_to: string | null; assigned_to_name: string | null;
+  due_at: string; overdue: boolean;
+  recompute_status: "not_started" | "running" | "completed" | "failed";
+  recomputed_run_id: string | null; recomputed_diff_hash: string | null;
+  recomputed_by: string | null; recomputed_by_name: string | null; recomputed_at: string | null;
+  recompute_error: string | null;
+  disposition: "accepted_change" | "data_issue" | "calculation_issue" | "model_drift" | "policy_threshold_change_required" | "superseded" | null;
+  conclusion: string | null; resolved_by: string | null; resolved_by_name: string | null; resolved_at: string | null;
+  row_version: number; created_by: string; created_by_name: string; created_at: string; updated_at: string;
+  idempotent?: boolean;
+};
+
+export type MonitoringDiffSlaDashboard = {
+  schema_version: "monitoring-diff-sla-dashboard-v1";
+  tenant_id: string;
+  template_key: string | null;
+  as_of: string;
+  counts: {
+    open: number;
+    normal: number;
+    due_soon: number;
+    overdue: number;
+    escalated: number;
+    unassigned: number;
+    pending_disposition: number;
+    critical: number;
+  };
+  by_policy: Array<{
+    policy_id: string;
+    policy_name: string;
+    open_count: number;
+    due_soon_count: number;
+    overdue_count: number;
+    escalated_count: number;
+    unassigned_count: number;
+  }>;
+  by_model: Array<{
+    model_key: string | null;
+    model_version: string | null;
+    open_count: number;
+    due_soon_count: number;
+    overdue_count: number;
+    escalated_count: number;
+    unassigned_count: number;
+  }>;
+  items: Array<TenantMonitoringDiffCase & {
+    sla: {
+      status: "normal" | "due_soon" | "overdue" | "escalated" | "stopped";
+      remaining_hours: number;
+      overdue_hours: number;
+      due_soon_hours: number;
+      escalation_after_hours: number;
+    };
+    model_key: string | null;
+    model_version: string | null;
+    policy_name: string;
+    policy_status: string | null;
+  }>;
+};
+
+export type TenantSupervisedEvaluation = {
+  id: string; tenant_id: string; policy_id: string; evaluation_as_of: string;
+  config: { min_mature_samples: number; min_events: number; min_non_events: number; min_reliable_samples_per_arm: number; high_risk_threshold: number; bootstrap_resamples: number; label_definition_id: string | null };
+  coverage: {
+    submitted_count: number; superseded_count: number; verified_count: number; rejected_count: number; pending_verification_count: number;
+    mature_count: number; immature_count: number; event_count: number; non_event_count: number;
+    execution_linked_count: number; route_only_count: number;
+  };
+  metrics: {
+    champion: TenantSupervisedArmMetrics; challenger: TenantSupervisedArmMetrics;
+    comparison: {
+      auc_delta: number; ks_delta: number; event_rate_delta: number; loss_rate_delta: number | null;
+      auc_difference_confidence_interval: TenantConfidenceInterval | null;
+      ks_difference_confidence_interval: TenantConfidenceInterval | null;
+      auc_difference_signal: "significant_challenger_better" | "significant_champion_better" | "directional_only" | "not_evaluable";
+      ks_difference_signal: "significant_challenger_better" | "significant_champion_better" | "directional_only" | "not_evaluable";
+      confidence_interval_overlap: { auc: boolean | null; ks: boolean | null };
+      stability_summary: { arms: Record<"champion" | "challenger", TenantStabilityTrend | null>; direction_alignment: "aligned" | "divergent" };
+      promotion_readiness: "ready" | "directional_only"; reliability_reasons: string[]; conclusion: string;
+    } | null;
+    supervised_metrics_available: boolean; degraded_reason: string | null; note: string;
+  };
+  evidence_level: "supervised" | "insufficient_maturity" | "insufficient_labels";
+  label_definition_id: string | null; label_definition_version: number | null; label_definition_hash: string | null;
+  tenant_monitoring_run_id: string | null; tenant_monitoring_evidence_hash: string | null;
+  label_watermark: { label_count: number; label_ids: string[]; label_evidence_hashes: string[]; routing_evidence_hashes: string[]; policy_config_hash: string; policy_assets_hash: string };
+  evidence_hash: string; status: "draft" | "pending_review" | "approved" | "rejected";
+  governance_decision: "retain_champion" | "promote_candidate" | "reject_candidate" | "continue_observation" | null;
+  submitted_by_name: string | null; submitted_at: string | null; reviewed_by_name: string | null;
+  reviewed_at: string | null; review_comment: string | null; row_version: number;
+  created_by_name: string; created_at: string;
+  upgrade_decision: { id: string; status: "ready" | "draft_created"; model_change_id: string | null; candidate_version: string; evidence_hash: string; auto_submitted: false; auto_published: false; traffic_changed: false } | null;
+};
+
+export type TenantSupervisedVerificationReport = {
+  schema_version: "tenant-supervised-verification-report-v1";
+  report_type: "supervised_model_validation";
+  generated_at: string;
+  tenant_id: string;
+  policy: { id: string; name: string; status: string; champion_model_key: string; champion_model_version: string; challenger_model_key: string; challenger_model_version: string; config_hash: string; assets_hash: string };
+  evaluation: TenantSupervisedEvaluation;
+  coverage: TenantSupervisedEvaluation["coverage"];
+  metrics: TenantSupervisedEvaluation["metrics"];
+  caveats: string[];
+  governance_boundary: { model_change_created: boolean; auto_submitted: false; auto_published: false; traffic_changed: false };
+  report_hash: string;
+};
+
+export type TenantSupervisedArmMetrics = {
+  sample_count: number; event_count: number; non_event_count: number; event_rate: number | null;
+  event_rate_confidence_interval: { lower: number; upper: number; confidence: number; method: string } | null;
+  auc: number | null; ks: number | null; auc_confidence_interval: TenantConfidenceInterval | null; ks_confidence_interval: TenantConfidenceInterval | null;
+  bootstrap_resamples: number; bootstrap_method: string | null; average_score: number | null; metrics_ready: boolean;
+  observed_loss_count: number; total_loss_amount: number; total_exposure_amount: number; loss_rate: number | null;
+  loss_rate_confidence_interval: { lower: number; upper: number; confidence: number; method: string } | null;
+  average_loss_amount: number | null; statistical_reliability: "statistically_reliable" | "directional"; reliability_reasons: string[];
+  confusion_matrix: { true_positive: number; false_positive: number; true_negative: number; false_negative: number; threshold: number };
+  segments: Array<{ dimension: "rating" | "admission"; value: string; sample_count: number; event_count: number; event_rate: number; average_score: number }>;
+  segment_stability: {
+    dimensions: Record<"rating" | "admission", { group_count: number; min_group_sample_count: number; max_event_rate_gap: number | null; max_average_score_gap: number | null; reliability: "statistically_reliable" | "directional" }>;
+    fairness_audit: "not_evaluable"; fairness_reason: string;
+  };
+  stability_trend: TenantStabilityTrend;
+};
+
+export type TenantConfidenceInterval = { lower: number; upper: number; confidence: number; method: string; resamples?: number; valid_resamples?: number; seed?: string };
+
+export type TenantStabilityTrend = {
+  granularity: "month"; periods: Array<{ period: string; sample_count: number; event_count: number; event_rate: number; auc: number | null; ks: number | null; metrics_ready: boolean }>;
+  period_count: number; event_rate_delta: number | null; direction: "increasing" | "decreasing" | "stable" | "insufficient_periods";
+};
+
+export type TenantOutcomeLabelDefinition = {
+  id: string; tenant_id: string; code: string; version: number; name: string; description: string;
+  event_type: "default" | "delinquency" | "loss" | "recovery"; event_threshold: Record<string, unknown>;
+  observation_window_days: number; maturity_grace_days: number;
+  source_priorities: Array<{ source: string; priority: number }>;
+  applicable_model_keys: string[]; require_loss_amount: boolean; require_exposure_amount: boolean;
+  status: "draft" | "pending_review" | "published" | "rejected" | "retired"; is_active: boolean;
+  config_hash: string; submitted_by_name: string | null; submitted_at: string | null;
+  reviewed_by_name: string | null; reviewed_at: string | null; review_comment: string | null;
+  row_version: number; created_by: string; created_by_name: string; created_at: string; updated_at: string;
+};
+
+export type TenantSupervisedUpgradeDecision = {
+  id: string; tenant_id: string; policy_id: string; evaluation_id: string;
+  decision: "promote_candidate"; status: "draft_created"; evidence_hash: string;
+  model_change_id: string; candidate_version: string; model_change: ModelChangeRecord;
+  auto_submitted: false; auto_published: false; traffic_changed: false; idempotent: boolean;
+  created_by: string; created_by_name: string; created_at: string;
+};
+
+export type TenantRolloutScan = {
+  id: string; run_key: string; tenant_id: string; trigger_type: "manual" | "scheduler";
+  status: "no_due" | "completed" | "partial" | "failed"; scan_at: string;
+  results: Array<{ tenant_id: string; policy_id: string; action: "activate" | "evaluate" | "close"; status: "completed" | "failed"; policy_status?: string; error_type?: string }>;
+  evidence_hash: string; created_at: string;
+};
+
+export type DecisionExecution = {
+  tenant_id: string;
+  client_id: string;
+  request_id: string;
+  trace_id: string;
+  status: "completed";
+  idempotent: boolean;
+  counterparty_id: string;
+  decision: RatingResult & { counterparty_name?: string; final_admission?: "approve" | "manual_review" | "reject" };
+  assets: {
+    model: DecisionResolvedAssetRef & { key: string };
+    scorecard?: DecisionResolvedAssetRef | null;
+    pipeline: DecisionResolvedAssetRef & { code: string };
+    rule_sets: Array<DecisionResolvedAssetRef & { code: string }>;
+    rules: Array<DecisionResolvedAssetRef & { code: string }>;
+    resolution_hash: string;
+    degraded_reason?: string | null;
+  };
+  trace: {
+    trace_id: string;
+    status: string;
+    started_at: string;
+    completed_at: string;
+    elapsed_ms: number;
+    request: { tenant_id: string; client_id: string; request_id: string; source_system: string; scenario: string };
+    input: { source: "platform_counterparty" | "inline_input"; counterparty_id: string; input_hash: string };
+    assets: DecisionExecution["assets"];
+    pipeline: { pipeline_code: string; pipeline_version: number; stages: Array<{ index: number; stage_type: string; rule_set_code?: string | null; output: Record<string, unknown> }> };
+    output: { result_hash: string; rating?: string; access_strategy?: string; final_admission?: string };
+  };
+  evidence: {
+    request_hash: string;
+    input_hash: string;
+    assets_hash: string;
+    result_hash: string;
+    trace_hash: string;
+    evidence_hash: string;
+  };
+  elapsed_ms: number;
+  created_by: string;
+  created_by_name: string;
+  created_at: string | null;
+};
+
+export type DecisionRequestPayload = {
+  request_id: string;
+  counterparty_id: string | null;
+  input: Record<string, unknown> | null;
+  assets: {
+    model_key: string;
+    model_version: string | null;
+    pipeline_code: string | null;
+    pipeline_version: number | string | null;
+    rule_set_versions: Record<string, number | string>;
+    rule_versions: Record<string, number | string>;
+  };
+  metadata: { source_system: string; scenario: string };
+};
+
+export type DecisionContract = {
+  contract_version: string;
+  tenant_id: string;
+  endpoint: string;
+  idempotency: string;
+  version_policy: string;
+  input_modes: string[];
+  error_codes: string[];
+  models: Array<{
+    key: string;
+    name: string;
+    active_version: string | null;
+    source_scope: TenantAssetResolution["source_scope"];
+    resolution_hash: string;
+    versions: Array<DecisionResolvedAssetRef & { version: string; name: string; runtime_config_hash: string; pipeline_code: string | null; scorecard?: DecisionResolvedAssetRef | null }>;
+  }>;
+  pipelines: Array<{
+    code: string;
+    name: string;
+    version: number | string;
+    is_active: boolean;
+    config_hash: string;
+    source_scope: TenantAssetResolution["source_scope"];
+    asset_id: string;
+    binding_id?: string;
+    override_id?: string;
+    resolution_hash: string;
+    stages: Array<{ stage_type: string; rule_set_code?: string }>;
+    rule_set_codes: string[];
+  }>;
+  unavailable_assets: Array<{ asset_type: string; asset_code: string; code: string; message: string }>;
+};
+
+export type DecisionSandboxPackage = {
+  environment: "sandbox";
+  production_credentials_exposed: false;
+  notice: string;
+  samples: Array<{
+    counterparty_id: string;
+    name: string;
+    counterparty_type: "supplier" | "customer";
+    current_rating?: string;
+    input: Counterparty;
+  }>;
+  request_example: DecisionRequestPayload;
+};
+
+export type DecisionJob = {
+  id: string;
+  job_key: string;
+  tenant_id: string;
+  client_id: string;
+  status: "queued" | "running" | "completed" | "completed_with_errors" | "failed";
+  total_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  results: Array<{ index: number; request_id: string; counterparty_id: string; rating?: string; final_admission?: string; total_score?: number; trace_id: string; evidence_hash: string; idempotent: boolean }>;
+  failures: Array<{ index: number; request_id: string; code: string; message: string; details: Record<string, unknown> }>;
+  callback: { mode: "none" | "sandbox"; endpoint_url?: string; secret_reference?: string; max_attempts?: number; simulation_plan_hash?: string };
+  evidence: { request_hash: string; result_hash: string | null; evidence_hash: string | null };
+  idempotent: boolean;
+  started_at: string | null;
+  completed_at: string | null;
+  created_by_name: string;
+  row_version: number;
+  created_at: string | null;
+};
+
+export type DecisionWebhook = {
+  id: string;
+  job_id: string;
+  event_type: string;
+  endpoint_url: string;
+  secret_reference: string;
+  payload: Record<string, unknown>;
+  payload_hash: string;
+  signature_timestamp: string;
+  signature: string;
+  signature_headers: Record<string, string>;
+  attempt_count: number;
+  max_attempts: number;
+  status: "pending" | "retry_scheduled" | "delivered" | "dead_letter";
+  last_status_code: number | null;
+  last_error: string | null;
+  next_attempt_at: string | null;
+  history: Array<{ attempt: number; attempted_at: string; status_code: number; outcome: string; manual: boolean }>;
+  manual_redelivery_count: number;
+  delivered_at: string | null;
+};
+
+export type DecisionClientProfile = {
+  tenant_id: string;
+  tenant_name: string;
+  deployment_mode: "saas" | "dedicated";
+  client_id: string;
+  client_name: string;
+  key_id: string;
+  key_fingerprint: string;
+  status: "active" | "disabled";
+  qps_limit: number;
+  concurrent_job_limit: number;
+  daily_item_quota: number;
+  allowed_cidrs: string[];
+  environment: "sandbox";
+  production_secret_exposed: false;
+  authentication: string;
+  signature_algorithm: string;
+  signature_input: string;
+  signature_headers: string[];
+  rotated_at: string | null;
+  expires_at: string | null;
+  last_used_at: string | null;
+};
+
+export type DecisionFieldMappingPayload = {
+  source: Record<string, unknown>;
+  mappings: Array<{ source_field: string; target_path: string; enum_mapping?: Record<string, string>; multiplier?: number; default_value?: unknown; required?: boolean }>;
+};
+
+export type DecisionFieldMappingResult = {
+  status: "ready" | "blocked";
+  normalized_input: Record<string, unknown>;
+  coverage: { required_count: number; mapped_required_count: number; coverage_rate: number };
+  missing_required: string[];
+  transformations: Array<{ source_field: string; target_path: string; operations: string[]; output_value: unknown }>;
+  errors: Array<{ source_field: string | null; target_path: string; code: string; message: string }>;
+  preview_hash: string;
+};
 
 export type TaskAction = {
   page?: "documents" | "approvals" | "facilities" | "indicators";
@@ -2589,7 +3749,7 @@ export type FacilityControlCondition = {
   status: "pending" | "completed";
   due_at: string | null;
   escalation_level: number;
-  escalation_role: "risk_manager" | "approver" | "admin" | null;
+  escalation_role: "risk_manager" | "approver" | "operations" | null;
   escalated_at: string | null;
   linked_alert_id: string | null;
   extension_requests: FacilityControlExtension[];
@@ -2743,4 +3903,259 @@ export type FacilitySummary = {
   pending_control_conditions: number;
   overdue_control_conditions: number;
   critical_control_conditions: number;
+};
+
+export type TenantAssetType = "indicator" | "scorecard" | "model" | "rule" | "rule_set" | "pipeline";
+
+export type TenantAssetBinding = {
+  id: string;
+  tenant_id: string;
+  asset_type: TenantAssetType;
+  asset_code: string;
+  binding_mode: "inherit_active" | "pinned";
+  pinned_version: string | null;
+  allow_tenant_override: boolean;
+  status: "active" | "suspended";
+  resolved_scope: string | null;
+  resolved_asset_id: string | null;
+  resolved_version: string | null;
+  resolved_config_hash: string | null;
+  change_reason: string;
+  created_by: string;
+  created_by_name: string;
+  updated_by: string;
+  updated_by_name: string;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type TenantAssetOverride = {
+  id: string;
+  tenant_id: string;
+  asset_type: TenantAssetType;
+  asset_code: string;
+  version: number;
+  base_asset_id: string;
+  base_version: string;
+  base_config_hash: string;
+  config: Record<string, unknown>;
+  config_hash: string;
+  status: "draft" | "pending_review" | "published" | "rejected" | "retired";
+  is_active: boolean;
+  change_reason: string;
+  created_by: string;
+  created_by_name: string;
+  submitted_at: string | null;
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  review_comment: string | null;
+  published_at: string | null;
+  row_version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+export type TenantAssetResolution = {
+  tenant_id: string;
+  asset_type: TenantAssetType;
+  asset_code: string;
+  asset_name: string;
+  source_scope: "tenant_override" | "platform_pinned" | "platform_inherited" | "implicit_platform_default";
+  asset_id: string;
+  version: string;
+  config_hash: string;
+  config: Record<string, unknown>;
+  binding_id: string | null;
+  override_id: string | null;
+  resolution_hash: string;
+};
+
+export type TenantAssetCatalogItem = {
+  asset_type: TenantAssetType;
+  asset_code: string;
+  asset_name: string;
+  available_versions: string[];
+  active_platform_version: string | null;
+  binding: TenantAssetBinding | null;
+  overrides: TenantAssetOverride[];
+  resolution: TenantAssetResolution | null;
+  resolution_error: { code: string; message: string } | null;
+};
+
+export type TenantAssetCatalog = {
+  tenant_id: string;
+  entitlement?: { mode: "governed" | "blocked" | "implicit_compatibility"; entitlement_id: string | null; package_code: string | null; package_version: number | null };
+  summary: {
+    asset_count: number;
+    explicit_binding_count: number;
+    pinned_count: number;
+    suspended_count: number;
+    active_override_count: number;
+    pending_review_count: number;
+    implicit_default_count: number;
+  };
+  items: TenantAssetCatalogItem[];
+};
+
+export type TenantSummary = {
+  id: string; name: string; deployment_mode: "saas" | "dedicated"; status: "active" | "suspended" | "disabled";
+  data_region: string; membership_count: number; api_client_count: number; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type ProductPackageAsset = {
+  asset_type: TenantAssetType; asset_code: string; asset_name?: string;
+  binding_mode: "inherit_active" | "pinned"; pinned_version: string | null; allow_tenant_override: boolean;
+};
+
+export type ProductPackageQuotas = {
+  qps_limit: number; concurrent_job_limit: number; daily_item_quota: number; max_asset_bindings: number;
+};
+
+export type ProductPackage = {
+  id: string; code: string; version: number; name: string; description: string;
+  status: "draft" | "pending_review" | "published" | "rejected" | "retired"; is_active: boolean;
+  environment_scopes: Array<"sandbox" | "production">; assets: ProductPackageAsset[];
+  quotas: ProductPackageQuotas; expiry_policy: "block"; config_hash: string;
+  change_reason: string; created_by: string; created_by_name: string; submitted_at: string | null;
+  reviewed_by: string | null; reviewed_by_name: string | null; reviewed_at: string | null;
+  review_comment: string | null; published_at: string | null; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type TenantEntitlement = {
+  id: string; tenant_id: string; product_package_id: string; package_code: string; package_version: number;
+  package_config_hash: string; package_snapshot: Record<string, unknown>; effective_quotas: ProductPackageQuotas;
+  initialized_assets: TenantAssetBinding[]; activation_hash: string | null;
+  status: "draft" | "pending_review" | "scheduled" | "active" | "suspended" | "expired" | "terminated";
+  effective_status: string; starts_at: string; expires_at: string; change_reason: string;
+  created_by: string; created_by_name: string; submitted_at: string | null; reviewed_by: string | null;
+  reviewed_by_name: string | null; reviewed_at: string | null; review_comment: string | null;
+  activated_at: string | null; suspended_at: string | null; expired_at: string | null; terminated_at: string | null;
+  row_version: number; created_at: string | null; updated_at: string | null;
+};
+
+export type EntitlementPreview = {
+  tenant_id: string; package_code: string; package_version: number; package_config_hash: string;
+  effective_quotas: ProductPackageQuotas; assets_to_create: ProductPackageAsset[];
+  assets_to_update: ProductPackageAsset[]; assets_to_suspend: ProductPackageAsset[];
+  clients_to_update: number; warnings: string[]; preview_hash: string;
+};
+
+export type EntitlementLifecycleResult = {
+  entitlement_id: string; tenant_id: string; package_code: string; package_version: number;
+  action: "activate" | "expire" | "supersede"; status: "completed" | "failed"; error: string | null;
+};
+
+export type EntitlementLifecycleRun = {
+  id: string; run_key: string; trigger_type: "scheduler" | "manual" | "retry";
+  status: "no_due" | "completed" | "partial" | "failed"; scan_at: string;
+  activated_count: number; expired_count: number; superseded_count: number; failed_count: number;
+  results: EntitlementLifecycleResult[]; evidence_hash: string; error_summary: string | null;
+  incident_status: "not_applicable" | "open" | "acknowledged" | "resolved";
+  acknowledged_by: string | null; acknowledged_by_name: string | null; acknowledged_at: string | null;
+  acknowledgement_note: string | null; resolved_by: string | null; resolved_by_name: string | null;
+  resolved_at: string | null; resolution_note: string | null; retry_of_run_id: string | null;
+  resolved_by_run_id: string | null; actor_subject: string; actor_name: string;
+  started_at: string; completed_at: string | null; row_version: number; created_at: string | null;
+};
+
+export type EntitlementLifecycleStatus = {
+  health: "healthy" | "incident" | "stale" | "not_started"; observed_at: string;
+  scan_interval_minutes: number; next_scan_at: string; due_activations: number;
+  due_expirations: number; open_incidents: number; latest_scheduler_run: EntitlementLifecycleRun | null;
+};
+
+export type TenantUsageDailyRecord = {
+  id: string; tenant_id: string; usage_date: string; usage: Record<string, number | null>;
+  source_watermark: Record<string, unknown>; evidence_hash: string; computed_at: string | null;
+};
+
+export type TenantUsageStatement = {
+  id: string; tenant_id: string; billing_month: string; statement_version: number; status: "generated";
+  statement: Record<string, unknown>; statement_hash: string; generated_by: string; generated_by_name: string; created_at: string | null;
+};
+
+export type TenantUsageSummary = {
+  tenant_id: string; billing_month: string; daily_records: TenantUsageDailyRecord[];
+  totals: Record<string, number>; quota_snapshot: Record<string, string | number | null>;
+  metering_scope: { source: string; billable_dimensions: string[]; enforcement_scope: string; asset_scope: string };
+  statements: TenantUsageStatement[];
+};
+
+export type TenantNotificationChannel = {
+  id: string; tenant_id: string; name: string; channel_type: "webhook";
+  delivery_mode: "sandbox" | "live"; endpoint_url: string; secret_reference: string;
+  subscribed_categories: string[]; recipient_roles: string[];
+  minimum_severity: "info" | "warning" | "critical"; max_attempts: number;
+  timeout_seconds: number; require_receipt: boolean; sandbox_status_sequence: number[];
+  status: "active" | "disabled"; created_by: string; created_by_name: string;
+  preflight_status: "not_required" | "required" | "passed" | "failed";
+  last_test_delivery_id: string | null; last_tested_at: string | null;
+  row_version: number; created_at: string | null; updated_at: string | null;
+};
+
+export type TenantNotificationChannelPayload = Omit<TenantNotificationChannel,
+  "id" | "tenant_id" | "channel_type" | "created_by" | "created_by_name" | "row_version" | "preflight_status" | "last_test_delivery_id" | "last_tested_at" | "created_at" | "updated_at"
+>;
+
+export type TenantNotificationDeliveryStatus = "pending" | "retry_scheduled" | "delivered" | "dead_letter" | "cancelled";
+
+export type TenantNotificationDelivery = {
+  id: string; tenant_id: string; channel_id: string; notification_id: string;
+  idempotency_key: string; event_type: string; endpoint_url: string;
+  delivery_mode: "sandbox" | "live"; secret_reference: string;
+  payload: { notification?: { title?: string; category?: string; severity?: string; recipient_role?: string }; [key: string]: unknown };
+  payload_hash: string; channel_config_hash: string; signature_timestamp: string; signature: string;
+  signature_headers: Record<string, string>; attempt_count: number; max_attempts: number;
+  status: TenantNotificationDeliveryStatus; last_status_code: number | null; last_error: string | null;
+  next_attempt_at: string | null;
+  history: Array<{ attempt: number; attempted_at: string; status_code: number | null; outcome: string; manual: boolean; receipt_verified: boolean; error: string | null }>;
+  receipt: { verified?: boolean; event_id?: string | null; acknowledged_at?: string | null; mode?: string; response_hash?: string };
+  manual_redelivery_count: number; delivered_at: string | null; row_version: number;
+  created_at: string | null; updated_at: string | null;
+};
+
+export type TenantNotificationDeliveryLedger = {
+  counts: Record<TenantNotificationDeliveryStatus, number>;
+  items: TenantNotificationDelivery[];
+};
+
+export type TenantNotificationDispatchResult = {
+  scanned_at: string; channels: number; notifications_scanned: number;
+  deliveries_created: number; attempted: number; delivered: number;
+  retry_scheduled: number; dead_letter: number;
+};
+
+export type TenantNotificationChannelTestResult = {
+  channel_id: string; passed: boolean; channel_config_hash: string;
+  delivery: TenantNotificationDelivery;
+};
+
+export type NotificationDeliveryOperations = {
+  schema_version: "notification-delivery-operations-v1"; tenant_id: string;
+  observed_at: string; window_hours: number;
+  health: "healthy" | "degraded" | "incident" | "not_configured";
+  sla: { dead_letter_minutes: number };
+  channels: {
+    total: number; active: number;
+    items: Array<{
+      channel_id: string; name: string; status: "active" | "disabled"; delivery_mode: "sandbox" | "live";
+      preflight_status: TenantNotificationChannel["preflight_status"]; attempted: number; delivered: number;
+      dead_letter: number; retry_scheduled: number; delivery_rate: number | null;
+      latest_success_at: string | null; latest_error: string | null;
+    }>;
+  };
+  deliveries: {
+    created: number; attempted: number; delivered: number; pending: number; retry_scheduled: number;
+    retry_due: number; dead_letter: number; dead_letter_sla_breaches: number; cancelled: number;
+    delivery_rate: number | null; p95_end_to_end_latency_ms: number | null; oldest_open_seconds: number;
+  };
+  last_dispatch_at: string | null;
+  recent_failures: Array<{
+    delivery_id: string; channel_id: string; status: TenantNotificationDeliveryStatus;
+    status_code: number | null; error: string; attempt_count: number; occurred_at: string;
+  }>;
 };

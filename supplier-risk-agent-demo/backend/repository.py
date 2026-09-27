@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
-from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CreditAuthorityPolicyRecord, CreditCalibrationPlan, CreditCalibrationRun, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionPipelineDefinition, DecisionVarianceRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelSnapshotRecord, NotificationRecord, PortfolioRatingBatchRecord, RatingRunRecord, RiskEventRecord, RuleCenterReleasePackage, RuleCenterReleasePackageMember, RuleCenterReplayComparisonException, RuleCenterReplayComparisonRun, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot, RuleCenterReplayRun, RuleDefinition, RuleSetDefinition, ScorecardDevelopmentRun, ScorecardValidationPolicy, SlaScanLeaseRecord
+from backend.db_models import ApprovalCaseRecord, AuditEventRecord, AuthorityPolicyActivationRunRecord, AuthorityPolicyEvidenceAnchorRecord, CounterpartyImportBatchRecord, CounterpartyImportMappingTemplateRecord, CreditAuthorityPolicyRecord, CreditCalibrationPlan, CreditCalibrationRun, CreditFacilityRecord, CreditReportRecord, CreditUsageRecord, DecisionExecutionRecord, DecisionJobRecord, DecisionPipelineDefinition, DecisionVarianceRecord, DecisionWebhookDeliveryRecord, DocumentCorrectionRecord, DocumentRecord, EnterpriseDataFieldRecord, EnterpriseDataImportRecord, EnterpriseDataResolutionRecord, EnterpriseIndicatorObservationRecord, FacilityAlertRecord, FacilityControlConditionRecord, FacilityControlExtensionRecord, IndicatorDefinition, ModelChangeRecord, ModelGovernanceNotificationRecord, ModelMonitoringIssueRecord, ModelMonitoringRunRecord, ModelMonitoringScheduleRecord, ModelOutcomeImportRecord, ModelOutcomeRecord, ModelReleaseRecord, ModelRiskAcceptanceRecord, ModelRiskReacceptanceRecord, ModelSnapshotRecord, ModelValidationReportIssuanceRecord, NotificationRecord, PortfolioRatingBatchRecord, ProductPackageRecord, RatingRunRecord, RiskEventRecord, RuleCenterReleasePackage, RuleCenterReleasePackageMember, RuleCenterReplayComparisonException, RuleCenterReplayComparisonRun, RuleCenterReplayDataset, RuleCenterReplayDatasetSnapshot, RuleCenterReplayRun, RuleDefinition, RuleSetDefinition, ScorecardDevelopmentRun, ScorecardValidationPolicy, SlaScanLeaseRecord, TenantAssetBindingRecord, TenantAssetOverrideRecord, TenantEntitlementLifecycleRunRecord, TenantEntitlementRecord, TenantModelRiskPolicyRecord, TenantMonitoringDiffCaseRecord, TenantMonitoringRunRecord, TenantNotificationChannelRecord, TenantNotificationDeliveryRecord, TenantOutcomeImportBatchRecord, TenantOutcomeLabelDefinitionRecord, TenantOutcomeLabelRecord, TenantRolloutEvaluationRecord, TenantRolloutPolicyRecord, TenantRolloutScanRecord, TenantRoutingDecisionRecord, TenantSupervisedEvaluationRecord, TenantSupervisedUpgradeDecisionRecord, TenantUsageDailyRecord, TenantUsageStatementRecord
 from backend.document_correction_sla import MAX_CORRECTION_EXTENSION_COUNT, MAX_TOTAL_CORRECTION_EXTENSION_HOURS, MIN_MANUAL_REMINDER_INTERVAL_SECONDS, as_utc as correction_as_utc, correction_sla_snapshot, correction_sla_window
 from backend.enterprise_data_governance import SOURCE_PRIORITIES, build_quality_summary, choose_effective_field, flatten_payload, freshness_days, freshness_status, source_priority, unflatten_fields, value_type
 from backend.security import APPROVAL_STAGE_ROLES
@@ -24,6 +24,112 @@ from rating.template_resolver import resolve_template
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+PLATFORM_INTERNAL_TENANT_ID = "tenant-platform-internal"
+
+
+PLATFORM_AUDIT_AGGREGATE_TYPES = frozenset({
+    "api_client",
+    "authority_policy",
+    "authority_policy_activation_run",
+    "authority_policy_evidence_anchor",
+    "credit_calibration_plan",
+    "indicator_definition",
+    "model_change",
+    "model_governance_notification",
+    "model_monitoring_issue",
+    "model_monitoring_run",
+    "model_monitoring_schedule",
+    "model_outcome",
+    "model_outcome_import",
+    "model_release",
+    "pipeline_definition",
+    "product_package",
+    "rule_center_change",
+    "rule_center_release_package",
+    "rule_definition",
+    "rule_set_definition",
+    "scorecard_change",
+    "scorecard_development_run",
+    "scorecard_monitoring_bulk_assignment",
+    "scorecard_monitoring_saved_view",
+    "scorecard_monitoring_scheduler_run",
+    "scorecard_monitoring_sla_policy",
+    "scorecard_validation_monitoring_event",
+    "scorecard_validation_monitoring_plan",
+    "scorecard_validation_policy",
+    "sla_scan_execution",
+    "sla_scan_failure",
+    "sla_scan_skip",
+    "tenant",
+    "tenant_entitlement_lifecycle_run",
+    "tenant_membership",
+})
+PLATFORM_AUDIT_AGGREGATE_PREFIXES = (
+    "authority_policy",
+    "model_",
+    "rule_center_",
+    "scorecard_",
+)
+
+
+TENANT_AUDIT_AGGREGATE_MODELS = {
+    "approval_case": (ApprovalCaseRecord, "case_id"),
+    "credit_facility": (CreditFacilityRecord, "id"),
+    "credit_report": (CreditReportRecord, "id"),
+    "decision_job": (DecisionJobRecord, "id"),
+    "document": (DocumentRecord, "id"),
+    "document_correction": (DocumentCorrectionRecord, "id"),
+    "enterprise_data_import": (EnterpriseDataImportRecord, "id"),
+    "enterprise_data_resolution": (EnterpriseDataResolutionRecord, "id"),
+    "enterprise_indicator_observation": (EnterpriseIndicatorObservationRecord, "id"),
+    "facility_control_condition": (FacilityControlConditionRecord, "id"),
+    "notification": (NotificationRecord, "id"),
+    "portfolio_rating_batch": (PortfolioRatingBatchRecord, "id"),
+    "rating_run": (RatingRunRecord, "id"),
+    "model_risk_acceptance": (ModelRiskAcceptanceRecord, "id"),
+    "model_risk_reacceptance": (ModelRiskReacceptanceRecord, "id"),
+    "rule_center_replay": (RuleCenterReplayRun, "id"),
+    "rule_center_replay_comparison": (RuleCenterReplayComparisonRun, "id"),
+    "rule_center_replay_comparison_exception": (RuleCenterReplayComparisonException, "id"),
+    "rule_center_replay_dataset": (RuleCenterReplayDataset, "id"),
+    "tenant_asset_binding": (TenantAssetBindingRecord, "id"),
+    "tenant_asset_override": (TenantAssetOverrideRecord, "id"),
+    "tenant_entitlement": (TenantEntitlementRecord, "id"),
+    "tenant_model_risk_policy": (TenantModelRiskPolicyRecord, "id"),
+    "tenant_outcome_label": (TenantOutcomeLabelRecord, "id"),
+    "tenant_outcome_label_definition": (TenantOutcomeLabelDefinitionRecord, "id"),
+    "tenant_outcome_import": (TenantOutcomeImportBatchRecord, "id"),
+    "tenant_rollout_policy": (TenantRolloutPolicyRecord, "id"),
+    "tenant_rollout_evaluation": (TenantRolloutEvaluationRecord, "id"),
+    "tenant_routing_decision": (TenantRoutingDecisionRecord, "id"),
+    "tenant_supervised_evaluation": (TenantSupervisedEvaluationRecord, "id"),
+    "tenant_monitoring_diff_case": (TenantMonitoringDiffCaseRecord, "id"),
+    "tenant_monitoring_run": (TenantMonitoringRunRecord, "id"),
+    "tenant_notification_channel": (TenantNotificationChannelRecord, "id"),
+    "tenant_notification_delivery": (TenantNotificationDeliveryRecord, "id"),
+    "tenant_supervised_upgrade_decision": (TenantSupervisedUpgradeDecisionRecord, "id"),
+}
+
+
+COMPOSITE_TENANT_AUDIT_AGGREGATE_TYPES = frozenset({
+    "counterparty",
+    "counterparty_import",
+    "counterparty_import_mapping",
+    "decision_execution",
+    "model_risk_review_scan",
+    "monitoring_diff_case_sla_scan",
+    "tenant_model_risk_reacceptance_review_scan",
+})
+
+
+DYNAMIC_TENANT_AUDIT_AGGREGATE_TYPES = frozenset({"post_credit_scan", "sla_scan", "model_validation_attachment", "model_validation_report_issuance"})
+PAYLOAD_TENANT_AUDIT_AGGREGATE_TYPES = frozenset({
+    "model_risk_review_assignment",
+    "model_risk_review_assignment_batch",
+    "model_risk_review_delegation",
+    "model_risk_review_operations",
+    "notification_delivery_dispatch",
+})
 
 
 class ConcurrentUpdateError(RuntimeError):
@@ -34,9 +140,38 @@ class TaskOwnershipConflict(RuntimeError):
     pass
 
 
+class AuditTenantResolutionError(RuntimeError):
+    pass
+
+
 def content_hash(value) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def audit_event_hash(
+    *,
+    event_id: str,
+    tenant_id: str,
+    scope_type: str,
+    aggregate_type: str,
+    aggregate_id: str,
+    event_type: str,
+    actor: str,
+    payload: dict,
+    previous_hash: str,
+) -> str:
+    return content_hash({
+        "id": event_id,
+        "tenant_id": tenant_id,
+        "scope_type": scope_type,
+        "aggregate_type": aggregate_type,
+        "aggregate_id": aggregate_id,
+        "event_type": event_type,
+        "actor": actor,
+        "payload": payload,
+        "previous_hash": previous_hash,
+    })
 
 
 def _materialize_model_runtime_defaults(config: dict) -> dict:
@@ -100,9 +235,12 @@ class EnterpriseDataRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def create_import(self, payload: dict, actor: str) -> tuple[dict, bool]:
+    def create_import(self, tenant_id: str, payload: dict, actor: str) -> tuple[dict, bool]:
         payload_hash = content_hash({key: value for key, value in payload.items() if key != "import_key"})
-        existing = self.session.scalars(select(EnterpriseDataImportRecord).where(EnterpriseDataImportRecord.import_key == payload["import_key"])).first()
+        existing = self.session.scalars(select(EnterpriseDataImportRecord).where(
+            EnterpriseDataImportRecord.tenant_id == tenant_id,
+            EnterpriseDataImportRecord.import_key == payload["import_key"],
+        )).first()
         if existing:
             if existing.payload_hash != payload_hash:
                 raise ValueError("导入任务编号已存在，但载荷内容不一致")
@@ -111,7 +249,7 @@ class EnterpriseDataRepository:
         flat = flatten_payload(payload["payload"])
         import_source_priority = SOURCE_PRIORITIES[payload["source_type"]]
         observed_at = payload["as_of_date"]
-        existing_rows = self.list_fields(payload["counterparty_id"])
+        existing_rows = self.list_fields(tenant_id, payload["counterparty_id"])
         grouped: dict[str, list[dict]] = {}
         for item in existing_rows:
             grouped.setdefault(item["field_path"], []).append(item)
@@ -130,6 +268,7 @@ class EnterpriseDataRepository:
             evidence = evidence_map.get(field_path, {})
             field_rows.append({
                 "id": str(uuid4()),
+                "tenant_id": tenant_id,
                 "counterparty_id": payload["counterparty_id"],
                 "field_path": field_path,
                 "value": deepcopy(value),
@@ -150,7 +289,7 @@ class EnterpriseDataRepository:
         quality = build_quality_summary(field_rows, all_paths)
         status = "accepted_with_conflicts" if quality["conflict_count"] else "accepted"
         record = EnterpriseDataImportRecord(
-            id=str(uuid4()), import_key=payload["import_key"], counterparty_id=payload["counterparty_id"],
+            id=str(uuid4()), tenant_id=tenant_id, import_key=payload["import_key"], counterparty_id=payload["counterparty_id"],
             source_type=payload["source_type"], source_name=payload["source_name"], source_priority=import_source_priority,
             schema_version=payload["schema_version"], as_of_date=observed_at,
             evidence_reference=payload["evidence_reference"], payload_hash=payload_hash, status=status,
@@ -163,7 +302,7 @@ class EnterpriseDataRepository:
             self.session.flush()
             for item in field_rows:
                 self.session.add(EnterpriseDataFieldRecord(
-                    id=item["id"], import_id=record.id, counterparty_id=item["counterparty_id"], field_path=item["field_path"],
+                    id=item["id"], tenant_id=tenant_id, import_id=record.id, counterparty_id=item["counterparty_id"], field_path=item["field_path"],
                     value_json=deepcopy(item["value"]), value_hash=item["value_hash"], value_type=item["value_type"],
                     source_type=item["source_type"], source_name=item["source_name"], source_priority=item["source_priority"],
                     evidence_reference=item["evidence_reference"], evidence_locator=item["evidence_locator"], observed_at=item["observed_at"],
@@ -172,50 +311,64 @@ class EnterpriseDataRepository:
                 ))
             self.session.flush()
             self.audit.append("enterprise_data_import", record.id, "enterprise_data_imported", actor, {
-                "import_key": record.import_key, "counterparty_id": record.counterparty_id, "source_type": record.source_type,
+                "tenant_id": tenant_id, "import_key": record.import_key, "counterparty_id": record.counterparty_id, "source_type": record.source_type,
                 "status": record.status, "field_count": record.field_count, "conflict_count": record.conflict_count,
                 "stale_count": record.stale_count, "quality_score": float(record.quality_score), "payload_hash": record.payload_hash,
             })
             self.session.commit()
         except IntegrityError as exc:
             self.session.rollback()
-            concurrent = self.session.scalars(select(EnterpriseDataImportRecord).where(EnterpriseDataImportRecord.import_key == payload["import_key"])).first()
+            concurrent = self.session.scalars(select(EnterpriseDataImportRecord).where(
+                EnterpriseDataImportRecord.tenant_id == tenant_id,
+                EnterpriseDataImportRecord.import_key == payload["import_key"],
+            )).first()
             if concurrent and concurrent.payload_hash == payload_hash:
                 return _enterprise_import_to_dict(concurrent), True
             raise ConcurrentUpdateError("企业数据导入发生并发冲突，请刷新后重试") from exc
         self.session.refresh(record)
         return _enterprise_import_to_dict(record), False
 
-    def list_imports(self, counterparty_id: str | None = None, limit: int = 50) -> list[dict]:
-        statement = select(EnterpriseDataImportRecord).order_by(EnterpriseDataImportRecord.created_at.desc(), EnterpriseDataImportRecord.id.desc())
+    def list_imports(self, tenant_id: str, counterparty_id: str | None = None, limit: int = 50) -> list[dict]:
+        statement = select(EnterpriseDataImportRecord).where(
+            EnterpriseDataImportRecord.tenant_id == tenant_id,
+        ).order_by(EnterpriseDataImportRecord.created_at.desc(), EnterpriseDataImportRecord.id.desc())
         if counterparty_id:
             statement = statement.where(EnterpriseDataImportRecord.counterparty_id == counterparty_id)
         return [_enterprise_import_to_dict(item) for item in self.session.scalars(statement.limit(limit)).all()]
 
-    def list_fields(self, counterparty_id: str, field_path: str | None = None) -> list[dict]:
-        statement = select(EnterpriseDataFieldRecord).where(EnterpriseDataFieldRecord.counterparty_id == counterparty_id)
+    def list_fields(self, tenant_id: str, counterparty_id: str, field_path: str | None = None) -> list[dict]:
+        statement = select(EnterpriseDataFieldRecord).where(
+            EnterpriseDataFieldRecord.tenant_id == tenant_id,
+            EnterpriseDataFieldRecord.counterparty_id == counterparty_id,
+        )
         if field_path:
             statement = statement.where(EnterpriseDataFieldRecord.field_path == field_path)
         statement = statement.order_by(EnterpriseDataFieldRecord.observed_at.desc(), EnterpriseDataFieldRecord.created_at.desc(), EnterpriseDataFieldRecord.id.desc())
         return [_enterprise_field_to_dict(item) for item in self.session.scalars(statement).all()]
 
-    def list_resolutions(self, counterparty_id: str, field_path: str | None = None) -> list[dict]:
-        statement = select(EnterpriseDataResolutionRecord).where(EnterpriseDataResolutionRecord.counterparty_id == counterparty_id)
+    def list_resolutions(self, tenant_id: str, counterparty_id: str, field_path: str | None = None) -> list[dict]:
+        statement = select(EnterpriseDataResolutionRecord).where(
+            EnterpriseDataResolutionRecord.tenant_id == tenant_id,
+            EnterpriseDataResolutionRecord.counterparty_id == counterparty_id,
+        )
         if field_path:
             statement = statement.where(EnterpriseDataResolutionRecord.field_path == field_path)
         statement = statement.order_by(EnterpriseDataResolutionRecord.created_at.desc(), EnterpriseDataResolutionRecord.id.desc())
         return [_enterprise_resolution_to_dict(item) for item in self.session.scalars(statement).all()]
 
-    def get_resolution(self, resolution_id: str) -> dict | None:
-        record = self.session.get(EnterpriseDataResolutionRecord, resolution_id)
+    def get_resolution(self, tenant_id: str, resolution_id: str) -> dict | None:
+        record = self.session.scalars(select(EnterpriseDataResolutionRecord).where(
+            EnterpriseDataResolutionRecord.tenant_id == tenant_id,
+            EnterpriseDataResolutionRecord.id == resolution_id,
+        )).first()
         return _enterprise_resolution_to_dict(record) if record else None
 
-    def list_conflicts(self, counterparty_id: str) -> list[dict]:
+    def list_conflicts(self, tenant_id: str, counterparty_id: str) -> list[dict]:
         grouped: dict[str, list[dict]] = {}
-        for item in self.list_fields(counterparty_id):
+        for item in self.list_fields(tenant_id, counterparty_id):
             grouped.setdefault(item["field_path"], []).append(item)
         resolutions_by_path: dict[str, list[dict]] = {}
-        for item in self.list_resolutions(counterparty_id):
+        for item in self.list_resolutions(tenant_id, counterparty_id):
             resolutions_by_path.setdefault(item["field_path"], []).append(item)
         conflicts = []
         for field_path, candidates in sorted(grouped.items()):
@@ -231,6 +384,7 @@ class EnterpriseDataRepository:
             status = "resolved" if approved else "pending_review" if pending else "reopened" if prior_approved else "unresolved"
             current_resolution = approved or pending or prior_approved
             conflicts.append({
+                "tenant_id": tenant_id,
                 "counterparty_id": counterparty_id,
                 "field_path": field_path,
                 "status": status,
@@ -244,8 +398,8 @@ class EnterpriseDataRepository:
             })
         return conflicts
 
-    def create_resolution(self, payload: dict, actor: str, actor_name: str) -> tuple[dict, bool]:
-        candidates = self.list_fields(payload["counterparty_id"], payload["field_path"])
+    def create_resolution(self, tenant_id: str, payload: dict, actor: str, actor_name: str) -> tuple[dict, bool]:
+        candidates = self.list_fields(tenant_id, payload["counterparty_id"], payload["field_path"])
         if len({item["value_hash"] for item in candidates}) <= 1:
             raise ValueError("当前字段不存在需要裁决的候选值冲突")
         selected = next((item for item in candidates if item["id"] == payload["selected_field_id"]), None)
@@ -254,6 +408,7 @@ class EnterpriseDataRepository:
         snapshot_hash = _candidate_snapshot_hash(candidates)
         pending = self.session.scalars(
             select(EnterpriseDataResolutionRecord).where(
+                EnterpriseDataResolutionRecord.tenant_id == tenant_id,
                 EnterpriseDataResolutionRecord.counterparty_id == payload["counterparty_id"],
                 EnterpriseDataResolutionRecord.field_path == payload["field_path"],
                 EnterpriseDataResolutionRecord.status == "pending_review",
@@ -263,7 +418,7 @@ class EnterpriseDataRepository:
             if pending.candidate_snapshot_hash != snapshot_hash:
                 pending.status = "superseded"
                 self.audit.append("enterprise_data_resolution", pending.id, "enterprise_data_resolution_expired", actor, {
-                    "counterparty_id": pending.counterparty_id, "field_path": pending.field_path,
+                    "tenant_id": tenant_id, "counterparty_id": pending.counterparty_id, "field_path": pending.field_path,
                     "previous_candidate_snapshot_hash": pending.candidate_snapshot_hash,
                     "current_candidate_snapshot_hash": snapshot_hash,
                     "reason": "new_candidate_evidence",
@@ -275,6 +430,7 @@ class EnterpriseDataRepository:
                 raise ValueError("该字段已有待审核裁决，请先完成审核")
         current_approved = self.session.scalars(
             select(EnterpriseDataResolutionRecord).where(
+                EnterpriseDataResolutionRecord.tenant_id == tenant_id,
                 EnterpriseDataResolutionRecord.counterparty_id == payload["counterparty_id"],
                 EnterpriseDataResolutionRecord.field_path == payload["field_path"],
                 EnterpriseDataResolutionRecord.status == "approved",
@@ -284,7 +440,7 @@ class EnterpriseDataRepository:
         if current_approved:
             raise ValueError("当前候选值快照已经完成裁决")
         record = EnterpriseDataResolutionRecord(
-            id=str(uuid4()), counterparty_id=payload["counterparty_id"], field_path=payload["field_path"],
+            id=str(uuid4()), tenant_id=tenant_id, counterparty_id=payload["counterparty_id"], field_path=payload["field_path"],
             selected_field_id=selected["id"], selected_value_json=deepcopy(selected["value"]), selected_value_hash=selected["value_hash"],
             candidate_snapshot_hash=snapshot_hash, candidate_count=len(candidates), reason_category=payload["reason_category"],
             rationale=payload["rationale"], status="pending_review", created_by=actor, created_by_name=actor_name,
@@ -293,7 +449,7 @@ class EnterpriseDataRepository:
         try:
             self.session.flush()
             self.audit.append("enterprise_data_resolution", record.id, "enterprise_data_resolution_submitted", actor, {
-                "counterparty_id": record.counterparty_id, "field_path": record.field_path,
+                "tenant_id": tenant_id, "counterparty_id": record.counterparty_id, "field_path": record.field_path,
                 "selected_field_id": record.selected_field_id, "selected_value_hash": record.selected_value_hash,
                 "candidate_snapshot_hash": record.candidate_snapshot_hash, "reason_category": record.reason_category,
             })
@@ -304,8 +460,11 @@ class EnterpriseDataRepository:
         self.session.refresh(record)
         return _enterprise_resolution_to_dict(record), False
 
-    def review_resolution(self, resolution_id: str, expected_row_version: int, decision: str, comment: str, actor: str, actor_name: str) -> dict:
-        record = self.session.get(EnterpriseDataResolutionRecord, resolution_id)
+    def review_resolution(self, tenant_id: str, resolution_id: str, expected_row_version: int, decision: str, comment: str, actor: str, actor_name: str) -> dict:
+        record = self.session.scalars(select(EnterpriseDataResolutionRecord).where(
+            EnterpriseDataResolutionRecord.tenant_id == tenant_id,
+            EnterpriseDataResolutionRecord.id == resolution_id,
+        )).first()
         if not record:
             raise LookupError("字段冲突裁决不存在")
         if record.row_version != expected_row_version:
@@ -314,12 +473,13 @@ class EnterpriseDataRepository:
             raise ValueError("只有待审核的字段冲突裁决可以评审")
         if record.created_by == actor:
             raise PermissionError("字段冲突裁决的提议人与审核人必须分离")
-        candidates = self.list_fields(record.counterparty_id, record.field_path)
+        candidates = self.list_fields(tenant_id, record.counterparty_id, record.field_path)
         if _candidate_snapshot_hash(candidates) != record.candidate_snapshot_hash:
             raise ConcurrentUpdateError("候选值集合已发生变化，请重新发起字段冲突裁决")
         if decision == "approve":
             previous = self.session.scalars(
                 select(EnterpriseDataResolutionRecord).where(
+                    EnterpriseDataResolutionRecord.tenant_id == tenant_id,
                     EnterpriseDataResolutionRecord.counterparty_id == record.counterparty_id,
                     EnterpriseDataResolutionRecord.field_path == record.field_path,
                     EnterpriseDataResolutionRecord.status == "approved",
@@ -337,7 +497,7 @@ class EnterpriseDataRepository:
         try:
             self.session.flush()
             self.audit.append("enterprise_data_resolution", record.id, "enterprise_data_resolution_approved" if decision == "approve" else "enterprise_data_resolution_rejected", actor, {
-                "counterparty_id": record.counterparty_id, "field_path": record.field_path,
+                "tenant_id": tenant_id, "counterparty_id": record.counterparty_id, "field_path": record.field_path,
                 "selected_field_id": record.selected_field_id, "candidate_snapshot_hash": record.candidate_snapshot_hash,
                 "decision": decision, "comment": comment,
             })
@@ -348,13 +508,13 @@ class EnterpriseDataRepository:
         self.session.refresh(record)
         return _enterprise_resolution_to_dict(record)
 
-    def build_profile(self, counterparty_id: str) -> dict:
-        fields = self.list_fields(counterparty_id)
+    def build_profile(self, tenant_id: str, counterparty_id: str) -> dict:
+        fields = self.list_fields(tenant_id, counterparty_id)
         grouped: dict[str, list[dict]] = {}
         for item in fields:
             grouped.setdefault(item["field_path"], []).append(item)
         resolutions_by_path: dict[str, list[dict]] = {}
-        for item in self.list_resolutions(counterparty_id):
+        for item in self.list_resolutions(tenant_id, counterparty_id):
             resolutions_by_path.setdefault(item["field_path"], []).append(item)
         effective_rows = []
         unresolved_conflicts = []
@@ -393,8 +553,9 @@ class EnterpriseDataRepository:
         for item in effective_rows:
             section = item["field_path"].split(".", 1)[0]
             sections[section] = sections.get(section, 0) + 1
-        imports = self.list_imports(counterparty_id)
+        imports = self.list_imports(tenant_id, counterparty_id)
         return {
+            "tenant_id": tenant_id,
             "counterparty_id": counterparty_id,
             "profile": unflatten_fields(effective_rows),
             "summary": {
@@ -411,15 +572,16 @@ class EnterpriseDataRepository:
             "recent_imports": imports[:10],
         }
 
-    def lineage(self, counterparty_id: str, field_path: str) -> dict:
-        candidates = self.list_fields(counterparty_id, field_path)
+    def lineage(self, tenant_id: str, counterparty_id: str, field_path: str) -> dict:
+        candidates = self.list_fields(tenant_id, counterparty_id, field_path)
         snapshot_hash = _candidate_snapshot_hash(candidates)
-        resolutions = self.list_resolutions(counterparty_id, field_path)
+        resolutions = self.list_resolutions(tenant_id, counterparty_id, field_path)
         approved = next((item for item in resolutions if item["status"] == "approved" and item["candidate_snapshot_hash"] == snapshot_hash), None)
         pending = next((item for item in resolutions if item["status"] == "pending_review" and item["candidate_snapshot_hash"] == snapshot_hash), None)
         automatic = choose_effective_field(candidates)
         effective = next((item for item in candidates if approved and item["id"] == approved["selected_field_id"]), None) or automatic
         return {
+            "tenant_id": tenant_id,
             "counterparty_id": counterparty_id,
             "field_path": field_path,
             "effective_field_id": effective["id"] if effective else None,
@@ -436,21 +598,30 @@ class EnterpriseIndicatorObservationRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def list(self, counterparty_id: str, indicator_id: str | None = None) -> list[dict]:
-        statement = select(EnterpriseIndicatorObservationRecord).where(EnterpriseIndicatorObservationRecord.counterparty_id == counterparty_id)
+    def list(self, tenant_id: str, counterparty_id: str, indicator_id: str | None = None) -> list[dict]:
+        statement = select(EnterpriseIndicatorObservationRecord).where(
+            EnterpriseIndicatorObservationRecord.tenant_id == tenant_id,
+            EnterpriseIndicatorObservationRecord.counterparty_id == counterparty_id,
+        )
         if indicator_id:
             statement = statement.where(EnterpriseIndicatorObservationRecord.indicator_id == indicator_id)
         statement = statement.order_by(EnterpriseIndicatorObservationRecord.created_at.desc(), EnterpriseIndicatorObservationRecord.id.desc())
         return [_indicator_observation_to_dict(item) for item in self.session.scalars(statement).all()]
 
-    def get(self, observation_id: str) -> dict | None:
-        record = self.session.get(EnterpriseIndicatorObservationRecord, observation_id)
+    def get(self, tenant_id: str, observation_id: str) -> dict | None:
+        record = self.session.scalars(
+            select(EnterpriseIndicatorObservationRecord).where(
+                EnterpriseIndicatorObservationRecord.tenant_id == tenant_id,
+                EnterpriseIndicatorObservationRecord.id == observation_id,
+            )
+        ).first()
         return _indicator_observation_to_dict(record) if record else None
 
-    def effective(self, counterparty_id: str) -> list[dict]:
+    def effective(self, tenant_id: str, counterparty_id: str) -> list[dict]:
         rows = self.session.scalars(
             select(EnterpriseIndicatorObservationRecord)
             .where(
+                EnterpriseIndicatorObservationRecord.tenant_id == tenant_id,
                 EnterpriseIndicatorObservationRecord.counterparty_id == counterparty_id,
                 EnterpriseIndicatorObservationRecord.status == "verified",
             )
@@ -461,9 +632,10 @@ class EnterpriseIndicatorObservationRepository:
             selected.setdefault(row.indicator_id, row)
         return [_indicator_observation_to_dict(item) for item in selected.values()]
 
-    def create(self, payload: dict, actor: str, actor_name: str) -> dict:
+    def create(self, tenant_id: str, payload: dict, actor: str, actor_name: str) -> dict:
         pending = self.session.scalars(
             select(EnterpriseIndicatorObservationRecord).where(
+                EnterpriseIndicatorObservationRecord.tenant_id == tenant_id,
                 EnterpriseIndicatorObservationRecord.counterparty_id == payload["counterparty_id"],
                 EnterpriseIndicatorObservationRecord.indicator_id == payload["indicator_id"],
                 EnterpriseIndicatorObservationRecord.status == "pending_review",
@@ -472,7 +644,7 @@ class EnterpriseIndicatorObservationRepository:
         if pending:
             raise ValueError("该企业指标已有待复核数据，请先完成复核")
         record = EnterpriseIndicatorObservationRecord(
-            id=str(uuid4()), counterparty_id=payload["counterparty_id"], indicator_id=payload["indicator_id"],
+            id=str(uuid4()), tenant_id=tenant_id, counterparty_id=payload["counterparty_id"], indicator_id=payload["indicator_id"],
             indicator_name=payload["indicator_name"], values_json=deepcopy(payload["values"]),
             values_hash=content_hash(payload["values"]), evidence_document_id=payload.get("evidence_document_id"),
             evidence_reference=payload["evidence_reference"], observed_at=payload["observed_at"],
@@ -482,7 +654,7 @@ class EnterpriseIndicatorObservationRepository:
         try:
             self.session.flush()
             self.audit.append("enterprise_indicator_observation", record.id, "indicator_observation_submitted", actor, {
-                "counterparty_id": record.counterparty_id, "indicator_id": record.indicator_id,
+                "tenant_id": record.tenant_id, "counterparty_id": record.counterparty_id, "indicator_id": record.indicator_id,
                 "values_hash": record.values_hash, "evidence_document_id": record.evidence_document_id,
             })
             self.session.commit()
@@ -492,8 +664,13 @@ class EnterpriseIndicatorObservationRepository:
         self.session.refresh(record)
         return _indicator_observation_to_dict(record)
 
-    def review(self, observation_id: str, expected_row_version: int, decision: str, comment: str, actor: str, actor_name: str) -> dict:
-        record = self.session.get(EnterpriseIndicatorObservationRecord, observation_id)
+    def review(self, tenant_id: str, observation_id: str, expected_row_version: int, decision: str, comment: str, actor: str, actor_name: str) -> dict:
+        record = self.session.scalars(
+            select(EnterpriseIndicatorObservationRecord).where(
+                EnterpriseIndicatorObservationRecord.tenant_id == tenant_id,
+                EnterpriseIndicatorObservationRecord.id == observation_id,
+            )
+        ).first()
         if not record:
             raise LookupError("指标数据记录不存在")
         if record.row_version != expected_row_version:
@@ -505,6 +682,7 @@ class EnterpriseIndicatorObservationRepository:
         if decision == "verify":
             previous = self.session.scalars(
                 select(EnterpriseIndicatorObservationRecord).where(
+                    EnterpriseIndicatorObservationRecord.tenant_id == tenant_id,
                     EnterpriseIndicatorObservationRecord.counterparty_id == record.counterparty_id,
                     EnterpriseIndicatorObservationRecord.indicator_id == record.indicator_id,
                     EnterpriseIndicatorObservationRecord.status == "verified",
@@ -522,7 +700,7 @@ class EnterpriseIndicatorObservationRepository:
         try:
             self.session.flush()
             self.audit.append("enterprise_indicator_observation", record.id, f"indicator_observation_{record.status}", actor, {
-                "counterparty_id": record.counterparty_id, "indicator_id": record.indicator_id,
+                "tenant_id": record.tenant_id, "counterparty_id": record.counterparty_id, "indicator_id": record.indicator_id,
                 "decision": decision, "comment": comment, "values_hash": record.values_hash,
             })
             self.session.commit()
@@ -571,9 +749,10 @@ class _ModelGovernanceRepositoryBase:
             else None
         )
 
-    def create_change(self, payload: dict, actor_subject: str, actor_name: str) -> dict:
+    def create_change(self, payload: dict, actor_subject: str, actor_name: str, *, commit: bool = True) -> dict:
         scorecard_evidence = deepcopy(payload.get("scorecard_validation_evidence") or {})
         calibration_evidence = deepcopy(payload.get("calibration_evidence") or {})
+        supervised_evidence = deepcopy(payload.get("supervised_validation_evidence") or {})
         record = ModelChangeRecord(
             id=str(uuid4()),
             template_key=payload["template_key"],
@@ -582,6 +761,8 @@ class _ModelGovernanceRepositoryBase:
             config_json=deepcopy(payload["config"]),
             validation_json=deepcopy(payload["validation"]),
             impact_json=deepcopy(payload["impact"]),
+            supervised_validation_evidence_json=supervised_evidence,
+            supervised_validation_binding_hash=content_hash(supervised_evidence) if supervised_evidence else None,
             scorecard_validation_run_id=scorecard_evidence.get("validation_run_id"),
             scorecard_validation_evidence_json=scorecard_evidence,
             scorecard_validation_binding_hash=content_hash(scorecard_evidence) if scorecard_evidence else None,
@@ -596,8 +777,9 @@ class _ModelGovernanceRepositoryBase:
         self.session.add(record)
         try:
             self.session.flush()
-            self.audit.append("model_change", record.id, "model_change_created", actor_name, {"template_key": record.template_key, "base_version": record.base_version, "candidate_version": record.candidate_version, "config_hash": record.validation_json["config_hash"], "calibration_evidence_hash": calibration_evidence.get("analysis", {}).get("evidence_hash")})
-            self.session.commit()
+            self.audit.append("model_change", record.id, "model_change_created", actor_name, {"template_key": record.template_key, "base_version": record.base_version, "candidate_version": record.candidate_version, "config_hash": record.validation_json["config_hash"], "calibration_evidence_hash": calibration_evidence.get("analysis", {}).get("evidence_hash"), "supervised_validation_binding_hash": record.supervised_validation_binding_hash})
+            if commit:
+                self.session.commit()
         except IntegrityError as exc:
             self.session.rollback()
             raise ValueError("同一模型下候选版本不能重复") from exc
@@ -612,7 +794,9 @@ class _ModelGovernanceRepositoryBase:
             try:
                 comparison_repository = RuleCenterReplayComparisonRepository(self.session)
                 comparison = comparison_repository._to_dict(
-                    comparison_repository._verified_comparison(comparison_run_id)
+                    comparison_repository._verified_comparison(
+                        str(binding.get("tenant_id") or ""), comparison_run_id
+                    )
                 )
                 binding["current_effective_status"] = comparison["effective_status"]
                 binding["current_gate"] = comparison["gate"]
@@ -1115,6 +1299,8 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         record.validation_json = deepcopy(payload["validation"])
         record.impact_json = deepcopy(payload["impact"])
         record.comparison_evidence_json = {}
+        record.supervised_validation_evidence_json = {}
+        record.supervised_validation_binding_hash = None
         scorecard_evidence = deepcopy(payload.get("scorecard_validation_evidence") or {})
         record.scorecard_validation_run_id = scorecard_evidence.get("validation_run_id")
         record.scorecard_validation_evidence_json = scorecard_evidence
@@ -1145,6 +1331,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         self._assert_scorecard_validation_evidence(record)
         self._assert_comparison_evidence(record)
         self._assert_calibration_evidence(record)
+        supervised_evidence = self._assert_supervised_validation_evidence(record)
         record.status = "pending_review"
         record.submitted_at = datetime.now(timezone.utc)
         return self._commit_change(record, "model_change_submitted", actor_name, {"candidate_version": record.candidate_version})
@@ -1176,6 +1363,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         self._assert_scorecard_validation_evidence(record)
         self._assert_comparison_evidence(record)
         self._assert_calibration_evidence(record)
+        supervised_evidence = self._assert_supervised_validation_evidence(record)
 
         current = self.get_config(demo_repository, record.template_key)
         if not current or current.get("version") != record.base_version:
@@ -1207,6 +1395,13 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         self.session.add(release)
         record.status = "published"
         record.published_at = now
+        if supervised_evidence:
+            supervised_evidence["release_approval"] = {
+                "status": "approved", "approved_by": reviewer_subject, "approved_by_name": reviewer_name,
+                "approved_at": now.isoformat(), "comment": comment,
+            }
+            record.supervised_validation_evidence_json = supervised_evidence
+            record.supervised_validation_binding_hash = content_hash(supervised_evidence)
         try:
             self.audit.append("model_change", record.id, "model_change_published", reviewer_name, {"release_id": release.id, "model_version": release.model_version, "comment": comment, "config_hash": release.config_hash})
             self.session.commit()
@@ -1218,9 +1413,96 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         result["release_id"] = release.id
         return result
 
+    def review_supervised_validation(
+        self, change_id: str, payload: dict, reviewer_subject: str, reviewer_name: str,
+    ) -> dict:
+        record = self.session.get(ModelChangeRecord, change_id)
+        if not record or record.entity_type != "model":
+            raise LookupError("模型变更单不存在")
+        if record.row_version != payload["expected_row_version"]:
+            raise ConcurrentUpdateError(f"模型变更单版本已变化，当前版本为 {record.row_version}")
+        if record.status != "draft":
+            raise ValueError("只有模型变更草稿可以提交独立验证意见")
+        if record.created_by == reviewer_subject:
+            raise PermissionError("模型制作者不能审批自己创建的监督验证意见")
+        evidence = deepcopy(record.supervised_validation_evidence_json or {})
+        if not evidence:
+            raise ValueError("模型变更单没有绑定监督验证证据")
+        if record.supervised_validation_binding_hash != payload["expected_binding_hash"] or content_hash(evidence) != record.supervised_validation_binding_hash:
+            raise ConcurrentUpdateError("监督验证证据哈希已变化，请刷新后重试")
+        independent = evidence.get("independent_validation") or {}
+        if independent.get("status") not in {"pending", "rejected"}:
+            raise ValueError("监督验证意见已经完成，不能重复复核")
+        now = datetime.now(timezone.utc)
+        evidence["report_template_version"] = payload["report_template_version"]
+        evidence["independent_validation"] = {
+            "status": "approved" if payload["decision"] == "approve" else "rejected",
+            "risk_level": payload["risk_level"], "opinion": payload["opinion"],
+            "reviewed_by": reviewer_subject, "reviewed_by_name": reviewer_name,
+            "reviewed_at": now.isoformat(), "attachments": deepcopy(payload.get("attachments") or []),
+        }
+        evidence["release_approval"] = {"status": "pending" if payload["decision"] == "approve" else "blocked"}
+        record.supervised_validation_evidence_json = evidence
+        record.supervised_validation_binding_hash = content_hash(evidence)
+        return self._commit_change(record, "supervised_validation_approved" if payload["decision"] == "approve" else "supervised_validation_rejected", reviewer_name, {
+            "decision": payload["decision"], "risk_level": payload["risk_level"],
+            "supervised_validation_binding_hash": record.supervised_validation_binding_hash,
+        })
+
+    def _assert_supervised_validation_evidence(self, record: ModelChangeRecord) -> dict | None:
+        evidence = deepcopy(record.supervised_validation_evidence_json or {})
+        if not evidence:
+            return None
+        if not record.supervised_validation_binding_hash or content_hash(evidence) != record.supervised_validation_binding_hash:
+            raise ValueError("监督验证证据完整性校验失败，请重新绑定不可变报告")
+        if evidence.get("evidence_level") != "supervised":
+            raise ValueError("只有完整监督证据可以进入模型发布链")
+        if (evidence.get("independent_validation") or {}).get("status") != "approved":
+            raise ValueError("缺少独立验证意见，不能提交或发布模型")
+        issuance = self.session.scalar(select(ModelValidationReportIssuanceRecord).where(
+            ModelValidationReportIssuanceRecord.model_change_id == record.id,
+            ModelValidationReportIssuanceRecord.report_hash == evidence.get("report_hash"),
+            ModelValidationReportIssuanceRecord.evidence_binding_hash == record.supervised_validation_binding_hash,
+            ModelValidationReportIssuanceRecord.revoked_at.is_(None),
+        ))
+        if not issuance:
+            raise ValueError("监督验证报告尚未完成可信签发，不能提交或发布模型")
+        issued_at = issuance.issued_at.replace(tzinfo=timezone.utc) if issuance.issued_at.tzinfo is None else issuance.issued_at.astimezone(timezone.utc)
+        signature_body = {
+            "id": issuance.id, "package_hash": issuance.package_hash,
+            "signature_algorithm": issuance.signature_algorithm,
+            "issued_by": issuance.issued_by, "issued_by_name": issuance.issued_by_name,
+            "issued_at": issued_at.isoformat(), "supersedes_issuance_id": issuance.supersedes_issuance_id,
+            "reissue_reason": issuance.reissue_reason,
+        }
+        if issuance.signing_key_id:
+            signature_body["signing_key_id"] = issuance.signing_key_id
+        from backend.model_validation_signing import verify_signature
+        if content_hash(issuance.package_json) != issuance.package_hash or not verify_signature(
+            issuance.signature_algorithm, signature_body, issuance.signature, issuance.signing_public_key,
+        ):
+            raise ValueError("监督验证报告签发登记完整性校验失败")
+        from backend.model_risk_policy_repository import ModelRiskPolicyError, ModelRiskPolicyRepository
+        try:
+            risk_governance = ModelRiskPolicyRepository(self.session)
+            risk_policy = risk_governance.current_catalog(evidence["tenant_id"])
+            risk_acceptance = risk_governance.current_acceptance_snapshot(evidence["tenant_id"], record.id, required=True)
+        except ModelRiskPolicyError as exc:
+            raise ValueError(exc.message) from exc
+        if risk_policy["source"] == "tenant_policy":
+            frozen_risk = (issuance.package_json or {}).get("risk_classification") or {}
+            frozen_acceptance = frozen_risk.get("risk_acceptance") or {}
+            if (
+                frozen_risk.get("policy_id") != (risk_policy.get("policy") or {}).get("id")
+                or frozen_risk.get("catalog_hash") != risk_policy["config_hash"]
+                or frozen_acceptance.get("id") != (risk_acceptance or {}).get("id")
+            ):
+                raise ValueError("监督验证报告未冻结当前模型风险政策与接受结论，请重新签发")
+        return evidence
+
     def run_and_bind_comparison_evidence(
         self, change_id: str, expected_row_version: int, payload: dict,
-        demo_repository: DemoRepository, actor_subject: str, actor_name: str,
+        tenant_id: str, demo_repository: DemoRepository, actor_subject: str, actor_name: str,
         allow_admin: bool = False,
     ) -> dict:
         record = self.session.get(ModelChangeRecord, change_id)
@@ -1243,13 +1525,14 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             "challenger_change_id": record.id,
         })
         comparison = RuleCenterReplayComparisonRepository(self.session).run(
-            comparison_payload, demo_repository, self, actor_subject, actor_name
+            tenant_id, comparison_payload, demo_repository, self, actor_subject, actor_name
         )
         self.session.refresh(record)
         if record.row_version != expected_row_version or record.status != "draft":
             raise ConcurrentUpdateError("比较运行期间模型变更单已变化，请重新运行")
         valid_until = date.today() + timedelta(days=payload["evidence_valid_days"])
         binding = {
+            "tenant_id": tenant_id,
             "comparison_run_id": comparison["id"],
             "comparison_evidence_hash": comparison["evidence_hash"],
             "dataset_snapshot_id": comparison["dataset_snapshot_id"],
@@ -1262,6 +1545,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             "gate": deepcopy(comparison["gate"]),
             "effective_status": comparison["effective_status"],
             "evidence_level": comparison["evidence_level"],
+            "assets_hash": comparison["assets_hash"],
             "valid_until": valid_until.isoformat(),
             "bound_at": datetime.now(timezone.utc).isoformat(),
             "bound_by": actor_subject,
@@ -1288,7 +1572,12 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
         if valid_until < date.today():
             raise ValueError("模型变更单比较证据已过期，请重新运行")
         comparison_repository = RuleCenterReplayComparisonRepository(self.session)
-        comparison_record = comparison_repository._verified_comparison(str(binding.get("comparison_run_id") or ""))
+        tenant_id = str(binding.get("tenant_id") or "")
+        if not tenant_id:
+            raise ValueError("模型变更单比较证据缺少租户归属")
+        comparison_record = comparison_repository._verified_comparison(
+            tenant_id, str(binding.get("comparison_run_id") or "")
+        )
         comparison = comparison_repository._to_dict(comparison_record)
         candidate_hash = content_hash(record.config_json)
         expected = {
@@ -1300,6 +1589,7 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             "challenger_model_key": record.template_key,
             "challenger_model_version": record.candidate_version,
             "challenger_config_hash": candidate_hash,
+            "assets_hash": comparison_record.assets_hash,
         }
         for key, expected_value in expected.items():
             if binding.get(key) != expected_value:
@@ -1327,8 +1617,11 @@ class ModelGovernanceRepository(_ModelGovernanceRepositoryBase):
             raise ValueError("评分卡开发验证运行引用不一致")
         from backend.scorecard_repository import ScorecardRepository
 
+        tenant_id = str(evidence.get("tenant_id") or "")
+        if not tenant_id:
+            raise ValueError("评分卡开发验证证据缺少租户归属")
         current = ScorecardRepository(self.session).approved_validation_evidence(
-            record.scorecard_validation_run_id, scorecard_binding
+            tenant_id, record.scorecard_validation_run_id, scorecard_binding
         )
         for key, expected in current.items():
             if evidence.get(key) != expected:
@@ -1433,26 +1726,33 @@ class AuditRepository:
         self.session = session
 
     def append(self, aggregate_type: str, aggregate_id: str, event_type: str, actor: str, payload: dict) -> dict:
+        tenant_id, scope_type = self._resolve_scope(aggregate_type, aggregate_id, payload)
         existing = self.session.scalars(
             select(AuditEventRecord)
-            .where(AuditEventRecord.aggregate_type == aggregate_type, AuditEventRecord.aggregate_id == aggregate_id)
+            .where(
+                AuditEventRecord.tenant_id == tenant_id,
+                AuditEventRecord.aggregate_type == aggregate_type,
+                AuditEventRecord.aggregate_id == aggregate_id,
+            )
         ).all()
         ordered = _order_hash_chain([_audit_to_dict(row) for row in existing])
         previous_hash = ordered[-1]["event_hash"] if ordered else ""
         event_id = str(uuid4())
-        event_hash = content_hash(
-            {
-                "id": event_id,
-                "aggregate_type": aggregate_type,
-                "aggregate_id": aggregate_id,
-                "event_type": event_type,
-                "actor": actor,
-                "payload": payload,
-                "previous_hash": previous_hash,
-            }
+        event_hash = audit_event_hash(
+            event_id=event_id,
+            tenant_id=tenant_id,
+            scope_type=scope_type,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            actor=actor,
+            payload=payload,
+            previous_hash=previous_hash,
         )
         record = AuditEventRecord(
             id=event_id,
+            tenant_id=tenant_id,
+            scope_type=scope_type,
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             event_type=event_type,
@@ -1466,8 +1766,10 @@ class AuditRepository:
         return _audit_to_dict(record)
 
     def append_root_once(self, aggregate_type: str, aggregate_id: str, event_type: str, actor: str, payload: dict) -> tuple[dict, bool]:
+        tenant_id, scope_type = self._resolve_scope(aggregate_type, aggregate_id, payload)
         existing = self.session.scalars(
             select(AuditEventRecord).where(
+                AuditEventRecord.tenant_id == tenant_id,
                 AuditEventRecord.aggregate_type == aggregate_type,
                 AuditEventRecord.aggregate_id == aggregate_id,
                 AuditEventRecord.event_type == event_type,
@@ -1476,19 +1778,21 @@ class AuditRepository:
         if existing:
             return _audit_to_dict(existing), False
         event_id = str(uuid4())
-        event_hash = content_hash(
-            {
-                "id": event_id,
-                "aggregate_type": aggregate_type,
-                "aggregate_id": aggregate_id,
-                "event_type": event_type,
-                "actor": actor,
-                "payload": payload,
-                "previous_hash": "",
-            }
+        event_hash = audit_event_hash(
+            event_id=event_id,
+            tenant_id=tenant_id,
+            scope_type=scope_type,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            event_type=event_type,
+            actor=actor,
+            payload=payload,
+            previous_hash="",
         )
         record = AuditEventRecord(
             id=event_id,
+            tenant_id=tenant_id,
+            scope_type=scope_type,
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             event_type=event_type,
@@ -1504,6 +1808,7 @@ class AuditRepository:
         except IntegrityError:
             existing = self.session.scalars(
                 select(AuditEventRecord).where(
+                    AuditEventRecord.tenant_id == tenant_id,
                     AuditEventRecord.aggregate_type == aggregate_type,
                     AuditEventRecord.aggregate_id == aggregate_id,
                     AuditEventRecord.event_type == event_type,
@@ -1514,12 +1819,90 @@ class AuditRepository:
             return _audit_to_dict(existing), False
         return _audit_to_dict(record), True
 
-    def list(self, aggregate_id: str | None = None) -> list[dict]:
-        statement = select(AuditEventRecord).order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+    def list(self, tenant_id: str, aggregate_id: str | None = None) -> list[dict]:
+        statement = (
+            select(AuditEventRecord)
+            .where(AuditEventRecord.tenant_id == tenant_id)
+            .order_by(AuditEventRecord.created_at, AuditEventRecord.id)
+        )
         if aggregate_id:
             statement = statement.where(AuditEventRecord.aggregate_id == aggregate_id)
         rows = [_audit_to_dict(row) for row in self.session.scalars(statement).all()]
         return _order_hash_chain(rows) if aggregate_id else rows
+
+    def _resolve_scope(self, aggregate_type: str, aggregate_id: str, payload: dict) -> tuple[str, str]:
+        if aggregate_type in TENANT_AUDIT_AGGREGATE_MODELS:
+            model, identity_field = TENANT_AUDIT_AGGREGATE_MODELS[aggregate_type]
+            payload_tenant = payload.get("tenant_id") if isinstance(payload, dict) else None
+            stored = self.session.scalar(
+                select(model.tenant_id).where(getattr(model, identity_field) == aggregate_id)
+            )
+            candidates = {
+                value.strip()
+                for value in (payload_tenant, stored)
+                if isinstance(value, str) and value.strip()
+            }
+            if len(candidates) != 1:
+                raise AuditTenantResolutionError(
+                    f"审计事件 {aggregate_type}:{aggregate_id} 缺少或存在冲突租户归属"
+                )
+            tenant_id = candidates.pop()
+            return tenant_id, "platform" if tenant_id == PLATFORM_INTERNAL_TENANT_ID else "tenant"
+        if aggregate_type in PAYLOAD_TENANT_AUDIT_AGGREGATE_TYPES:
+            tenant_id = payload.get("tenant_id") if isinstance(payload, dict) else None
+            if not isinstance(tenant_id, str) or not tenant_id.strip():
+                raise AuditTenantResolutionError(
+                    f"审计事件 {aggregate_type}:{aggregate_id} 缺少明确租户归属"
+                )
+            tenant_id = tenant_id.strip()
+            return tenant_id, "platform" if tenant_id == PLATFORM_INTERNAL_TENANT_ID else "tenant"
+        if aggregate_type in PLATFORM_AUDIT_AGGREGATE_TYPES or aggregate_type.startswith(PLATFORM_AUDIT_AGGREGATE_PREFIXES):
+            return PLATFORM_INTERNAL_TENANT_ID, "platform"
+
+        payload_tenant = payload.get("tenant_id") if isinstance(payload, dict) else None
+        candidates = {
+            payload_tenant.strip()
+            for payload_tenant in [payload_tenant]
+            if isinstance(payload_tenant, str) and payload_tenant.strip()
+        }
+
+        if aggregate_type in COMPOSITE_TENANT_AUDIT_AGGREGATE_TYPES:
+            tenant_prefix, separator, _ = aggregate_id.partition(":")
+            if separator and tenant_prefix:
+                candidates.add(tenant_prefix)
+        elif aggregate_type == "decision_webhook":
+            stored = self.session.scalar(
+                select(DecisionJobRecord.tenant_id)
+                .join(DecisionWebhookDeliveryRecord, DecisionWebhookDeliveryRecord.job_id == DecisionJobRecord.id)
+                .where(DecisionWebhookDeliveryRecord.id == aggregate_id)
+            )
+            if stored:
+                candidates.add(stored)
+        elif aggregate_type not in DYNAMIC_TENANT_AUDIT_AGGREGATE_TYPES:
+            raise AuditTenantResolutionError(
+                f"审计聚合类型 {aggregate_type!r} 尚未声明租户归属策略"
+            )
+
+        if not candidates:
+            if aggregate_type in DYNAMIC_TENANT_AUDIT_AGGREGATE_TYPES:
+                if aggregate_type == "sla_scan" and payload.get("trigger_type") == "manual":
+                    raise AuditTenantResolutionError(
+                        f"人工 SLA 审计事件 {aggregate_id} 缺少明确租户归属"
+                    )
+                return PLATFORM_INTERNAL_TENANT_ID, "platform"
+            raise AuditTenantResolutionError(
+                f"无法确定审计事件 {aggregate_type}:{aggregate_id} 的租户归属"
+            )
+        if len(candidates) != 1:
+            raise AuditTenantResolutionError(
+                f"审计事件 {aggregate_type}:{aggregate_id} 存在冲突租户归属: {sorted(candidates)}"
+            )
+        tenant_id = candidates.pop()
+        return (
+            (tenant_id, "platform")
+            if tenant_id == PLATFORM_INTERNAL_TENANT_ID
+            else (tenant_id, "tenant")
+        )
 
 
 class ApprovalCaseRepository:
@@ -1527,13 +1910,21 @@ class ApprovalCaseRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def save(self, case: dict, actor: str = "system", event_type: str = "approval_case_updated", expected_row_version: int | None = None, audit_payload: dict | None = None, commit: bool = True, release_assignment: bool = False) -> dict:
-        record = self.session.get(ApprovalCaseRecord, case["case_id"])
+    def save(self, tenant_id: str, case: dict, actor: str = "system", event_type: str = "approval_case_updated", expected_row_version: int | None = None, audit_payload: dict | None = None, commit: bool = True, release_assignment: bool = False) -> dict:
+        record = self.session.scalars(
+            select(ApprovalCaseRecord).where(
+                ApprovalCaseRecord.tenant_id == tenant_id,
+                ApprovalCaseRecord.case_id == case["case_id"],
+            )
+        ).first()
         previous_stage = record.current_stage if record else None
         previous_status = record.status if record else None
         if record is None:
+            if case.get("tenant_id") not in {None, tenant_id}:
+                raise ValueError("审批申请租户与当前租户不一致")
             record = ApprovalCaseRecord(
                 case_id=case["case_id"],
+                tenant_id=tenant_id,
                 counterparty_id=case["counterparty_id"],
                 counterparty_name=case["counterparty_name"],
                 application_type=case.get("application_type", "new_credit"),
@@ -1542,8 +1933,11 @@ class ApprovalCaseRepository:
                 status=case["status"],
             )
             self.session.add(record)
-        elif expected_row_version is not None and record.row_version != expected_row_version:
-            raise ConcurrentUpdateError(f"审批记录版本已变化，当前版本为 {record.row_version}")
+        else:
+            if case.get("tenant_id", tenant_id) != tenant_id or case["counterparty_id"] != record.counterparty_id:
+                raise ValueError("审批申请不允许迁移租户或变更客商主体")
+            if expected_row_version is not None and record.row_version != expected_row_version:
+                raise ConcurrentUpdateError(f"审批记录版本已变化，当前版本为 {record.row_version}")
         try:
             record.current_stage = case["current_stage"]
             record.status = case["status"]
@@ -1565,7 +1959,13 @@ class ApprovalCaseRepository:
                 record.stage_started_at = now
                 record.stage_due_at = now + timedelta(hours=STAGE_SLA_HOURS.get(case["current_stage"], 24))
             self.session.flush()
-            event_payload = {"stage": case["current_stage"], "status": case["status"], "row_version": record.row_version}
+            event_payload = {
+                "tenant_id": record.tenant_id,
+                "counterparty_id": record.counterparty_id,
+                "stage": case["current_stage"],
+                "status": case["status"],
+                "row_version": record.row_version,
+            }
             event_payload.update(deepcopy(audit_payload or {}))
             self.audit.append("approval_case", case["case_id"], event_type, actor, event_payload)
             if commit:
@@ -1577,21 +1977,33 @@ class ApprovalCaseRepository:
             self.session.refresh(record)
         return _case_to_dict(record)
 
-    def get(self, case_id: str) -> dict | None:
-        record = self.session.get(ApprovalCaseRecord, case_id)
+    def get(self, tenant_id: str, case_id: str) -> dict | None:
+        record = self.session.scalars(
+            select(ApprovalCaseRecord).where(
+                ApprovalCaseRecord.tenant_id == tenant_id,
+                ApprovalCaseRecord.case_id == case_id,
+            )
+        ).first()
         return _case_to_dict(record) if record else None
 
-    def list(self, counterparty_id: str | None = None) -> list[dict]:
-        statement = select(ApprovalCaseRecord).order_by(ApprovalCaseRecord.created_at.desc())
+    def list(self, tenant_id: str, counterparty_id: str | None = None) -> list[dict]:
+        statement = (
+            select(ApprovalCaseRecord)
+            .where(ApprovalCaseRecord.tenant_id == tenant_id)
+            .order_by(ApprovalCaseRecord.created_at.desc())
+        )
         if counterparty_id:
             statement = statement.where(ApprovalCaseRecord.counterparty_id == counterparty_id)
         rows = self.session.scalars(statement).all()
         return [_case_to_dict(row) for row in rows]
 
-    def latest_renewal(self, source_facility_id: str, active_only: bool = False) -> dict | None:
+    def latest_renewal(self, tenant_id: str, source_facility_id: str, active_only: bool = False) -> dict | None:
         statement = (
             select(ApprovalCaseRecord)
-            .where(ApprovalCaseRecord.source_facility_id == source_facility_id)
+            .where(
+                ApprovalCaseRecord.tenant_id == tenant_id,
+                ApprovalCaseRecord.source_facility_id == source_facility_id,
+            )
             .order_by(ApprovalCaseRecord.created_at.desc(), ApprovalCaseRecord.case_id.desc())
         )
         if active_only:
@@ -1605,13 +2017,19 @@ class DecisionGovernanceRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def record(self, case: dict, variance: dict, actor: str) -> dict:
-        existing = self.session.scalars(select(DecisionVarianceRecord).where(DecisionVarianceRecord.case_id == case["case_id"])).first()
+    def record(self, tenant_id: str, case: dict, variance: dict, actor: str) -> dict:
+        if case.get("tenant_id") != tenant_id:
+            raise ValueError("审批申请与当前租户不一致")
+        existing = self.session.scalars(select(DecisionVarianceRecord).where(
+            DecisionVarianceRecord.tenant_id == tenant_id,
+            DecisionVarianceRecord.case_id == case["case_id"],
+        )).first()
         if existing:
             return _decision_variance_to_dict(existing)
         scoring = case.get("data", {}).get("scoring", {})
         record = DecisionVarianceRecord(
             id=str(uuid4()),
+            tenant_id=tenant_id,
             case_id=case["case_id"],
             counterparty_id=case["counterparty_id"],
             counterparty_name=case["counterparty_name"],
@@ -1640,6 +2058,7 @@ class DecisionGovernanceRepository:
             "decision_variance_recorded",
             actor,
             {
+                "tenant_id": tenant_id,
                 "variance_id": record.id,
                 "direction": record.direction,
                 "materiality": record.materiality,
@@ -1649,8 +2068,10 @@ class DecisionGovernanceRepository:
         )
         return _decision_variance_to_dict(record)
 
-    def list(self, case_id: str | None = None, direction: str | None = None, materiality: str | None = None) -> list[dict]:
-        statement = select(DecisionVarianceRecord).order_by(DecisionVarianceRecord.decided_at.desc(), DecisionVarianceRecord.id.desc())
+    def list(self, tenant_id: str, case_id: str | None = None, direction: str | None = None, materiality: str | None = None) -> list[dict]:
+        statement = select(DecisionVarianceRecord).where(
+            DecisionVarianceRecord.tenant_id == tenant_id,
+        ).order_by(DecisionVarianceRecord.decided_at.desc(), DecisionVarianceRecord.id.desc())
         if case_id:
             statement = statement.where(DecisionVarianceRecord.case_id == case_id)
         if direction:
@@ -1659,8 +2080,8 @@ class DecisionGovernanceRepository:
             statement = statement.where(DecisionVarianceRecord.materiality == materiality)
         return [_decision_variance_to_dict(record) for record in self.session.scalars(statement).all()]
 
-    def summary(self) -> dict:
-        rows = self.list()
+    def summary(self, tenant_id: str) -> dict:
+        rows = self.list(tenant_id)
         adjusted = [item for item in rows if item["direction"] != "aligned"]
         limit_reductions = [abs(float(item["deltas"]["limit_ratio"])) for item in rows if float(item["deltas"]["limit_amount"]) < 0]
         directions = {key: sum(item["direction"] == key for item in rows) for key in ["aligned", "stricter", "relaxed", "mixed", "rejected"]}
@@ -1681,7 +2102,18 @@ class RatingRunRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def save_run(self, counterparty: dict, template_key: str, config: dict, result: dict, actor: str = "rating-agent", case_id: str | None = None, commit: bool = True) -> dict:
+    def save_run(
+        self,
+        tenant_id: str,
+        counterparty: dict,
+        template_key: str,
+        config: dict,
+        result: dict,
+        actor: str = "rating-agent",
+        case_id: str | None = None,
+        commit: bool = True,
+        asset_snapshot: dict | None = None,
+    ) -> dict:
         config = _materialize_model_runtime_defaults(config)
         config_hash = content_hash(config)
         snapshot = self.session.scalars(
@@ -1695,8 +2127,22 @@ class RatingRunRepository:
             snapshot = ModelSnapshotRecord(id=str(uuid4()), template_key=template_key, model_name=config["name"], model_version=config["version"], config_json=deepcopy(config), config_hash=config_hash)
             self.session.add(snapshot)
             self.session.flush()
+        frozen_assets = deepcopy(asset_snapshot) if asset_snapshot else {
+            "schema_version": "tenant-runtime-assets-v1",
+            "capture_status": "legacy_direct_repository_call",
+            "model": {
+                "asset_type": "model", "key": template_key, "version": config["version"],
+                "asset_id": snapshot.id, "config_hash": config_hash,
+                "source_scope": "legacy_model_snapshot",
+            },
+            "scorecard": None, "pipeline": None, "rule_sets": [], "rules": [],
+            "degraded_reason": "runtime_resolver_not_supplied",
+        }
+        frozen_assets.setdefault("schema_version", "tenant-runtime-assets-v1")
+        assets_hash = content_hash(frozen_assets)
         run = RatingRunRecord(
             id=str(uuid4()),
+            tenant_id=tenant_id,
             counterparty_id=counterparty["id"],
             case_id=case_id,
             template_key=template_key,
@@ -1705,11 +2151,14 @@ class RatingRunRepository:
             input_hash=content_hash(counterparty),
             result_json=deepcopy(result),
             result_hash=content_hash(result),
+            asset_snapshot_json=frozen_assets,
+            assets_hash=assets_hash,
         )
         self.session.add(run)
         self.audit.append("rating_run", run.id, "rating_completed", actor, {
-            "counterparty_id": counterparty["id"], "case_id": case_id, "model_snapshot_id": snapshot.id,
-            "input_hash": run.input_hash, "result_hash": run.result_hash,
+            "tenant_id": tenant_id, "counterparty_id": counterparty["id"], "case_id": case_id, "model_snapshot_id": snapshot.id,
+            "input_hash": run.input_hash, "result_hash": run.result_hash, "assets_hash": assets_hash,
+            "asset_resolution_hash": frozen_assets.get("resolution_hash"),
             "data_snapshot_hash": counterparty.get("_data_governance", {}).get("data_snapshot_hash"),
             "mapping_snapshot_hash": counterparty.get("_data_governance", {}).get("mapping_snapshot_hash"),
         })
@@ -1719,12 +2168,17 @@ class RatingRunRepository:
             self.session.refresh(run)
         return _rating_run_to_dict(run)
 
-    def get(self, run_id: str) -> dict | None:
-        record = self.session.get(RatingRunRecord, run_id)
+    def get(self, tenant_id: str, run_id: str) -> dict | None:
+        record = self.session.scalars(select(RatingRunRecord).where(
+            RatingRunRecord.tenant_id == tenant_id,
+            RatingRunRecord.id == run_id,
+        )).first()
         return _rating_run_to_dict(record) if record else None
 
-    def list(self, counterparty_id: str | None = None) -> list[dict]:
-        statement = select(RatingRunRecord).order_by(RatingRunRecord.created_at.desc())
+    def list(self, tenant_id: str, counterparty_id: str | None = None) -> list[dict]:
+        statement = select(RatingRunRecord).where(
+            RatingRunRecord.tenant_id == tenant_id,
+        ).order_by(RatingRunRecord.created_at.desc())
         if counterparty_id:
             statement = statement.where(RatingRunRecord.counterparty_id == counterparty_id)
         return [_rating_run_to_dict(row) for row in self.session.scalars(statement).all()]
@@ -1735,30 +2189,39 @@ class PortfolioRatingBatchRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def list(self, template_key: str | None = None, limit: int = 20) -> list[dict]:
-        statement = select(PortfolioRatingBatchRecord).order_by(PortfolioRatingBatchRecord.created_at.desc())
+    def list(self, tenant_id: str, template_key: str | None = None, limit: int = 20) -> list[dict]:
+        statement = select(PortfolioRatingBatchRecord).where(
+            PortfolioRatingBatchRecord.tenant_id == tenant_id,
+        ).order_by(PortfolioRatingBatchRecord.created_at.desc())
         if template_key:
             statement = statement.where(PortfolioRatingBatchRecord.template_key == template_key)
         return [_portfolio_rating_batch_to_dict(item) for item in self.session.scalars(statement.limit(limit)).all()]
 
-    def get(self, batch_id: str) -> dict | None:
-        record = self.session.get(PortfolioRatingBatchRecord, batch_id)
+    def get(self, tenant_id: str, batch_id: str) -> dict | None:
+        record = self.session.scalars(select(PortfolioRatingBatchRecord).where(
+            PortfolioRatingBatchRecord.tenant_id == tenant_id,
+            PortfolioRatingBatchRecord.id == batch_id,
+        )).first()
         return _portfolio_rating_batch_to_dict(record) if record else None
 
-    def get_by_key(self, batch_key: str) -> dict | None:
+    def get_by_key(self, tenant_id: str, batch_key: str) -> dict | None:
         record = self.session.scalars(
-            select(PortfolioRatingBatchRecord).where(PortfolioRatingBatchRecord.batch_key == batch_key)
+            select(PortfolioRatingBatchRecord).where(
+                PortfolioRatingBatchRecord.tenant_id == tenant_id,
+                PortfolioRatingBatchRecord.batch_key == batch_key,
+            )
         ).first()
         return _portfolio_rating_batch_to_dict(record) if record else None
 
-    def create(self, payload: dict, actor: str, actor_name: str) -> dict:
-        existing = self.get_by_key(payload["batch_key"])
+    def create(self, tenant_id: str, payload: dict, actor: str, actor_name: str) -> dict:
+        existing = self.get_by_key(tenant_id, payload["batch_key"])
         if existing:
             if existing["request_hash"] != payload["request_hash"]:
                 raise ValueError("批次编号已存在，但模型、范围或输入快照已变化")
             return {**existing, "idempotent": True}
         record = PortfolioRatingBatchRecord(
             id=str(uuid4()),
+            tenant_id=tenant_id,
             batch_key=payload["batch_key"],
             request_hash=payload["request_hash"],
             template_key=payload["template_key"],
@@ -1773,6 +2236,8 @@ class PortfolioRatingBatchRepository:
             results_json=deepcopy(payload["results"]),
             skipped_json=deepcopy(payload["skipped"]),
             result_hash=payload["result_hash"],
+            asset_snapshot_json=deepcopy(payload["asset_snapshot"]),
+            assets_hash=payload["assets_hash"],
             created_by=actor,
             created_by_name=actor_name,
         )
@@ -1780,6 +2245,7 @@ class PortfolioRatingBatchRepository:
         try:
             self.session.flush()
             self.audit.append("portfolio_rating_batch", record.id, "portfolio_rating_completed", actor, {
+                "tenant_id": tenant_id,
                 "batch_key": record.batch_key,
                 "template_key": record.template_key,
                 "model_version": record.model_version,
@@ -1789,6 +2255,8 @@ class PortfolioRatingBatchRepository:
                 "skipped_count": record.skipped_count,
                 "request_hash": record.request_hash,
                 "result_hash": record.result_hash,
+                "assets_hash": record.assets_hash,
+                "asset_resolution_hash": record.asset_snapshot_json.get("resolution_hash"),
             })
             self.session.commit()
         except IntegrityError as exc:
@@ -1806,34 +2274,47 @@ class CreditReportRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def list(self, case_id: str | None = None, counterparty_id: str | None = None) -> list[dict]:
-        statement = select(CreditReportRecord).order_by(CreditReportRecord.created_at.desc(), CreditReportRecord.report_version.desc())
+    def list(self, tenant_id: str, case_id: str | None = None, counterparty_id: str | None = None) -> list[dict]:
+        statement = select(CreditReportRecord).where(
+            CreditReportRecord.tenant_id == tenant_id,
+        ).order_by(CreditReportRecord.created_at.desc(), CreditReportRecord.report_version.desc())
         if case_id:
             statement = statement.where(CreditReportRecord.case_id == case_id)
         if counterparty_id:
             statement = statement.where(CreditReportRecord.counterparty_id == counterparty_id)
         return [_credit_report_to_dict(record) for record in self.session.scalars(statement).all()]
 
-    def get(self, report_id: str) -> dict | None:
-        record = self.session.get(CreditReportRecord, report_id)
+    def get(self, tenant_id: str, report_id: str) -> dict | None:
+        record = self.session.scalars(select(CreditReportRecord).where(
+            CreditReportRecord.tenant_id == tenant_id,
+            CreditReportRecord.id == report_id,
+        )).first()
         return _credit_report_to_dict(record) if record else None
 
-    def get_by_case_snapshot(self, case_id: str, snapshot_hash: str) -> dict | None:
+    def get_by_case_snapshot(self, tenant_id: str, case_id: str, snapshot_hash: str) -> dict | None:
         record = self.session.scalars(
-            select(CreditReportRecord).where(CreditReportRecord.case_id == case_id, CreditReportRecord.snapshot_hash == snapshot_hash)
+            select(CreditReportRecord).where(
+                CreditReportRecord.tenant_id == tenant_id,
+                CreditReportRecord.case_id == case_id,
+                CreditReportRecord.snapshot_hash == snapshot_hash,
+            )
         ).first()
         return _credit_report_to_dict(record) if record else None
 
-    def next_version(self, case_id: str) -> int:
-        rows = self.session.scalars(select(CreditReportRecord.report_version).where(CreditReportRecord.case_id == case_id)).all()
+    def next_version(self, tenant_id: str, case_id: str) -> int:
+        rows = self.session.scalars(select(CreditReportRecord.report_version).where(
+            CreditReportRecord.tenant_id == tenant_id,
+            CreditReportRecord.case_id == case_id,
+        )).all()
         return max(rows, default=0) + 1
 
-    def create(self, metadata: dict, actor: str) -> tuple[dict, bool]:
-        record = CreditReportRecord(**metadata, created_by=actor)
+    def create(self, tenant_id: str, metadata: dict, actor: str) -> tuple[dict, bool]:
+        record = CreditReportRecord(tenant_id=tenant_id, **metadata, created_by=actor)
         self.session.add(record)
         try:
             self.session.flush()
             event_payload = {
+                "tenant_id": tenant_id,
                 "report_no": record.report_no,
                 "case_id": record.case_id,
                 "counterparty_id": record.counterparty_id,
@@ -1849,6 +2330,7 @@ class CreditReportRepository:
             self.session.rollback()
             existing = self.session.scalars(
                 select(CreditReportRecord).where(
+                    CreditReportRecord.tenant_id == tenant_id,
                     CreditReportRecord.case_id == metadata["case_id"],
                     CreditReportRecord.snapshot_hash == metadata["snapshot_hash"],
                 )
@@ -1865,12 +2347,15 @@ class DocumentRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def create(self, metadata: dict, actor: str, correction_id: str | None = None, assignment_subject: str | None = None) -> dict:
+    def create(self, tenant_id: str, metadata: dict, actor: str, correction_id: str | None = None, assignment_subject: str | None = None) -> dict:
         metadata.setdefault("created_at", datetime.now(timezone.utc))
-        record = DocumentRecord(**metadata)
+        record = DocumentRecord(tenant_id=tenant_id, **metadata)
         correction = None
         if correction_id:
-            correction = self.session.get(DocumentCorrectionRecord, correction_id)
+            correction = self.session.scalars(select(DocumentCorrectionRecord).where(
+                DocumentCorrectionRecord.tenant_id == tenant_id,
+                DocumentCorrectionRecord.id == correction_id,
+            )).first()
             if not correction:
                 raise LookupError("补件任务不存在")
             if correction.status != "open":
@@ -1885,7 +2370,7 @@ class DocumentRepository:
             record.id,
             "document_uploaded",
             actor,
-            {"counterparty_id": record.counterparty_id, "case_id": record.case_id, "document_type": record.document_type, "sha256": record.sha256, "size_bytes": record.size_bytes},
+            {"tenant_id": tenant_id, "counterparty_id": record.counterparty_id, "case_id": record.case_id, "document_type": record.document_type, "sha256": record.sha256, "size_bytes": record.size_bytes},
         )
         if correction:
             self.session.flush()
@@ -1930,25 +2415,31 @@ class DocumentRepository:
         self.session.refresh(record)
         return _document_to_dict(record)
 
-    def get(self, document_id: str) -> dict | None:
-        record = self.session.get(DocumentRecord, document_id)
+    def get(self, tenant_id: str, document_id: str) -> dict | None:
+        record = self.session.scalars(select(DocumentRecord).where(
+            DocumentRecord.tenant_id == tenant_id,
+            DocumentRecord.id == document_id,
+        )).first()
         return _document_to_dict(record) if record else None
 
-    def list(self, counterparty_id: str | None = None, case_id: str | None = None) -> list[dict]:
-        statement = select(DocumentRecord).order_by(DocumentRecord.created_at.desc())
+    def list(self, tenant_id: str, counterparty_id: str | None = None, case_id: str | None = None) -> list[dict]:
+        statement = select(DocumentRecord).where(
+            DocumentRecord.tenant_id == tenant_id,
+        ).order_by(DocumentRecord.created_at.desc())
         if counterparty_id:
             statement = statement.where(DocumentRecord.counterparty_id == counterparty_id)
         if case_id:
             statement = statement.where(DocumentRecord.case_id == case_id)
         return [_document_to_dict(row) for row in self.session.scalars(statement).all()]
 
-    def carry_over(self, metadata_rows: list[dict], actor_name: str) -> dict:
+    def carry_over(self, tenant_id: str, metadata_rows: list[dict], actor_name: str) -> dict:
         if not metadata_rows:
             return {"documents": [], "created_ids": [], "idempotent": True}
         case_id = metadata_rows[0]["case_id"]
         source_ids = [row["source_document_id"] for row in metadata_rows]
         existing_rows = self.session.scalars(
             select(DocumentRecord).where(
+                DocumentRecord.tenant_id == tenant_id,
                 DocumentRecord.case_id == case_id,
                 DocumentRecord.source_document_id.in_(source_ids),
             )
@@ -1963,14 +2454,17 @@ class DocumentRepository:
                     continue
                 metadata = deepcopy(input_row)
                 source_row_version = metadata.pop("source_row_version")
-                source = self.session.get(DocumentRecord, source_id)
+                source = self.session.scalars(select(DocumentRecord).where(
+                    DocumentRecord.tenant_id == tenant_id,
+                    DocumentRecord.id == source_id,
+                )).first()
                 if not source:
                     raise LookupError("待承接的来源资料不存在")
                 if source.row_version != source_row_version or source.review_status != "verified":
                     raise ConcurrentUpdateError(f"{source.document_type} 的核验状态已变化，请刷新后重试")
                 if source.counterparty_id != metadata["counterparty_id"]:
                     raise ValueError("来源资料与续授信企业不一致")
-                record = DocumentRecord(**metadata)
+                record = DocumentRecord(tenant_id=tenant_id, **metadata)
                 self.session.add(record)
                 self.session.flush()
                 created_ids.append(record.id)
@@ -1982,6 +2476,7 @@ class DocumentRepository:
                     actor_name,
                     {
                         "case_id": record.case_id,
+                        "tenant_id": tenant_id,
                         "source_document_id": source.id,
                         "source_case_id": source.case_id,
                         "document_type": record.document_type,
@@ -1993,13 +2488,14 @@ class DocumentRepository:
                     source.id,
                     "document_reused_for_renewal",
                     actor_name,
-                    {"target_document_id": record.id, "target_case_id": record.case_id},
+                    {"tenant_id": tenant_id, "target_document_id": record.id, "target_case_id": record.case_id},
                 )
             self.session.commit()
         except (IntegrityError, StaleDataError) as exc:
             self.session.rollback()
             raced = self.session.scalars(
                 select(DocumentRecord).where(
+                    DocumentRecord.tenant_id == tenant_id,
                     DocumentRecord.case_id == case_id,
                     DocumentRecord.source_document_id.in_(source_ids),
                 )
@@ -2013,20 +2509,27 @@ class DocumentRepository:
             "idempotent": not created_ids,
         }
 
-    def get_correction(self, correction_id: str) -> dict | None:
-        record = self.session.get(DocumentCorrectionRecord, correction_id)
+    def get_correction(self, tenant_id: str, correction_id: str) -> dict | None:
+        record = self.session.scalars(select(DocumentCorrectionRecord).where(
+            DocumentCorrectionRecord.tenant_id == tenant_id,
+            DocumentCorrectionRecord.id == correction_id,
+        )).first()
         return _document_correction_to_dict(record) if record else None
 
-    def list_corrections(self, counterparty_id: str | None = None, case_id: str | None = None) -> list[dict]:
-        statement = select(DocumentCorrectionRecord).order_by(DocumentCorrectionRecord.created_at.desc())
+    def list_corrections(self, tenant_id: str, counterparty_id: str | None = None, case_id: str | None = None) -> list[dict]:
+        statement = select(DocumentCorrectionRecord).where(
+            DocumentCorrectionRecord.tenant_id == tenant_id,
+        ).order_by(DocumentCorrectionRecord.created_at.desc())
         if counterparty_id:
             statement = statement.where(DocumentCorrectionRecord.counterparty_id == counterparty_id)
         if case_id:
             statement = statement.where(DocumentCorrectionRecord.case_id == case_id)
         return [_document_correction_to_dict(row) for row in self.session.scalars(statement).all()]
 
-    def list_correction_workbench(self, active_only: bool = True) -> list[dict]:
-        statement = select(DocumentCorrectionRecord).order_by(
+    def list_correction_workbench(self, tenant_id: str, active_only: bool = True) -> list[dict]:
+        statement = select(DocumentCorrectionRecord).where(
+            DocumentCorrectionRecord.tenant_id == tenant_id,
+        ).order_by(
             DocumentCorrectionRecord.sla_due_at.asc(),
             DocumentCorrectionRecord.created_at.desc(),
         )
@@ -2038,12 +2541,16 @@ class DocumentRepository:
         case_ids = {record.case_id for record in records if record.case_id}
         case_names = {
             row.case_id: row.counterparty_name
-            for row in self.session.scalars(select(ApprovalCaseRecord).where(ApprovalCaseRecord.case_id.in_(case_ids))).all()
+            for row in self.session.scalars(select(ApprovalCaseRecord).where(
+                ApprovalCaseRecord.tenant_id == tenant_id,
+                ApprovalCaseRecord.case_id.in_(case_ids),
+            )).all()
         } if case_ids else {}
         record_ids = [record.id for record in records]
         action_events = self.session.scalars(
             select(AuditEventRecord)
             .where(
+                AuditEventRecord.tenant_id == tenant_id,
                 AuditEventRecord.aggregate_type == "document_correction",
                 AuditEventRecord.aggregate_id.in_(record_ids),
             )
@@ -2092,6 +2599,7 @@ class DocumentRepository:
         notifications = NotificationRepository(self.session)
         for role in sorted(roles):
             notifications.create_if_absent(
+                correction.tenant_id,
                 {
                     "case_id": correction.case_id,
                     "counterparty_id": correction.counterparty_id,
@@ -2114,6 +2622,7 @@ class DocumentRepository:
 
     def act_on_correction(
         self,
+        tenant_id: str,
         correction_id: str,
         expected_row_version: int,
         action: str,
@@ -2122,7 +2631,10 @@ class DocumentRepository:
         assigned_role: str | None = None,
         extension_hours: int | None = None,
     ) -> dict:
-        record = self.session.get(DocumentCorrectionRecord, correction_id)
+        record = self.session.scalars(select(DocumentCorrectionRecord).where(
+            DocumentCorrectionRecord.tenant_id == tenant_id,
+            DocumentCorrectionRecord.id == correction_id,
+        )).first()
         if not record:
             raise LookupError("补件任务不存在")
         if record.status not in {"open", "resubmitted"}:
@@ -2224,6 +2736,7 @@ class DocumentRepository:
                 notifications = NotificationRepository(self.session)
                 for role in sorted(notification_roles):
                     notifications.create_if_absent(
+                        record.tenant_id,
                         {
                             "case_id": record.case_id,
                             "counterparty_id": record.counterparty_id,
@@ -2252,12 +2765,16 @@ class DocumentRepository:
 
     def link_case(
         self,
+        tenant_id: str,
         document_id: str,
         case_id: str,
         expected_row_version: int,
         actor_name: str,
     ) -> dict:
-        record = self.session.get(DocumentRecord, document_id)
+        record = self.session.scalars(select(DocumentRecord).where(
+            DocumentRecord.tenant_id == tenant_id,
+            DocumentRecord.id == document_id,
+        )).first()
         if not record:
             raise LookupError("资料不存在")
         if record.row_version != expected_row_version:
@@ -2274,7 +2791,7 @@ class DocumentRepository:
                 record.id,
                 "document_linked_to_case",
                 actor_name,
-                {"case_id": case_id, "counterparty_id": record.counterparty_id},
+                {"tenant_id": tenant_id, "case_id": case_id, "counterparty_id": record.counterparty_id},
             )
             self.session.commit()
         except StaleDataError as exc:
@@ -2285,6 +2802,7 @@ class DocumentRepository:
 
     def review(
         self,
+        tenant_id: str,
         document_id: str,
         expected_row_version: int,
         decision: str,
@@ -2293,7 +2811,10 @@ class DocumentRepository:
         actor_subject: str,
         actor_name: str,
     ) -> dict:
-        record = self.session.get(DocumentRecord, document_id)
+        record = self.session.scalars(select(DocumentRecord).where(
+            DocumentRecord.tenant_id == tenant_id,
+            DocumentRecord.id == document_id,
+        )).first()
         if not record:
             raise LookupError("资料不存在")
         if record.row_version != expected_row_version:
@@ -2304,6 +2825,7 @@ class DocumentRepository:
             raise PermissionError("资料上传人与检查人必须分离")
         active_correction = self.session.scalars(
             select(DocumentCorrectionRecord).where(
+                DocumentCorrectionRecord.tenant_id == tenant_id,
                 DocumentCorrectionRecord.current_document_id == document_id,
                 DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
             ).order_by(DocumentCorrectionRecord.created_at.desc())
@@ -2336,6 +2858,7 @@ class DocumentRepository:
                 "document_reviewed",
                 actor_name,
                 {
+                    "tenant_id": tenant_id,
                     "decision": decision,
                     "review_status": record.review_status,
                     "checks": checks,
@@ -2360,6 +2883,7 @@ class DocumentRepository:
     ) -> None:
         correction = self.session.scalars(
             select(DocumentCorrectionRecord).where(
+                DocumentCorrectionRecord.tenant_id == document.tenant_id,
                 DocumentCorrectionRecord.current_document_id == document.id,
                 DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
             ).order_by(DocumentCorrectionRecord.created_at.desc())
@@ -2371,6 +2895,7 @@ class DocumentRepository:
             if not correction:
                 correction = DocumentCorrectionRecord(
                     id=str(uuid4()),
+                    tenant_id=document.tenant_id,
                     counterparty_id=document.counterparty_id,
                     case_id=document.case_id,
                     document_type=document.document_type,
@@ -2514,7 +3039,10 @@ class DocumentRepository:
     ) -> None:
         if not correction.case_id:
             return
-        case = self.session.get(ApprovalCaseRecord, correction.case_id)
+        case = self.session.scalars(select(ApprovalCaseRecord).where(
+            ApprovalCaseRecord.tenant_id == correction.tenant_id,
+            ApprovalCaseRecord.case_id == correction.case_id,
+        )).first()
         if not case or case.status in {"已完成", "已拒绝", "已撤回"}:
             return
         case.status = "待补件"
@@ -2524,6 +3052,7 @@ class DocumentRepository:
         workflow = data.setdefault("_workflow", {})
         correction_ids = self.session.scalars(
             select(DocumentCorrectionRecord.id).where(
+                DocumentCorrectionRecord.tenant_id == correction.tenant_id,
                 DocumentCorrectionRecord.case_id == correction.case_id,
                 DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
             ).order_by(DocumentCorrectionRecord.created_at, DocumentCorrectionRecord.id)
@@ -2564,11 +3093,15 @@ class DocumentRepository:
     ) -> ApprovalCaseRecord | None:
         if not correction.case_id:
             return None
-        case = self.session.get(ApprovalCaseRecord, correction.case_id)
+        case = self.session.scalars(select(ApprovalCaseRecord).where(
+            ApprovalCaseRecord.tenant_id == correction.tenant_id,
+            ApprovalCaseRecord.case_id == correction.case_id,
+        )).first()
         if not case or case.status != "待补件":
             return None
         remaining = self.session.scalars(
             select(DocumentCorrectionRecord.id).where(
+                DocumentCorrectionRecord.tenant_id == correction.tenant_id,
                 DocumentCorrectionRecord.case_id == correction.case_id,
                 DocumentCorrectionRecord.status.in_(["open", "resubmitted"]),
             ).order_by(DocumentCorrectionRecord.created_at, DocumentCorrectionRecord.id)
@@ -2618,24 +3151,32 @@ class NotificationRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def create_if_absent(self, payload: dict) -> tuple[dict, bool]:
-        existing = self.session.scalars(select(NotificationRecord).where(NotificationRecord.dedup_key == payload["dedup_key"])).first()
+    def create_if_absent(self, tenant_id: str, payload: dict) -> tuple[dict, bool]:
+        existing = self.session.scalars(select(NotificationRecord).where(
+            NotificationRecord.tenant_id == tenant_id,
+            NotificationRecord.dedup_key == payload["dedup_key"],
+        )).first()
         if existing:
             return _notification_to_dict(existing), False
-        record = NotificationRecord(id=str(uuid4()), **payload)
+        record = NotificationRecord(id=str(uuid4()), tenant_id=tenant_id, **payload)
         try:
             with self.session.begin_nested():
                 self.session.add(record)
                 self.session.flush()
         except IntegrityError:
-            existing = self.session.scalars(select(NotificationRecord).where(NotificationRecord.dedup_key == payload["dedup_key"])).first()
+            existing = self.session.scalars(select(NotificationRecord).where(
+                NotificationRecord.tenant_id == tenant_id,
+                NotificationRecord.dedup_key == payload["dedup_key"],
+            )).first()
             if not existing:
                 raise
             return _notification_to_dict(existing), False
         return _notification_to_dict(record), True
 
-    def list(self, recipient_roles: tuple[str, ...] | None = None, recipient_subject: str | None = None, status: str | None = None, counterparty_id: str | None = None, limit: int = 100) -> list[dict]:
-        statement = select(NotificationRecord).order_by(NotificationRecord.created_at.desc(), NotificationRecord.id.desc()).limit(limit)
+    def list(self, tenant_id: str, recipient_roles: tuple[str, ...] | None = None, recipient_subject: str | None = None, status: str | None = None, counterparty_id: str | None = None, limit: int = 100) -> list[dict]:
+        statement = select(NotificationRecord).where(
+            NotificationRecord.tenant_id == tenant_id
+        ).order_by(NotificationRecord.created_at.desc(), NotificationRecord.id.desc()).limit(limit)
         if recipient_roles is not None:
             broadcast_scope = and_(
                 NotificationRecord.recipient_subject.is_(None),
@@ -2655,18 +3196,24 @@ class NotificationRepository:
             statement = statement.where(NotificationRecord.counterparty_id == counterparty_id)
         return [_notification_to_dict(row) for row in self.session.scalars(statement).all()]
 
-    def get(self, notification_id: str) -> dict | None:
-        record = self.session.get(NotificationRecord, notification_id)
+    def get(self, tenant_id: str, notification_id: str) -> dict | None:
+        record = self.session.scalars(select(NotificationRecord).where(
+            NotificationRecord.tenant_id == tenant_id,
+            NotificationRecord.id == notification_id,
+        )).first()
         return _notification_to_dict(record) if record else None
 
-    def mark_read(self, notification_id: str, actor: str) -> dict | None:
-        record = self.session.get(NotificationRecord, notification_id)
+    def mark_read(self, tenant_id: str, notification_id: str, actor: str) -> dict | None:
+        record = self.session.scalars(select(NotificationRecord).where(
+            NotificationRecord.tenant_id == tenant_id,
+            NotificationRecord.id == notification_id,
+        )).first()
         if not record:
             return None
         if record.status == "unread":
             record.status = "read"
             record.read_at = datetime.now(timezone.utc)
-            self.audit.append("notification", record.id, "notification_read", actor, {"case_id": record.case_id, "recipient_role": record.recipient_role})
+            self.audit.append("notification", record.id, "notification_read", actor, {"tenant_id": tenant_id, "case_id": record.case_id, "recipient_role": record.recipient_role})
             self.session.commit()
             self.session.refresh(record)
         return _notification_to_dict(record)
@@ -2694,11 +3241,18 @@ class CreditFacilityRepository:
     def rollback(self) -> None:
         self.session.rollback()
 
-    def create_from_completed_case(self, case: dict, actor: str) -> dict | None:
+    def create_from_completed_case(self, tenant_id: str, case: dict, actor: str) -> dict | None:
+        if case.get("tenant_id") != tenant_id:
+            raise ValueError("审批申请租户与当前租户不一致")
         strategy = case.get("data", {}).get("final_strategy", {})
         if strategy.get("decision") == "拒绝" or strategy.get("access_strategy") in {"禁入", "不建议准入"}:
             return None
-        existing = self.session.scalars(select(CreditFacilityRecord).where(CreditFacilityRecord.case_id == case["case_id"])).first()
+        existing = self.session.scalars(
+            select(CreditFacilityRecord).where(
+                CreditFacilityRecord.tenant_id == tenant_id,
+                CreditFacilityRecord.case_id == case["case_id"],
+            )
+        ).first()
         if existing:
             return self._with_control_summary(existing)
         proposal = case.get("data", {}).get("credit_proposal", {})
@@ -2714,7 +3268,12 @@ class CreditFacilityRepository:
         if validity_days < 30 or validity_days > 1825:
             raise ValueError("授信有效期必须介于 30 至 1825 天")
         source_facility_id = case.get("source_facility_id")
-        source_facility = self.session.get(CreditFacilityRecord, source_facility_id) if source_facility_id else None
+        source_facility = self.session.scalars(
+            select(CreditFacilityRecord).where(
+                CreditFacilityRecord.tenant_id == tenant_id,
+                CreditFacilityRecord.id == source_facility_id,
+            )
+        ).first() if source_facility_id else None
         opening_balance = Decimal("0.00")
         if source_facility_id:
             if not source_facility:
@@ -2730,6 +3289,7 @@ class CreditFacilityRepository:
         monitoring_frequency = str(strategy.get("monitoring_frequency", "月度"))
         record = CreditFacilityRecord(
             id=str(uuid4()),
+            tenant_id=tenant_id,
             case_id=case["case_id"],
             counterparty_id=case["counterparty_id"],
             counterparty_name=case["counterparty_name"],
@@ -2754,6 +3314,7 @@ class CreditFacilityRepository:
         for sequence, measure in enumerate(adopted_controls, start=1):
             condition = FacilityControlConditionRecord(
                 id=str(uuid4()),
+                tenant_id=tenant_id,
                 facility_id=record.id,
                 source_case_id=case["case_id"],
                 source_review_hash=str(risk_disposition.get("risk_review_hash") or ""),
@@ -2770,6 +3331,7 @@ class CreditFacilityRepository:
                 "facility_control_condition_created",
                 actor,
                 {
+                    "tenant_id": tenant_id,
                     "facility_id": record.id,
                     "source_case_id": case["case_id"],
                     "sequence": sequence,
@@ -2787,6 +3349,7 @@ class CreditFacilityRepository:
                 "credit_facility_superseded",
                 actor,
                 {
+                    "tenant_id": tenant_id,
                     "successor_facility_id": record.id,
                     "renewal_case_id": case["case_id"],
                     "transferred_balance": float(opening_balance),
@@ -2798,6 +3361,7 @@ class CreditFacilityRepository:
             "credit_facility_activated",
             actor,
             {
+                "tenant_id": tenant_id,
                 "case_id": record.case_id,
                 "approved_limit": float(approved_limit),
                 "payment_term_days": payment_term_days,
@@ -2810,8 +3374,12 @@ class CreditFacilityRepository:
         )
         return self._with_control_summary(record)
 
-    def list(self, counterparty_id: str | None = None) -> list[dict]:
-        statement = select(CreditFacilityRecord).order_by(CreditFacilityRecord.created_at.desc(), CreditFacilityRecord.id.desc())
+    def list(self, tenant_id: str, counterparty_id: str | None = None) -> list[dict]:
+        statement = (
+            select(CreditFacilityRecord)
+            .where(CreditFacilityRecord.tenant_id == tenant_id)
+            .order_by(CreditFacilityRecord.created_at.desc(), CreditFacilityRecord.id.desc())
+        )
         if counterparty_id:
             statement = statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
         records = list(self.session.scalars(statement).all())
@@ -2819,6 +3387,7 @@ class CreditFacilityRepository:
         if records:
             controls = self.session.scalars(
                 select(FacilityControlConditionRecord).where(
+                    FacilityControlConditionRecord.tenant_id == tenant_id,
                     FacilityControlConditionRecord.facility_id.in_(controls_by_facility)
                 )
             ).all()
@@ -2826,14 +3395,22 @@ class CreditFacilityRepository:
                 controls_by_facility[control.facility_id].append(control)
         return [self._with_control_summary(record, controls_by_facility[record.id]) for record in records]
 
-    def get(self, facility_id: str) -> dict | None:
-        record = self.session.get(CreditFacilityRecord, facility_id)
+    def get(self, tenant_id: str, facility_id: str) -> dict | None:
+        record = self.session.scalars(
+            select(CreditFacilityRecord).where(
+                CreditFacilityRecord.tenant_id == tenant_id,
+                CreditFacilityRecord.id == facility_id,
+            )
+        ).first()
         return self._with_control_summary(record) if record else None
 
-    def list_control_conditions(self, facility_id: str) -> list[dict]:
+    def list_control_conditions(self, tenant_id: str, facility_id: str) -> list[dict]:
         statement = (
             select(FacilityControlConditionRecord)
-            .where(FacilityControlConditionRecord.facility_id == facility_id)
+            .where(
+                FacilityControlConditionRecord.tenant_id == tenant_id,
+                FacilityControlConditionRecord.facility_id == facility_id,
+            )
             .order_by(FacilityControlConditionRecord.sequence, FacilityControlConditionRecord.created_at)
         )
         conditions = list(self.session.scalars(statement).all())
@@ -2841,7 +3418,10 @@ class CreditFacilityRepository:
         if conditions:
             extensions = self.session.scalars(
                 select(FacilityControlExtensionRecord)
-                .where(FacilityControlExtensionRecord.condition_id.in_(extensions_by_condition))
+                .where(
+                    FacilityControlExtensionRecord.tenant_id == tenant_id,
+                    FacilityControlExtensionRecord.condition_id.in_(extensions_by_condition),
+                )
                 .order_by(FacilityControlExtensionRecord.requested_at.desc(), FacilityControlExtensionRecord.id.desc())
             ).all()
             for extension in extensions:
@@ -2850,6 +3430,7 @@ class CreditFacilityRepository:
 
     def request_control_extension(
         self,
+        tenant_id: str,
         facility_id: str,
         condition_id: str,
         expected_condition_version: int,
@@ -2858,7 +3439,12 @@ class CreditFacilityRepository:
         actor_subject: str,
         actor_name: str,
     ) -> dict:
-        condition = self.session.get(FacilityControlConditionRecord, condition_id)
+        condition = self.session.scalars(
+            select(FacilityControlConditionRecord).where(
+                FacilityControlConditionRecord.tenant_id == tenant_id,
+                FacilityControlConditionRecord.id == condition_id,
+            )
+        ).first()
         if not condition or condition.facility_id != facility_id:
             raise LookupError("授信控制条件不存在")
         if condition.row_version != expected_condition_version:
@@ -2867,7 +3453,10 @@ class CreditFacilityRepository:
             raise ValueError("只有待落实的控制条件可以申请延期")
         history = list(
             self.session.scalars(
-                select(FacilityControlExtensionRecord).where(FacilityControlExtensionRecord.condition_id == condition_id)
+                select(FacilityControlExtensionRecord).where(
+                    FacilityControlExtensionRecord.tenant_id == tenant_id,
+                    FacilityControlExtensionRecord.condition_id == condition_id,
+                )
             ).all()
         )
         if any(item.status == "pending" for item in history):
@@ -2885,6 +3474,7 @@ class CreditFacilityRepository:
             raise ValueError("延期后的截止时间必须晚于当前时间，请增加延期天数或立即完成控制条件")
         extension = FacilityControlExtensionRecord(
             id=str(uuid4()),
+            tenant_id=tenant_id,
             condition_id=condition.id,
             facility_id=facility_id,
             extension_days=extension_days,
@@ -2902,10 +3492,16 @@ class CreditFacilityRepository:
         except IntegrityError as exc:
             self.session.rollback()
             raise ConcurrentUpdateError("该控制条件已有并发提交的延期申请，请刷新后重试") from exc
-        facility = self.session.get(CreditFacilityRecord, facility_id)
+        facility = self.session.scalars(
+            select(CreditFacilityRecord).where(
+                CreditFacilityRecord.tenant_id == tenant_id,
+                CreditFacilityRecord.id == facility_id,
+            )
+        ).first()
         if not facility:
             raise LookupError("授信台账不存在")
         NotificationRepository(self.session).create_if_absent(
+            tenant_id,
             {
                 "case_id": facility.case_id,
                 "counterparty_id": facility.counterparty_id,
@@ -2926,6 +3522,7 @@ class CreditFacilityRepository:
             "facility_control_extension_requested",
             actor_name,
             {
+                "tenant_id": tenant_id,
                 "extension_id": extension.id,
                 "extension_days": extension_days,
                 "previous_due_at": previous_due_at.isoformat(),
@@ -2943,6 +3540,7 @@ class CreditFacilityRepository:
 
     def review_control_extension(
         self,
+        tenant_id: str,
         facility_id: str,
         condition_id: str,
         extension_id: str,
@@ -2953,8 +3551,18 @@ class CreditFacilityRepository:
         actor_subject: str,
         actor_name: str,
     ) -> dict:
-        extension = self.session.get(FacilityControlExtensionRecord, extension_id)
-        condition = self.session.get(FacilityControlConditionRecord, condition_id)
+        extension = self.session.scalars(
+            select(FacilityControlExtensionRecord).where(
+                FacilityControlExtensionRecord.tenant_id == tenant_id,
+                FacilityControlExtensionRecord.id == extension_id,
+            )
+        ).first()
+        condition = self.session.scalars(
+            select(FacilityControlConditionRecord).where(
+                FacilityControlConditionRecord.tenant_id == tenant_id,
+                FacilityControlConditionRecord.id == condition_id,
+            )
+        ).first()
         if not extension or extension.condition_id != condition_id or extension.facility_id != facility_id:
             raise LookupError("控制条件延期申请不存在")
         if not condition or condition.facility_id != facility_id:
@@ -2975,7 +3583,12 @@ class CreditFacilityRepository:
         extension.reviewed_by_name = actor_name
         extension.reviewed_at = now
         extension.review_comment = comment
-        alert = self.session.get(FacilityAlertRecord, condition.linked_alert_id) if condition.linked_alert_id else None
+        alert = self.session.scalars(
+            select(FacilityAlertRecord).where(
+                FacilityAlertRecord.tenant_id == tenant_id,
+                FacilityAlertRecord.id == condition.linked_alert_id,
+            )
+        ).first() if condition.linked_alert_id else None
         if decision == "approve":
             if _as_utc(condition.due_at) != _as_utc(extension.previous_due_at):
                 raise ConcurrentUpdateError("控制条件截止时间已变化，请重新提交延期申请")
@@ -2996,10 +3609,16 @@ class CreditFacilityRepository:
         except StaleDataError as exc:
             self.session.rollback()
             raise ConcurrentUpdateError("延期审批状态已被其他人员更新，请刷新后重试") from exc
-        facility = self.session.get(CreditFacilityRecord, facility_id)
+        facility = self.session.scalars(
+            select(CreditFacilityRecord).where(
+                CreditFacilityRecord.tenant_id == tenant_id,
+                CreditFacilityRecord.id == facility_id,
+            )
+        ).first()
         if not facility:
             raise LookupError("授信台账不存在")
         NotificationRepository(self.session).create_if_absent(
+            tenant_id,
             {
                 "case_id": facility.case_id,
                 "counterparty_id": facility.counterparty_id,
@@ -3021,6 +3640,7 @@ class CreditFacilityRepository:
             "facility_control_extension_approved" if decision == "approve" else "facility_control_extension_rejected",
             actor_name,
             {
+                "tenant_id": tenant_id,
                 "extension_id": extension.id,
                 "extension_days": extension.extension_days,
                 "new_due_at": extension.proposed_due_at.isoformat() if decision == "approve" else None,
@@ -3040,15 +3660,23 @@ class CreditFacilityRepository:
                 list(
                     self.session.scalars(
                         select(FacilityControlExtensionRecord)
-                        .where(FacilityControlExtensionRecord.condition_id == condition.id)
+                        .where(
+                            FacilityControlExtensionRecord.tenant_id == tenant_id,
+                            FacilityControlExtensionRecord.condition_id == condition.id,
+                        )
                         .order_by(FacilityControlExtensionRecord.requested_at.desc(), FacilityControlExtensionRecord.id.desc())
                     ).all()
                 ),
             ),
         }
 
-    def complete_control_condition(self, facility_id: str, condition_id: str, expected_row_version: int, actor: str, conclusion: str) -> dict:
-        condition = self.session.get(FacilityControlConditionRecord, condition_id)
+    def complete_control_condition(self, tenant_id: str, facility_id: str, condition_id: str, expected_row_version: int, actor: str, conclusion: str) -> dict:
+        condition = self.session.scalars(
+            select(FacilityControlConditionRecord).where(
+                FacilityControlConditionRecord.tenant_id == tenant_id,
+                FacilityControlConditionRecord.id == condition_id,
+            )
+        ).first()
         if not condition or condition.facility_id != facility_id:
             raise LookupError("授信控制条件不存在")
         if condition.row_version != expected_row_version:
@@ -3063,6 +3691,7 @@ class CreditFacilityRepository:
             pending_extensions = list(
                 self.session.scalars(
                     select(FacilityControlExtensionRecord).where(
+                        FacilityControlExtensionRecord.tenant_id == tenant_id,
                         FacilityControlExtensionRecord.condition_id == condition.id,
                         FacilityControlExtensionRecord.status == "pending",
                     )
@@ -3081,6 +3710,7 @@ class CreditFacilityRepository:
         for extension in pending_extensions:
             pending_notice = self.session.scalars(
                 select(NotificationRecord).where(
+                    NotificationRecord.tenant_id == tenant_id,
                     NotificationRecord.dedup_key == f"control-extension-request:{extension.id}:approver"
                 )
             ).first()
@@ -3088,9 +3718,15 @@ class CreditFacilityRepository:
                 pending_notice.status = "read"
                 pending_notice.read_at = condition.completed_at
         if pending_extensions:
-            facility = self.session.get(CreditFacilityRecord, facility_id)
+            facility = self.session.scalars(
+                select(CreditFacilityRecord).where(
+                    CreditFacilityRecord.tenant_id == tenant_id,
+                    CreditFacilityRecord.id == facility_id,
+                )
+            ).first()
             if facility:
                 NotificationRepository(self.session).create_if_absent(
+                    tenant_id,
                     {
                         "case_id": facility.case_id,
                         "counterparty_id": facility.counterparty_id,
@@ -3106,7 +3742,12 @@ class CreditFacilityRepository:
                     }
                 )
         if condition.linked_alert_id:
-            alert = self.session.get(FacilityAlertRecord, condition.linked_alert_id)
+            alert = self.session.scalars(
+                select(FacilityAlertRecord).where(
+                    FacilityAlertRecord.tenant_id == tenant_id,
+                    FacilityAlertRecord.id == condition.linked_alert_id,
+                )
+            ).first()
             if alert and alert.status != "resolved":
                 alert.status = "resolved"
                 alert.disposition_action = "condition_completed"
@@ -3119,6 +3760,7 @@ class CreditFacilityRepository:
             "facility_control_condition_completed",
             actor,
             {
+                "tenant_id": tenant_id,
                 "facility_id": facility_id,
                 "source_case_id": condition.source_case_id,
                 "measure": condition.measure,
@@ -3144,7 +3786,10 @@ class CreditFacilityRepository:
         if controls is None:
             controls = list(
                 self.session.scalars(
-                    select(FacilityControlConditionRecord).where(FacilityControlConditionRecord.facility_id == record.id)
+                    select(FacilityControlConditionRecord).where(
+                        FacilityControlConditionRecord.tenant_id == record.tenant_id,
+                        FacilityControlConditionRecord.facility_id == record.id,
+                    )
                 ).all()
             )
         return {
@@ -3155,35 +3800,52 @@ class CreditFacilityRepository:
             "critical_control_count": sum(item.status == "pending" and item.escalation_level >= 2 for item in controls),
         }
 
-    def list_transactions(self, facility_id: str) -> list[dict]:
-        statement = select(CreditUsageRecord).where(CreditUsageRecord.facility_id == facility_id).order_by(CreditUsageRecord.occurred_at.desc(), CreditUsageRecord.id.desc())
+    def list_transactions(self, tenant_id: str, facility_id: str) -> list[dict]:
+        statement = select(CreditUsageRecord).where(
+            CreditUsageRecord.tenant_id == tenant_id,
+            CreditUsageRecord.facility_id == facility_id,
+        ).order_by(CreditUsageRecord.occurred_at.desc(), CreditUsageRecord.id.desc())
         return [_usage_to_dict(record) for record in self.session.scalars(statement).all()]
 
-    def list_risk_events(self, facility_id: str | None = None, counterparty_id: str | None = None) -> list[dict]:
-        statement = select(RiskEventRecord, CreditFacilityRecord).join(CreditFacilityRecord, CreditFacilityRecord.id == RiskEventRecord.facility_id).order_by(RiskEventRecord.occurred_at.desc(), RiskEventRecord.id.desc())
+    def list_risk_events(self, tenant_id: str, facility_id: str | None = None, counterparty_id: str | None = None) -> list[dict]:
+        statement = select(RiskEventRecord, CreditFacilityRecord).join(CreditFacilityRecord, CreditFacilityRecord.id == RiskEventRecord.facility_id).where(
+            RiskEventRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.tenant_id == tenant_id,
+        ).order_by(RiskEventRecord.occurred_at.desc(), RiskEventRecord.id.desc())
         if facility_id:
             statement = statement.where(RiskEventRecord.facility_id == facility_id)
         if counterparty_id:
             statement = statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
         return [{**_risk_event_to_dict(event), "counterparty_id": facility.counterparty_id, "counterparty_name": facility.counterparty_name} for event, facility in self.session.execute(statement).all()]
 
-    def create_risk_event(self, facility_id: str, payload: dict, actor: str) -> dict:
+    def create_risk_event(self, tenant_id: str, facility_id: str, payload: dict, actor: str) -> dict:
         occurred_at = _as_utc(payload["occurred_at"])
         if occurred_at > datetime.now(timezone.utc) + timedelta(minutes=5):
             raise ValueError("风险事件发生时间不能晚于当前时间 5 分钟以上")
         if len(json.dumps(payload.get("payload", {}), ensure_ascii=False, default=str).encode("utf-8")) > 32768:
             raise ValueError("风险事件原始载荷不能超过 32KB")
-        existing = self.session.scalars(select(RiskEventRecord).where(RiskEventRecord.source == payload["source"], RiskEventRecord.external_event_id == payload["external_event_id"])).first()
+        existing = self.session.scalars(select(RiskEventRecord).where(
+            RiskEventRecord.tenant_id == tenant_id,
+            RiskEventRecord.source == payload["source"],
+            RiskEventRecord.external_event_id == payload["external_event_id"],
+        )).first()
         if existing:
             if not _risk_event_matches(existing, facility_id, payload):
                 raise ValueError("外部事件编号已被不同风险事件使用")
-            alert = self.session.get(FacilityAlertRecord, existing.linked_alert_id) if existing.linked_alert_id else None
+            alert = self.session.scalars(select(FacilityAlertRecord).where(
+                FacilityAlertRecord.tenant_id == tenant_id,
+                FacilityAlertRecord.id == existing.linked_alert_id,
+            )).first() if existing.linked_alert_id else None
             return {"risk_event": _risk_event_to_dict(existing), "alert": _alert_to_dict(alert) if alert else None, "idempotent": True}
-        facility = self.session.get(CreditFacilityRecord, facility_id)
+        facility = self.session.scalars(select(CreditFacilityRecord).where(
+            CreditFacilityRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.id == facility_id,
+        )).first()
         if not facility:
             raise LookupError("授信台账不存在")
         event = RiskEventRecord(
             id=str(uuid4()),
+            tenant_id=tenant_id,
             facility_id=facility_id,
             external_event_id=payload["external_event_id"],
             event_type=payload["event_type"],
@@ -3201,16 +3863,26 @@ class CreditFacilityRepository:
         dedup_key = f"risk_event:{event.source}:{event.external_event_id}"
         self._ensure_alert(facility, f"risk_event:{event.event_type}", event.severity, event.title, event.description, dedup_key)
         self.session.flush()
-        alert = self.session.scalars(select(FacilityAlertRecord).where(FacilityAlertRecord.dedup_key == dedup_key)).first()
+        alert = self.session.scalars(select(FacilityAlertRecord).where(
+            FacilityAlertRecord.tenant_id == tenant_id,
+            FacilityAlertRecord.dedup_key == dedup_key,
+        )).first()
         event.linked_alert_id = alert.id if alert else None
-        self.audit.append("credit_facility", facility.id, "risk_event_ingested", actor, {"risk_event_id": event.id, "external_event_id": event.external_event_id, "event_type": event.event_type, "source": event.source, "severity": event.severity, "alert_id": event.linked_alert_id})
+        self.audit.append("credit_facility", facility.id, "risk_event_ingested", actor, {"tenant_id": tenant_id, "risk_event_id": event.id, "external_event_id": event.external_event_id, "event_type": event.event_type, "source": event.source, "severity": event.severity, "alert_id": event.linked_alert_id})
         try:
             self.session.commit()
         except IntegrityError as exc:
             self.session.rollback()
-            raced = self.session.scalars(select(RiskEventRecord).where(RiskEventRecord.source == payload["source"], RiskEventRecord.external_event_id == payload["external_event_id"])).first()
+            raced = self.session.scalars(select(RiskEventRecord).where(
+                RiskEventRecord.tenant_id == tenant_id,
+                RiskEventRecord.source == payload["source"],
+                RiskEventRecord.external_event_id == payload["external_event_id"],
+            )).first()
             if raced and _risk_event_matches(raced, facility_id, payload):
-                raced_alert = self.session.get(FacilityAlertRecord, raced.linked_alert_id) if raced.linked_alert_id else None
+                raced_alert = self.session.scalars(select(FacilityAlertRecord).where(
+                    FacilityAlertRecord.tenant_id == tenant_id,
+                    FacilityAlertRecord.id == raced.linked_alert_id,
+                )).first() if raced.linked_alert_id else None
                 return {"risk_event": _risk_event_to_dict(raced), "alert": _alert_to_dict(raced_alert) if raced_alert else None, "idempotent": True}
             raise ConcurrentUpdateError("风险事件接入发生并发冲突，请刷新后重试") from exc
         self.session.refresh(event)
@@ -3218,14 +3890,20 @@ class CreditFacilityRepository:
             self.session.refresh(alert)
         return {"risk_event": _risk_event_to_dict(event), "alert": _alert_to_dict(alert) if alert else None, "idempotent": False}
 
-    def transact(self, facility_id: str, transaction_ref: str, transaction_type: str, amount: float, expected_row_version: int, actor: str, reason: str) -> dict:
-        existing = self.session.scalars(select(CreditUsageRecord).where(CreditUsageRecord.transaction_ref == transaction_ref)).first()
+    def transact(self, tenant_id: str, facility_id: str, transaction_ref: str, transaction_type: str, amount: float, expected_row_version: int, actor: str, reason: str) -> dict:
+        existing = self.session.scalars(select(CreditUsageRecord).where(
+            CreditUsageRecord.tenant_id == tenant_id,
+            CreditUsageRecord.transaction_ref == transaction_ref,
+        )).first()
         rounded_amount = _money(amount)
         if existing:
             if existing.facility_id != facility_id or existing.transaction_type != transaction_type or _money(existing.amount) != rounded_amount:
                 raise ValueError("交易参考号已被其他额度交易使用")
-            return {"facility": self.get(facility_id), "transaction": _usage_to_dict(existing), "idempotent": True}
-        facility = self.session.get(CreditFacilityRecord, facility_id)
+            return {"facility": self.get(tenant_id, facility_id), "transaction": _usage_to_dict(existing), "idempotent": True}
+        facility = self.session.scalars(select(CreditFacilityRecord).where(
+            CreditFacilityRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.id == facility_id,
+        )).first()
         if not facility:
             raise LookupError("授信台账不存在")
         if facility.row_version != expected_row_version:
@@ -3245,28 +3923,34 @@ class CreditFacilityRepository:
             facility.used_limit = _money(facility.used_limit - rounded_amount)
         else:
             raise ValueError("不支持的额度交易类型")
-        transaction = CreditUsageRecord(id=str(uuid4()), facility_id=facility.id, transaction_ref=transaction_ref, transaction_type=transaction_type, amount=rounded_amount, balance_after=facility.used_limit, occurred_at=now, actor=actor, reason=reason)
+        transaction = CreditUsageRecord(id=str(uuid4()), tenant_id=tenant_id, facility_id=facility.id, transaction_ref=transaction_ref, transaction_type=transaction_type, amount=rounded_amount, balance_after=facility.used_limit, occurred_at=now, actor=actor, reason=reason)
         self.session.add(transaction)
-        self.audit.append("credit_facility", facility.id, f"credit_{transaction_type}", actor, {"transaction_id": transaction.id, "transaction_ref": transaction_ref, "amount": float(rounded_amount), "balance_after": float(facility.used_limit), "reason": reason})
+        self.audit.append("credit_facility", facility.id, f"credit_{transaction_type}", actor, {"tenant_id": tenant_id, "transaction_id": transaction.id, "transaction_ref": transaction_ref, "amount": float(rounded_amount), "balance_after": float(facility.used_limit), "reason": reason})
         utilization = facility.used_limit / facility.approved_limit if facility.approved_limit else 0
         if utilization >= Decimal("0.90"):
             self._ensure_alert(facility, "high_utilization", "critical", "额度使用率过高", f"额度使用率已达到 {utilization:.1%}。", f"utilization:{facility.id}:90")
         else:
-            self._resolve_alerts(facility.id, "high_utilization", actor)
+            self._resolve_alerts(tenant_id, facility.id, "high_utilization", actor)
         try:
             self.session.commit()
         except (IntegrityError, StaleDataError) as exc:
             self.session.rollback()
-            raced = self.session.scalars(select(CreditUsageRecord).where(CreditUsageRecord.transaction_ref == transaction_ref)).first()
+            raced = self.session.scalars(select(CreditUsageRecord).where(
+                CreditUsageRecord.tenant_id == tenant_id,
+                CreditUsageRecord.transaction_ref == transaction_ref,
+            )).first()
             if raced and raced.facility_id == facility_id and raced.transaction_type == transaction_type and _money(raced.amount) == rounded_amount:
-                return {"facility": self.get(facility_id), "transaction": _usage_to_dict(raced), "idempotent": True}
+                return {"facility": self.get(tenant_id, facility_id), "transaction": _usage_to_dict(raced), "idempotent": True}
             raise ConcurrentUpdateError("额度交易发生并发冲突，请刷新后重试") from exc
         self.session.refresh(facility)
         self.session.refresh(transaction)
         return {"facility": self._with_control_summary(facility), "transaction": _usage_to_dict(transaction), "idempotent": False}
 
-    def review(self, facility_id: str, expected_row_version: int, rating: str, next_review_days: int, actor: str, conclusion: str) -> dict:
-        facility = self.session.get(CreditFacilityRecord, facility_id)
+    def review(self, tenant_id: str, facility_id: str, expected_row_version: int, rating: str, next_review_days: int, actor: str, conclusion: str) -> dict:
+        facility = self.session.scalars(select(CreditFacilityRecord).where(
+            CreditFacilityRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.id == facility_id,
+        )).first()
         if not facility:
             raise LookupError("授信台账不存在")
         if facility.row_version != expected_row_version:
@@ -3277,8 +3961,8 @@ class CreditFacilityRepository:
         facility.rating = rating
         facility.last_review_at = now
         facility.next_review_at = now + timedelta(days=next_review_days)
-        self._resolve_alerts(facility.id, "review_due", actor)
-        self.audit.append("credit_facility", facility.id, "post_credit_review_completed", actor, {"rating": rating, "next_review_at": facility.next_review_at.isoformat(), "conclusion": conclusion})
+        self._resolve_alerts(tenant_id, facility.id, "review_due", actor)
+        self.audit.append("credit_facility", facility.id, "post_credit_review_completed", actor, {"tenant_id": tenant_id, "rating": rating, "next_review_at": facility.next_review_at.isoformat(), "conclusion": conclusion})
         try:
             self.session.commit()
         except StaleDataError as exc:
@@ -3287,8 +3971,11 @@ class CreditFacilityRepository:
         self.session.refresh(facility)
         return self._with_control_summary(facility)
 
-    def control(self, facility_id: str, expected_row_version: int, action: str, target_limit: float | None, actor: str, reason: str) -> dict:
-        facility = self.session.get(CreditFacilityRecord, facility_id)
+    def control(self, tenant_id: str, facility_id: str, expected_row_version: int, action: str, target_limit: float | None, actor: str, reason: str) -> dict:
+        facility = self.session.scalars(select(CreditFacilityRecord).where(
+            CreditFacilityRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.id == facility_id,
+        )).first()
         if not facility:
             raise LookupError("授信台账不存在")
         if facility.row_version != expected_row_version:
@@ -3302,8 +3989,11 @@ class CreditFacilityRepository:
         self.session.refresh(facility)
         return self._with_control_summary(facility)
 
-    def dispose_alert(self, alert_id: str, expected_alert_version: int, expected_facility_version: int, action: str, target_limit: float | None, actor: str, conclusion: str) -> dict:
-        alert = self.session.get(FacilityAlertRecord, alert_id)
+    def dispose_alert(self, tenant_id: str, alert_id: str, expected_alert_version: int, expected_facility_version: int, action: str, target_limit: float | None, actor: str, conclusion: str) -> dict:
+        alert = self.session.scalars(select(FacilityAlertRecord).where(
+            FacilityAlertRecord.tenant_id == tenant_id,
+            FacilityAlertRecord.id == alert_id,
+        )).first()
         if not alert:
             raise LookupError("贷后预警不存在")
         if alert.row_version != expected_alert_version:
@@ -3312,10 +4002,16 @@ class CreditFacilityRepository:
             raise ValueError("贷后预警已经闭环")
         if alert.alert_type == "control_condition_overdue":
             condition_id = alert.dedup_key.removeprefix("control-condition:")
-            pending_condition = self.session.get(FacilityControlConditionRecord, condition_id)
+            pending_condition = self.session.scalars(select(FacilityControlConditionRecord).where(
+                FacilityControlConditionRecord.tenant_id == tenant_id,
+                FacilityControlConditionRecord.id == condition_id,
+            )).first()
             if pending_condition and pending_condition.status == "pending":
                 raise ValueError("控制条件逾期预警不能独立关闭，请先在执行台账完成对应控制条件")
-        facility = self.session.get(CreditFacilityRecord, alert.facility_id)
+        facility = self.session.scalars(select(CreditFacilityRecord).where(
+            CreditFacilityRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.id == alert.facility_id,
+        )).first()
         if not facility:
             raise LookupError("授信台账不存在")
         if facility.row_version != expected_facility_version:
@@ -3328,11 +4024,15 @@ class CreditFacilityRepository:
         alert.disposition_note = conclusion
         alert.resolved_at = now
         alert.resolved_by = actor
-        linked_events = self.session.scalars(select(RiskEventRecord).where(RiskEventRecord.linked_alert_id == alert.id, RiskEventRecord.status == "active")).all()
+        linked_events = self.session.scalars(select(RiskEventRecord).where(
+            RiskEventRecord.tenant_id == tenant_id,
+            RiskEventRecord.linked_alert_id == alert.id,
+            RiskEventRecord.status == "active",
+        )).all()
         for event in linked_events:
             event.status = "resolved"
             event.resolved_at = now
-        self.audit.append("credit_facility", facility.id, "facility_alert_disposed", actor, {"alert_id": alert.id, "action": action, "target_limit": target_limit, "conclusion": conclusion, "risk_event_ids": [event.id for event in linked_events]})
+        self.audit.append("credit_facility", facility.id, "facility_alert_disposed", actor, {"tenant_id": tenant_id, "alert_id": alert.id, "action": action, "target_limit": target_limit, "conclusion": conclusion, "risk_event_ids": [event.id for event in linked_events]})
         try:
             self.session.commit()
         except StaleDataError as exc:
@@ -3342,9 +4042,18 @@ class CreditFacilityRepository:
         self.session.refresh(facility)
         return {"alert": _alert_to_dict(alert), "facility": self._with_control_summary(facility)}
 
-    def scan(self, actor: str, now: datetime | None = None, commit: bool = True) -> dict:
+    def scan(self, tenant_id: str, actor: str, now: datetime | None = None, commit: bool = True) -> dict:
+        return self._scan(tenant_id, actor, now=now, commit=commit)
+
+    def scan_all_tenants(self, actor: str, now: datetime | None = None, commit: bool = True) -> dict:
+        return self._scan(None, actor, now=now, commit=commit)
+
+    def _scan(self, tenant_id: str | None, actor: str, now: datetime | None = None, commit: bool = True) -> dict:
         scan_time = _as_utc(now or datetime.now(timezone.utc))
-        facilities = self.session.scalars(select(CreditFacilityRecord).where(CreditFacilityRecord.status == "active")).all()
+        facility_filters = [CreditFacilityRecord.status == "active"]
+        if tenant_id is not None:
+            facility_filters.append(CreditFacilityRecord.tenant_id == tenant_id)
+        facilities = self.session.scalars(select(CreditFacilityRecord).where(*facility_filters)).all()
         opened = 0
         expired = 0
         for facility in facilities:
@@ -3361,13 +4070,14 @@ class CreditFacilityRepository:
             utilization = facility.used_limit / facility.approved_limit if facility.approved_limit else 0
             if utilization >= Decimal("0.90"):
                 opened += int(self._ensure_alert(facility, "high_utilization", "critical", "额度使用率过高", f"额度使用率已达到 {utilization:.1%}。", f"utilization:{facility.id}:90"))
+        condition_filters = [
+            FacilityControlConditionRecord.status == "pending",
+            FacilityControlConditionRecord.due_at <= scan_time,
+        ]
+        if tenant_id is not None:
+            condition_filters.append(FacilityControlConditionRecord.tenant_id == tenant_id)
         overdue_conditions = list(
-            self.session.scalars(
-                select(FacilityControlConditionRecord).where(
-                    FacilityControlConditionRecord.status == "pending",
-                    FacilityControlConditionRecord.due_at <= scan_time,
-                )
-            ).all()
+            self.session.scalars(select(FacilityControlConditionRecord).where(*condition_filters)).all()
         )
         condition_alerts_opened = 0
         conditions_escalated = 0
@@ -3378,7 +4088,12 @@ class CreditFacilityRepository:
             due_at = _as_utc(condition.due_at)
             overdue_days = max(1, int((scan_time - due_at).total_seconds() // 86400) + 1)
             level, escalation_role = _control_condition_escalation(overdue_days)
-            facility = facility_cache.get(condition.facility_id) or self.session.get(CreditFacilityRecord, condition.facility_id)
+            facility = facility_cache.get(condition.facility_id) or self.session.scalars(
+                select(CreditFacilityRecord).where(
+                    CreditFacilityRecord.tenant_id == condition.tenant_id,
+                    CreditFacilityRecord.id == condition.facility_id,
+                )
+            ).first()
             if not facility:
                 continue
             if condition.escalation_level < level:
@@ -3392,6 +4107,7 @@ class CreditFacilityRepository:
                     "facility_control_condition_escalated",
                     actor,
                     {
+                        "tenant_id": condition.tenant_id,
                         "facility_id": condition.facility_id,
                         "overdue_days": overdue_days,
                         "escalation_level": level,
@@ -3399,6 +4115,7 @@ class CreditFacilityRepository:
                     },
                 )
                 _, created = notifications.create_if_absent(
+                    condition.tenant_id,
                     {
                         "case_id": facility.case_id,
                         "counterparty_id": facility.counterparty_id,
@@ -3424,6 +4141,7 @@ class CreditFacilityRepository:
             )
         opened += condition_alerts_opened
         scan_result = {
+            "tenant_id": tenant_id,
             "run_at": scan_time.isoformat(),
             "active_facilities_scanned": len(facilities),
             "facilities_expired": expired,
@@ -3440,18 +4158,21 @@ class CreditFacilityRepository:
             self.session.flush()
         return scan_result
 
-    def list_alerts(self, counterparty_id: str | None = None, facility_id: str | None = None) -> list[dict]:
-        statement = select(FacilityAlertRecord, CreditFacilityRecord).join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityAlertRecord.facility_id).order_by(FacilityAlertRecord.created_at.desc(), FacilityAlertRecord.id.desc())
+    def list_alerts(self, tenant_id: str, counterparty_id: str | None = None, facility_id: str | None = None) -> list[dict]:
+        statement = select(FacilityAlertRecord, CreditFacilityRecord).join(CreditFacilityRecord, CreditFacilityRecord.id == FacilityAlertRecord.facility_id).where(
+            FacilityAlertRecord.tenant_id == tenant_id,
+            CreditFacilityRecord.tenant_id == tenant_id,
+        ).order_by(FacilityAlertRecord.created_at.desc(), FacilityAlertRecord.id.desc())
         if counterparty_id:
             statement = statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
         if facility_id:
             statement = statement.where(FacilityAlertRecord.facility_id == facility_id)
         return [{**_alert_to_dict(alert), "counterparty_id": facility.counterparty_id, "counterparty_name": facility.counterparty_name} for alert, facility in self.session.execute(statement).all()]
 
-    def risk_snapshot(self, facility_id: str) -> dict:
+    def risk_snapshot(self, tenant_id: str, facility_id: str) -> dict:
         """Return the current unresolved risk state used by renewal review gates."""
-        unresolved_alerts = [item for item in self.list_alerts(facility_id=facility_id) if item["status"] != "resolved"]
-        active_events = [item for item in self.list_risk_events(facility_id=facility_id) if item["status"] == "active"]
+        unresolved_alerts = [item for item in self.list_alerts(tenant_id, facility_id=facility_id) if item["status"] != "resolved"]
+        active_events = [item for item in self.list_risk_events(tenant_id, facility_id=facility_id) if item["status"] == "active"]
         # list_alerts already returns newest first; Python's stable sort only promotes
         # critical items and preserves recency within each severity group.
         unresolved_alerts.sort(key=lambda item: item["severity"] != "critical")
@@ -3473,34 +4194,46 @@ class CreditFacilityRepository:
             ],
         }
 
-    def acknowledge_alert(self, alert_id: str, actor: str) -> dict | None:
-        alert = self.session.get(FacilityAlertRecord, alert_id)
+    def acknowledge_alert(self, tenant_id: str, alert_id: str, actor: str) -> dict | None:
+        alert = self.session.scalars(select(FacilityAlertRecord).where(
+            FacilityAlertRecord.tenant_id == tenant_id,
+            FacilityAlertRecord.id == alert_id,
+        )).first()
         if not alert:
             return None
         if alert.status == "open":
             alert.status = "acknowledged"
             alert.acknowledged_at = datetime.now(timezone.utc)
             alert.acknowledged_by = actor
-            self.audit.append("credit_facility", alert.facility_id, "facility_alert_acknowledged", actor, {"alert_id": alert.id, "alert_type": alert.alert_type})
+            self.audit.append("credit_facility", alert.facility_id, "facility_alert_acknowledged", actor, {"tenant_id": tenant_id, "alert_id": alert.id, "alert_type": alert.alert_type})
             try:
                 self.session.commit()
                 self.session.refresh(alert)
             except StaleDataError:
                 self.session.rollback()
-                alert = self.session.get(FacilityAlertRecord, alert_id)
+                alert = self.session.scalars(select(FacilityAlertRecord).where(
+                    FacilityAlertRecord.tenant_id == tenant_id,
+                    FacilityAlertRecord.id == alert_id,
+                )).first()
         return _alert_to_dict(alert)
 
-    def summary(self, counterparty_id: str | None = None) -> dict:
-        facility_statement = select(CreditFacilityRecord)
+    def summary(self, tenant_id: str, counterparty_id: str | None = None) -> dict:
+        facility_statement = select(CreditFacilityRecord).where(CreditFacilityRecord.tenant_id == tenant_id)
         if counterparty_id:
             facility_statement = facility_statement.where(CreditFacilityRecord.counterparty_id == counterparty_id)
         facilities = self.session.scalars(facility_statement).all()
         facility_ids = [item.id for item in facilities]
-        alert_statement = select(FacilityAlertRecord).where(FacilityAlertRecord.status.in_(["open", "acknowledged"]))
+        alert_statement = select(FacilityAlertRecord).where(
+            FacilityAlertRecord.tenant_id == tenant_id,
+            FacilityAlertRecord.status.in_(["open", "acknowledged"]),
+        )
         if counterparty_id:
             alert_statement = alert_statement.where(FacilityAlertRecord.facility_id.in_(facility_ids))
         unresolved = self.session.scalars(alert_statement).all()
-        control_scope = [FacilityControlConditionRecord.status == "pending"]
+        control_scope = [
+            FacilityControlConditionRecord.tenant_id == tenant_id,
+            FacilityControlConditionRecord.status == "pending",
+        ]
         if counterparty_id:
             control_scope.append(FacilityControlConditionRecord.facility_id.in_(facility_ids))
         return {
@@ -3541,16 +4274,20 @@ class CreditFacilityRepository:
     ) -> bool:
         dedup_key = f"control-condition:{condition.id}"
         severity = "critical" if level >= 2 else "warning"
-        role_labels = {"risk_manager": "风控经理", "approver": "授信审批人", "admin": "平台管理员"}
+        role_labels = {"risk_manager": "风控经理", "approver": "授信审批人", "operations": "运营值班"}
         title = "审批控制条件严重逾期" if level >= 2 else "审批控制条件逾期"
         message = f"控制条件“{condition.measure}”已逾期 {overdue_days} 天，执行责任人为风控经理，当前升级督办角色：{role_labels[escalation_role]}。"
         alert = self.session.scalars(
-            select(FacilityAlertRecord).where(FacilityAlertRecord.dedup_key == dedup_key)
+            select(FacilityAlertRecord).where(
+                FacilityAlertRecord.tenant_id == facility.tenant_id,
+                FacilityAlertRecord.dedup_key == dedup_key,
+            )
         ).first()
         opened = False
         if not alert:
             alert = FacilityAlertRecord(
                 id=str(uuid4()),
+                tenant_id=facility.tenant_id,
                 facility_id=facility.id,
                 alert_type="control_condition_overdue",
                 severity=severity,
@@ -3578,7 +4315,10 @@ class CreditFacilityRepository:
         return opened
 
     def _ensure_alert(self, facility: CreditFacilityRecord, alert_type: str, severity: str, title: str, message: str, dedup_key: str) -> bool:
-        existing = self.session.scalars(select(FacilityAlertRecord).where(FacilityAlertRecord.dedup_key == dedup_key)).first()
+        existing = self.session.scalars(select(FacilityAlertRecord).where(
+            FacilityAlertRecord.tenant_id == facility.tenant_id,
+            FacilityAlertRecord.dedup_key == dedup_key,
+        )).first()
         if existing:
             if existing.status == "resolved":
                 existing.status = "open"
@@ -3591,11 +4331,11 @@ class CreditFacilityRepository:
                 existing.message = message
                 return True
             return False
-        self.session.add(FacilityAlertRecord(id=str(uuid4()), facility_id=facility.id, alert_type=alert_type, severity=severity, title=title, message=message, dedup_key=dedup_key, status="open"))
+        self.session.add(FacilityAlertRecord(id=str(uuid4()), tenant_id=facility.tenant_id, facility_id=facility.id, alert_type=alert_type, severity=severity, title=title, message=message, dedup_key=dedup_key, status="open"))
         return True
 
-    def _resolve_alerts(self, facility_id: str, alert_type: str, actor: str) -> None:
-        alerts = self.session.scalars(select(FacilityAlertRecord).where(FacilityAlertRecord.facility_id == facility_id, FacilityAlertRecord.alert_type == alert_type, FacilityAlertRecord.status.in_(["open", "acknowledged"]))).all()
+    def _resolve_alerts(self, tenant_id: str, facility_id: str, alert_type: str, actor: str) -> None:
+        alerts = self.session.scalars(select(FacilityAlertRecord).where(FacilityAlertRecord.tenant_id == tenant_id, FacilityAlertRecord.facility_id == facility_id, FacilityAlertRecord.alert_type == alert_type, FacilityAlertRecord.status.in_(["open", "acknowledged"]))).all()
         now = datetime.now(timezone.utc)
         for alert in alerts:
             alert.status = "resolved"
@@ -3636,11 +4376,30 @@ class CreditFacilityRepository:
             facility.status = "closed"
         else:
             raise ValueError("不支持的授信控制动作")
-        self.audit.append("credit_facility", facility.id, f"facility_{action}", actor, {"reason": reason, "previous": previous, "current": {"status": facility.status, "approved_limit": float(_money(facility.approved_limit))}})
+        self.audit.append("credit_facility", facility.id, f"facility_{action}", actor, {"tenant_id": facility.tenant_id, "reason": reason, "previous": previous, "current": {"status": facility.status, "approved_limit": float(_money(facility.approved_limit))}})
 
 
 def clear_persistent_data(session: Session) -> None:
     session.execute(delete(SlaScanLeaseRecord))
+    session.execute(delete(TenantUsageStatementRecord))
+    session.execute(delete(TenantUsageDailyRecord))
+    session.execute(delete(TenantEntitlementLifecycleRunRecord))
+    session.execute(delete(TenantSupervisedUpgradeDecisionRecord))
+    session.execute(delete(TenantSupervisedEvaluationRecord))
+    session.execute(delete(TenantMonitoringRunRecord))
+    session.execute(delete(TenantOutcomeLabelRecord))
+    session.execute(delete(TenantOutcomeImportBatchRecord))
+    session.execute(delete(TenantRolloutScanRecord))
+    session.execute(delete(TenantRolloutEvaluationRecord))
+    session.execute(delete(TenantRoutingDecisionRecord))
+    session.execute(delete(TenantRolloutPolicyRecord))
+    session.execute(delete(TenantAssetOverrideRecord))
+    session.execute(delete(TenantAssetBindingRecord))
+    session.execute(delete(CounterpartyImportMappingTemplateRecord))
+    session.execute(delete(CounterpartyImportBatchRecord))
+    session.execute(delete(DecisionWebhookDeliveryRecord))
+    session.execute(delete(DecisionJobRecord))
+    session.execute(delete(DecisionExecutionRecord))
     session.execute(delete(AuditEventRecord))
     session.execute(delete(ModelGovernanceNotificationRecord))
     session.execute(delete(ModelMonitoringScheduleRecord))
@@ -3681,6 +4440,7 @@ def _case_to_dict(record: ApprovalCaseRecord) -> dict:
     sla_status, remaining_seconds = _approval_sla(record)
     return {
         "case_id": record.case_id,
+        "tenant_id": record.tenant_id,
         "counterparty_id": record.counterparty_id,
         "counterparty_name": record.counterparty_name,
         "application_type": record.application_type or "new_credit",
@@ -3720,16 +4480,17 @@ def _approval_sla(record: ApprovalCaseRecord) -> tuple[str, int | None]:
 
 
 def _audit_to_dict(record: AuditEventRecord) -> dict:
-    return {"id": record.id, "aggregate_type": record.aggregate_type, "aggregate_id": record.aggregate_id, "event_type": record.event_type, "actor": record.actor, "payload": deepcopy(record.payload), "previous_hash": record.previous_hash, "event_hash": record.event_hash, "created_at": record.created_at.isoformat() if record.created_at else None}
+    return {"id": record.id, "tenant_id": record.tenant_id, "scope_type": record.scope_type, "aggregate_type": record.aggregate_type, "aggregate_id": record.aggregate_id, "event_type": record.event_type, "actor": record.actor, "payload": deepcopy(record.payload), "previous_hash": record.previous_hash, "event_hash": record.event_hash, "created_at": record.created_at.isoformat() if record.created_at else None}
 
 
 def _rating_run_to_dict(record: RatingRunRecord) -> dict:
-    return {"id": record.id, "counterparty_id": record.counterparty_id, "case_id": record.case_id, "template_key": record.template_key, "model_snapshot_id": record.model_snapshot_id, "input": deepcopy(record.input_json), "input_hash": record.input_hash, "result": deepcopy(record.result_json), "result_hash": record.result_hash, "created_at": record.created_at.isoformat() if record.created_at else None}
+    return {"id": record.id, "tenant_id": record.tenant_id, "counterparty_id": record.counterparty_id, "case_id": record.case_id, "template_key": record.template_key, "model_snapshot_id": record.model_snapshot_id, "input": deepcopy(record.input_json), "input_hash": record.input_hash, "result": deepcopy(record.result_json), "result_hash": record.result_hash, "asset_snapshot": deepcopy(record.asset_snapshot_json), "assets_hash": record.assets_hash, "created_at": record.created_at.isoformat() if record.created_at else None}
 
 
 def _portfolio_rating_batch_to_dict(record: PortfolioRatingBatchRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "batch_key": record.batch_key,
         "request_hash": record.request_hash,
         "template_key": record.template_key,
@@ -3744,6 +4505,8 @@ def _portfolio_rating_batch_to_dict(record: PortfolioRatingBatchRecord) -> dict:
         "results": deepcopy(record.results_json),
         "skipped": deepcopy(record.skipped_json),
         "result_hash": record.result_hash,
+        "asset_snapshot": deepcopy(record.asset_snapshot_json),
+        "assets_hash": record.assets_hash,
         "created_by": record.created_by,
         "created_by_name": record.created_by_name,
         "created_at": record.created_at.isoformat() if record.created_at else None,
@@ -3753,6 +4516,7 @@ def _portfolio_rating_batch_to_dict(record: PortfolioRatingBatchRecord) -> dict:
 def _credit_report_to_dict(record: CreditReportRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "report_no": record.report_no,
         "case_id": record.case_id,
         "counterparty_id": record.counterparty_id,
@@ -3773,6 +4537,7 @@ def _decision_variance_to_dict(record: DecisionVarianceRecord) -> dict:
     variance = deepcopy(record.variance_json or {})
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "case_id": record.case_id,
         "counterparty_id": record.counterparty_id,
         "counterparty_name": record.counterparty_name,
@@ -3797,6 +4562,7 @@ def _decision_variance_to_dict(record: DecisionVarianceRecord) -> dict:
 def _enterprise_import_to_dict(record: EnterpriseDataImportRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "import_key": record.import_key,
         "counterparty_id": record.counterparty_id,
         "source_type": record.source_type,
@@ -3822,6 +4588,7 @@ def _enterprise_field_to_dict(record: EnterpriseDataFieldRecord) -> dict:
     dynamic_freshness = freshness_status(record.field_path, record.observed_at)
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "import_id": record.import_id,
         "counterparty_id": record.counterparty_id,
         "field_path": record.field_path,
@@ -3845,6 +4612,7 @@ def _enterprise_field_to_dict(record: EnterpriseDataFieldRecord) -> dict:
 def _enterprise_resolution_to_dict(record: EnterpriseDataResolutionRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "counterparty_id": record.counterparty_id,
         "field_path": record.field_path,
         "selected_field_id": record.selected_field_id,
@@ -3877,6 +4645,7 @@ def _candidate_snapshot_hash(candidates: list[dict]) -> str:
 def _indicator_observation_to_dict(record: EnterpriseIndicatorObservationRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "counterparty_id": record.counterparty_id,
         "indicator_id": record.indicator_id,
         "indicator_name": record.indicator_name,
@@ -3901,6 +4670,7 @@ def _indicator_observation_to_dict(record: EnterpriseIndicatorObservationRecord)
 def _document_to_dict(record: DocumentRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "counterparty_id": record.counterparty_id,
         "case_id": record.case_id,
         "document_type": record.document_type,
@@ -3929,6 +4699,7 @@ def _document_correction_to_dict(record: DocumentCorrectionRecord) -> dict:
     sla = correction_sla_snapshot(record.status, record.sla_due_at)
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "counterparty_id": record.counterparty_id,
         "case_id": record.case_id,
         "document_type": record.document_type,
@@ -3966,6 +4737,7 @@ def _document_correction_to_dict(record: DocumentCorrectionRecord) -> dict:
 def _notification_to_dict(record: NotificationRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "case_id": record.case_id,
         "counterparty_id": record.counterparty_id,
         "recipient_role": record.recipient_role,
@@ -3987,6 +4759,7 @@ def _facility_to_dict(record: CreditFacilityRecord) -> dict:
     used = _money(record.used_limit)
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "case_id": record.case_id,
         "counterparty_id": record.counterparty_id,
         "counterparty_name": record.counterparty_name,
@@ -4017,6 +4790,7 @@ def _facility_control_condition_to_dict(
 ) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "facility_id": record.facility_id,
         "source_case_id": record.source_case_id,
         "source_review_hash": record.source_review_hash,
@@ -4042,6 +4816,7 @@ def _facility_control_condition_to_dict(
 def _facility_control_extension_to_dict(record: FacilityControlExtensionRecord) -> dict:
     return {
         "id": record.id,
+        "tenant_id": record.tenant_id,
         "condition_id": record.condition_id,
         "facility_id": record.facility_id,
         "extension_days": record.extension_days,
@@ -4063,7 +4838,7 @@ def _facility_control_extension_to_dict(record: FacilityControlExtensionRecord) 
 
 def _control_condition_escalation(overdue_days: int) -> tuple[int, str]:
     if overdue_days >= 30:
-        return 3, "admin"
+        return 3, "operations"
     if overdue_days >= 7:
         return 2, "approver"
     return 1, "risk_manager"
@@ -4087,15 +4862,15 @@ def _control_condition_sla(record: FacilityControlConditionRecord, now: datetime
 
 
 def _usage_to_dict(record: CreditUsageRecord) -> dict:
-    return {"id": record.id, "facility_id": record.facility_id, "transaction_ref": record.transaction_ref, "transaction_type": record.transaction_type, "amount": float(_money(record.amount)), "balance_after": float(_money(record.balance_after)), "occurred_at": record.occurred_at.isoformat(), "actor": record.actor, "reason": record.reason, "created_at": record.created_at.isoformat() if record.created_at else None}
+    return {"id": record.id, "tenant_id": record.tenant_id, "facility_id": record.facility_id, "transaction_ref": record.transaction_ref, "transaction_type": record.transaction_type, "amount": float(_money(record.amount)), "balance_after": float(_money(record.balance_after)), "occurred_at": record.occurred_at.isoformat(), "actor": record.actor, "reason": record.reason, "created_at": record.created_at.isoformat() if record.created_at else None}
 
 
 def _alert_to_dict(record: FacilityAlertRecord) -> dict:
-    return {"id": record.id, "facility_id": record.facility_id, "alert_type": record.alert_type, "severity": record.severity, "title": record.title, "message": record.message, "status": record.status, "created_at": record.created_at.isoformat() if record.created_at else None, "acknowledged_at": record.acknowledged_at.isoformat() if record.acknowledged_at else None, "acknowledged_by": record.acknowledged_by, "disposition_action": record.disposition_action, "disposition_note": record.disposition_note, "resolved_at": record.resolved_at.isoformat() if record.resolved_at else None, "resolved_by": record.resolved_by, "row_version": record.row_version}
+    return {"id": record.id, "tenant_id": record.tenant_id, "facility_id": record.facility_id, "alert_type": record.alert_type, "severity": record.severity, "title": record.title, "message": record.message, "status": record.status, "created_at": record.created_at.isoformat() if record.created_at else None, "acknowledged_at": record.acknowledged_at.isoformat() if record.acknowledged_at else None, "acknowledged_by": record.acknowledged_by, "disposition_action": record.disposition_action, "disposition_note": record.disposition_note, "resolved_at": record.resolved_at.isoformat() if record.resolved_at else None, "resolved_by": record.resolved_by, "row_version": record.row_version}
 
 
 def _risk_event_to_dict(record: RiskEventRecord) -> dict:
-    return {"id": record.id, "facility_id": record.facility_id, "external_event_id": record.external_event_id, "event_type": record.event_type, "source": record.source, "severity": record.severity, "occurred_at": record.occurred_at.isoformat(), "title": record.title, "description": record.description, "payload": deepcopy(record.event_payload or {}), "linked_alert_id": record.linked_alert_id, "status": record.status, "resolved_at": record.resolved_at.isoformat() if record.resolved_at else None, "created_by": record.created_by, "created_at": record.created_at.isoformat() if record.created_at else None}
+    return {"id": record.id, "tenant_id": record.tenant_id, "facility_id": record.facility_id, "external_event_id": record.external_event_id, "event_type": record.event_type, "source": record.source, "severity": record.severity, "occurred_at": record.occurred_at.isoformat(), "title": record.title, "description": record.description, "payload": deepcopy(record.event_payload or {}), "linked_alert_id": record.linked_alert_id, "status": record.status, "resolved_at": record.resolved_at.isoformat() if record.resolved_at else None, "created_by": record.created_by, "created_at": record.created_at.isoformat() if record.created_at else None}
 
 
 def _risk_event_matches(record: RiskEventRecord, facility_id: str, payload: dict) -> bool:
@@ -4129,6 +4904,9 @@ def _model_change_to_dict(record: ModelChangeRecord) -> dict:
     calibration_evidence = deepcopy(record.calibration_evidence_json or {})
     if calibration_evidence:
         calibration_evidence["binding_hash"] = record.calibration_evidence_binding_hash
+    supervised_validation_evidence = deepcopy(record.supervised_validation_evidence_json or {})
+    if supervised_validation_evidence:
+        supervised_validation_evidence["binding_hash"] = record.supervised_validation_binding_hash
     return {
         "id": record.id,
         "template_key": record.template_key,
@@ -4141,6 +4919,7 @@ def _model_change_to_dict(record: ModelChangeRecord) -> dict:
         "comparison_evidence": deepcopy(record.comparison_evidence_json or {}),
         "scorecard_validation_evidence": scorecard_validation_evidence,
         "calibration_evidence": calibration_evidence,
+        "supervised_validation_evidence": supervised_validation_evidence,
         "change_reason": record.change_reason,
         "created_by": record.created_by,
         "created_by_name": record.created_by_name,
@@ -4279,6 +5058,7 @@ def _monitoring_run_to_dict(record: ModelMonitoringRunRecord) -> dict:
         "dataset_id": record.dataset_id,
         "readiness": deepcopy(record.readiness_json or {}),
         "monitoring": deepcopy(record.monitoring_json or {}),
+        "evidence_hash": monitoring_run_evidence_hash(record),
         "issue_ids": deepcopy(record.issue_ids or []),
         "error_message": record.error_message,
         "actor": record.actor,
@@ -4286,6 +5066,18 @@ def _monitoring_run_to_dict(record: ModelMonitoringRunRecord) -> dict:
         "completed_at": record.completed_at.isoformat() if record.completed_at else None,
         "created_at": record.created_at.isoformat() if record.created_at else None,
     }
+
+
+def monitoring_run_evidence_hash(record: ModelMonitoringRunRecord) -> str:
+    """Hash the immutable monitoring result fields used by model-risk reacceptance binding."""
+    return content_hash({
+        "id": record.id, "run_key": record.run_key, "template_key": record.template_key,
+        "model_version": record.model_version, "as_of_period": record.as_of_period,
+        "status": record.status, "effective_source": record.effective_source,
+        "evidence_level": record.evidence_level, "dataset_id": record.dataset_id,
+        "readiness": record.readiness_json or {}, "monitoring": record.monitoring_json or {},
+        "issue_ids": record.issue_ids or [], "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+    })
 
 
 def _monitoring_schedule_to_dict(record: ModelMonitoringScheduleRecord) -> dict:
@@ -5264,24 +6056,29 @@ class RuleCenterReplayDatasetRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def list_datasets(self) -> list[dict]:
+    def list_datasets(self, tenant_id: str) -> list[dict]:
         rows = self.session.scalars(
-            select(RuleCenterReplayDataset).order_by(
+            select(RuleCenterReplayDataset).where(
+                RuleCenterReplayDataset.tenant_id == tenant_id
+            ).order_by(
                 RuleCenterReplayDataset.created_at.desc(), RuleCenterReplayDataset.code
             )
         ).all()
         return [self._dataset_to_dict(row) for row in rows]
 
     def create_dataset(
-        self, code: str, name: str, description: str, actor_subject: str, actor_name: str
+        self, tenant_id: str, code: str, name: str, description: str, actor_subject: str, actor_name: str
     ) -> dict:
         normalized_code = code.strip().upper()
         if self.session.scalars(
-            select(RuleCenterReplayDataset).where(RuleCenterReplayDataset.code == normalized_code)
+            select(RuleCenterReplayDataset).where(
+                RuleCenterReplayDataset.tenant_id == tenant_id,
+                RuleCenterReplayDataset.code == normalized_code,
+            )
         ).first():
             raise ValueError("回放数据集编码已存在")
         record = RuleCenterReplayDataset(
-            id=str(uuid4()), code=normalized_code, name=name.strip(),
+            id=str(uuid4()), tenant_id=tenant_id, code=normalized_code, name=name.strip(),
             description=description.strip(), status="active",
             created_by=actor_subject, created_by_name=actor_name,
         )
@@ -5289,16 +6086,18 @@ class RuleCenterReplayDatasetRepository:
         self.session.flush()
         self.audit.append(
             "rule_center_replay_dataset", record.id, "rule_center_replay_dataset_created",
-            actor_name, {"code": record.code, "name": record.name},
+            actor_name, {"tenant_id": tenant_id, "code": record.code, "name": record.name},
         )
         self.session.commit()
         self.session.refresh(record)
         return self._dataset_to_dict(record)
 
-    def list_snapshots(self, dataset_id: str | None = None) -> list[dict]:
-        statement = select(RuleCenterReplayDatasetSnapshot)
+    def list_snapshots(self, tenant_id: str, dataset_id: str | None = None) -> list[dict]:
+        statement = select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id
+        )
         if dataset_id:
-            if self.session.get(RuleCenterReplayDataset, dataset_id) is None:
+            if self._dataset(tenant_id, dataset_id) is None:
                 raise LookupError("回放数据集不存在")
             statement = statement.where(RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id)
         rows = self.session.scalars(
@@ -5309,13 +6108,13 @@ class RuleCenterReplayDatasetRepository:
         ).all()
         return [self._snapshot_to_dict(row) for row in rows]
 
-    def get_snapshot_for_analysis(self, snapshot_id: str) -> dict:
-        record = self.session.get(RuleCenterReplayDatasetSnapshot, snapshot_id)
+    def get_snapshot_for_analysis(self, tenant_id: str, snapshot_id: str) -> dict:
+        record = self._snapshot(tenant_id, snapshot_id)
         if record is None:
             raise LookupError("回放数据集快照不存在")
         if self.snapshot_content_hash(record) != record.content_hash:
             raise ValueError("回放数据集快照内容哈希校验失败")
-        dataset = self.session.get(RuleCenterReplayDataset, record.dataset_id)
+        dataset = self._dataset(tenant_id, record.dataset_id)
         if dataset is None:
             raise LookupError("回放数据集不存在")
         return {
@@ -5327,12 +6126,13 @@ class RuleCenterReplayDatasetRepository:
 
     def import_snapshot(
         self,
+        tenant_id: str,
         dataset_id: str,
         payload: dict,
         actor_subject: str,
         actor_name: str,
     ) -> dict:
-        dataset = self.session.get(RuleCenterReplayDataset, dataset_id)
+        dataset = self._dataset(tenant_id, dataset_id)
         if dataset is None:
             raise LookupError("回放数据集不存在")
         if dataset.status != "active":
@@ -5353,6 +6153,7 @@ class RuleCenterReplayDatasetRepository:
         duplicate = self.session.scalars(
             select(RuleCenterReplayDatasetSnapshot).where(
                 RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id,
+                RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
                 RuleCenterReplayDatasetSnapshot.source_hash == source_hash,
             )
         ).first()
@@ -5453,11 +6254,12 @@ class RuleCenterReplayDatasetRepository:
         latest_version = int(self.session.scalar(
             select(func.max(RuleCenterReplayDatasetSnapshot.version)).where(
                 RuleCenterReplayDatasetSnapshot.dataset_id == dataset_id
+                , RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id
             )
         ) or 0)
         version = latest_version + 1
         hash_payload = {
-            "dataset_id": dataset_id, "version": version,
+            "tenant_id": tenant_id, "dataset_id": dataset_id, "version": version,
             "source_name": payload["source_name"], "schema_version": payload["schema_version"],
             "as_of_date": as_of, "evidence_reference": payload["evidence_reference"],
             "data_classification": payload["data_classification"], "field_mapping": mapping,
@@ -5466,7 +6268,7 @@ class RuleCenterReplayDatasetRepository:
             "samples": canonical_rows, "coverage": coverage, "source_hash": source_hash,
         }
         record = RuleCenterReplayDatasetSnapshot(
-            id=str(uuid4()), dataset_id=dataset_id, version=version,
+            id=str(uuid4()), tenant_id=tenant_id, dataset_id=dataset_id, version=version,
             source_name=payload["source_name"], schema_version=payload["schema_version"],
             as_of_date=as_of, evidence_reference=payload["evidence_reference"],
             data_classification=payload["data_classification"], field_mapping_json=mapping,
@@ -5479,7 +6281,7 @@ class RuleCenterReplayDatasetRepository:
         self.session.flush()
         self.audit.append(
             "rule_center_replay_dataset", dataset_id, "rule_center_replay_snapshot_imported",
-            actor_name, {"snapshot_id": record.id, "version": version, "sample_count": sample_count, "content_hash": record.content_hash},
+            actor_name, {"tenant_id": tenant_id, "snapshot_id": record.id, "version": version, "sample_count": sample_count, "content_hash": record.content_hash},
         )
         self.session.commit()
         self.session.refresh(record)
@@ -5488,7 +6290,7 @@ class RuleCenterReplayDatasetRepository:
     @staticmethod
     def snapshot_content_hash(record: RuleCenterReplayDatasetSnapshot) -> str:
         return content_hash({
-            "dataset_id": record.dataset_id, "version": record.version,
+            "tenant_id": record.tenant_id, "dataset_id": record.dataset_id, "version": record.version,
             "source_name": record.source_name, "schema_version": record.schema_version,
             "as_of_date": record.as_of_date, "evidence_reference": record.evidence_reference,
             "data_classification": record.data_classification,
@@ -5523,11 +6325,14 @@ class RuleCenterReplayDatasetRepository:
     def _dataset_to_dict(self, record: RuleCenterReplayDataset) -> dict:
         latest = self.session.scalars(
             select(RuleCenterReplayDatasetSnapshot)
-            .where(RuleCenterReplayDatasetSnapshot.dataset_id == record.id)
+            .where(
+                RuleCenterReplayDatasetSnapshot.tenant_id == record.tenant_id,
+                RuleCenterReplayDatasetSnapshot.dataset_id == record.id,
+            )
             .order_by(RuleCenterReplayDatasetSnapshot.version.desc())
         ).first()
         return {
-            "id": record.id, "code": record.code, "name": record.name,
+            "id": record.id, "tenant_id": record.tenant_id, "code": record.code, "name": record.name,
             "description": record.description, "status": record.status,
             "latest_snapshot": self._snapshot_to_dict(latest) if latest else None,
             "created_by": record.created_by, "created_by_name": record.created_by_name,
@@ -5537,7 +6342,7 @@ class RuleCenterReplayDatasetRepository:
     @staticmethod
     def _snapshot_to_dict(record: RuleCenterReplayDatasetSnapshot) -> dict:
         return {
-            "id": record.id, "dataset_id": record.dataset_id, "version": record.version,
+            "id": record.id, "tenant_id": record.tenant_id, "dataset_id": record.dataset_id, "version": record.version,
             "source_name": record.source_name, "schema_version": record.schema_version,
             "as_of_date": record.as_of_date.isoformat(),
             "evidence_reference": record.evidence_reference,
@@ -5550,6 +6355,18 @@ class RuleCenterReplayDatasetRepository:
             "created_at": record.created_at.isoformat() if record.created_at else None,
         }
 
+    def _dataset(self, tenant_id: str, dataset_id: str) -> RuleCenterReplayDataset | None:
+        return self.session.scalars(select(RuleCenterReplayDataset).where(
+            RuleCenterReplayDataset.tenant_id == tenant_id,
+            RuleCenterReplayDataset.id == dataset_id,
+        )).first()
+
+    def _snapshot(self, tenant_id: str, snapshot_id: str) -> RuleCenterReplayDatasetSnapshot | None:
+        return self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
+            RuleCenterReplayDatasetSnapshot.id == snapshot_id,
+        )).first()
+
 
 class RuleCenterReplayComparisonRepository:
     """Run reproducible champion/challenger validation on one immutable snapshot."""
@@ -5560,21 +6377,24 @@ class RuleCenterReplayComparisonRepository:
         self.session = session
         self.audit = AuditRepository(session)
 
-    def list_runs(self) -> list[dict]:
+    def list_runs(self, tenant_id: str) -> list[dict]:
         rows = self.session.scalars(
-            select(RuleCenterReplayComparisonRun).order_by(
+            select(RuleCenterReplayComparisonRun).where(
+                RuleCenterReplayComparisonRun.tenant_id == tenant_id
+            ).order_by(
                 RuleCenterReplayComparisonRun.created_at.desc(),
                 RuleCenterReplayComparisonRun.id.desc(),
             )
         ).all()
         return [self._to_dict(row) for row in rows]
 
-    def list_exceptions(self, comparison_run_id: str) -> list[dict]:
-        if self.session.get(RuleCenterReplayComparisonRun, comparison_run_id) is None:
+    def list_exceptions(self, tenant_id: str, comparison_run_id: str) -> list[dict]:
+        if self._comparison(tenant_id, comparison_run_id) is None:
             raise LookupError("双模型比较运行不存在")
         rows = self.session.scalars(
             select(RuleCenterReplayComparisonException).where(
-                RuleCenterReplayComparisonException.comparison_run_id == comparison_run_id
+                RuleCenterReplayComparisonException.comparison_run_id == comparison_run_id,
+                RuleCenterReplayComparisonException.tenant_id == tenant_id,
             ).order_by(
                 RuleCenterReplayComparisonException.created_at.desc(),
                 RuleCenterReplayComparisonException.id.desc(),
@@ -5582,19 +6402,27 @@ class RuleCenterReplayComparisonRepository:
         ).all()
         return [self._exception_to_dict(row) for row in rows]
 
-    def run(self, payload: dict, demo_repository: DemoRepository,
+    def run(self, tenant_id: str, payload: dict, demo_repository: DemoRepository,
             model_repository: ModelGovernanceRepository,
             actor_subject: str, actor_name: str) -> dict:
-        from rating.scorecard import rate_counterparty
+        from backend.tenant_asset_repository import TenantAssetRepository
+        from backend.tenant_runtime_assets import TenantRuntimeAssetResolver
 
-        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, payload["dataset_snapshot_id"])
+        snapshot = self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
+            RuleCenterReplayDatasetSnapshot.id == payload["dataset_snapshot_id"],
+        )).first()
         if snapshot is None:
             raise LookupError("历史回放数据集快照不存在")
         if RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot) != snapshot.content_hash:
             raise ValueError("历史回放数据集快照哈希不一致")
-        dataset = self.session.get(RuleCenterReplayDataset, snapshot.dataset_id)
+        dataset = self.session.scalars(select(RuleCenterReplayDataset).where(
+            RuleCenterReplayDataset.tenant_id == tenant_id,
+            RuleCenterReplayDataset.id == snapshot.dataset_id,
+        )).first()
         if dataset is None or dataset.status != "active":
             raise ValueError("历史回放数据集不可用")
+        resolver = TenantRuntimeAssetResolver(TenantAssetRepository(self.session), demo_repository)
 
         challenger_change = None
         if payload.get("challenger_change_id"):
@@ -5619,10 +6447,40 @@ class RuleCenterReplayComparisonRepository:
             raise LookupError("Champion 模型不存在")
         if challenger_config is None:
             raise LookupError("Challenger 模型不存在")
-        champion_code, champion_pipeline_version = self._pin_pipeline(champion_config, payload.get("champion_pipeline_code"))
-        challenger_code, challenger_pipeline_version = self._pin_pipeline(challenger_config, payload.get("challenger_pipeline_code"))
-        champion_config["decision_pipeline_code"] = "" if champion_code == "LEGACY-SCORECARD" else champion_code
-        challenger_config["decision_pipeline_code"] = "" if challenger_code == "LEGACY-SCORECARD" else challenger_code
+        champion_assets = self._resolve_side_assets(
+            resolver,
+            tenant_id,
+            payload["champion_model_key"],
+            champion_config,
+            str(champion_config["version"]),
+            payload.get("champion_pipeline_code"),
+            allow_historical=bool(challenger_change),
+        )
+        challenger_assets = (
+            resolver.resolve_config_graph(
+                tenant_id,
+                payload["challenger_model_key"],
+                challenger_change.config_json,
+                challenger_change.candidate_version,
+                source_scope="governance_candidate",
+                asset_id=challenger_change.id,
+                pipeline_code=payload.get("challenger_pipeline_code"),
+                allow_historical=True,
+            )
+            if challenger_change
+            else self._resolve_side_assets(
+                resolver,
+                tenant_id,
+                payload["challenger_model_key"],
+                challenger_config,
+                str(challenger_config["version"]),
+                payload.get("challenger_pipeline_code"),
+            )
+        )
+        champion_config = deepcopy(champion_assets["model"]["config"])
+        challenger_config = deepcopy(challenger_assets["model"]["config"])
+        champion_code, champion_pipeline_version = self._asset_pipeline_pin(champion_assets)
+        challenger_code, challenger_pipeline_version = self._asset_pipeline_pin(challenger_assets)
 
         entries = deepcopy((snapshot.samples_json or [])[: payload["sample_limit"]])
         if not entries:
@@ -5632,9 +6490,12 @@ class RuleCenterReplayComparisonRepository:
         for entry in entries:
             sample = deepcopy(entry.get("sample") or {})
             outputs = {}
-            for side, config in (("champion", champion_config), ("challenger", challenger_config)):
+            for side, config, assets in (
+                ("champion", champion_config, champion_assets),
+                ("challenger", challenger_config, challenger_assets),
+            ):
                 try:
-                    result = rate_counterparty(deepcopy(sample), deepcopy(config))
+                    result = resolver.execute_rating(deepcopy(sample), assets)
                 except Exception as exc:  # Keep per-sample evidence even when one model fails.
                     result = {"ok": False, "error": str(exc)}
                 if not result or not result.get("ok"):
@@ -5681,11 +6542,25 @@ class RuleCenterReplayComparisonRepository:
             "champion": {"model_key": payload["champion_model_key"], "model_version": champion_config["version"], "pipeline_code": champion_code, "pipeline_version": champion_pipeline_version},
             "challenger": {"model_key": payload["challenger_model_key"], "model_version": challenger_config["version"], "pipeline_code": challenger_code, "pipeline_version": challenger_pipeline_version},
         }
+        asset_snapshot = {
+            "schema_version": "tenant-replay-comparison-assets-v1",
+            "tenant_id": tenant_id,
+            "champion": resolver.public_snapshot(champion_assets),
+            "challenger": resolver.public_snapshot(challenger_assets),
+        }
+        asset_snapshot["resolution_hash"] = content_hash({
+            "tenant_id": tenant_id,
+            "champion": champion_assets["resolution_hash"],
+            "challenger": challenger_assets["resolution_hash"],
+        })
+        assets_hash = content_hash(asset_snapshot)
         gate = self._gate(metrics, config["thresholds"], evidence_level)
         evidence_payload = {
+            "tenant_id": tenant_id,
             "dataset_snapshot_id": snapshot.id, "dataset_snapshot_hash": snapshot.content_hash,
             **pinned, "segment_field": payload["segment_field"], "evidence_level": evidence_level,
             "config": config, "metrics": metrics, "details": details, "gate": gate,
+            "assets": asset_snapshot, "assets_hash": assets_hash,
         }
         challenger_config_hash = content_hash(challenger_change.config_json) if challenger_change else None
         if challenger_change:
@@ -5695,7 +6570,8 @@ class RuleCenterReplayComparisonRepository:
             })
         evidence_hash = content_hash(evidence_payload)
         record = RuleCenterReplayComparisonRun(
-            id=str(uuid4()), dataset_snapshot_id=snapshot.id, dataset_snapshot_hash=snapshot.content_hash,
+            id=str(uuid4()), tenant_id=tenant_id,
+            dataset_snapshot_id=snapshot.id, dataset_snapshot_hash=snapshot.content_hash,
             champion_model_key=payload["champion_model_key"], champion_model_version=str(champion_config["version"]),
             challenger_model_key=payload["challenger_model_key"], challenger_model_version=str(challenger_config["version"]),
             challenger_change_id=challenger_change.id if challenger_change else None,
@@ -5704,21 +6580,22 @@ class RuleCenterReplayComparisonRepository:
             challenger_pipeline_code=challenger_code, challenger_pipeline_version=challenger_pipeline_version,
             segment_field=payload["segment_field"], evidence_level=evidence_level,
             config_json=config, metrics_json=metrics, details_json=details, gate_json=gate,
+            asset_snapshot_json=asset_snapshot, assets_hash=assets_hash,
             evidence_hash=evidence_hash, created_by=actor_subject, created_by_name=actor_name,
         )
         self.session.add(record)
         self.session.flush()
         self.audit.append(
             "rule_center_replay_comparison", record.id, "rule_center_replay_comparison_completed",
-            actor_name, {"snapshot_id": snapshot.id, "challenger_change_id": challenger_change.id if challenger_change else None, "evidence_level": evidence_level, "gate_passed": gate["passed"], "evidence_hash": evidence_hash},
+            actor_name, {"tenant_id": tenant_id, "snapshot_id": snapshot.id, "challenger_change_id": challenger_change.id if challenger_change else None, "evidence_level": evidence_level, "gate_passed": gate["passed"], "evidence_hash": evidence_hash},
         )
         self.session.commit()
         self.session.refresh(record)
         return self._to_dict(record)
 
-    def request_exception(self, comparison_run_id: str, payload: dict,
+    def request_exception(self, tenant_id: str, comparison_run_id: str, payload: dict,
                           actor_subject: str, actor_name: str) -> dict:
-        record = self._verified_comparison(comparison_run_id)
+        record = self._verified_comparison(tenant_id, comparison_run_id)
         gate = record.gate_json or {}
         if gate.get("passed"):
             raise ValueError("比较门禁已通过，无需申请例外")
@@ -5731,6 +6608,7 @@ class RuleCenterReplayComparisonRepository:
         active = self.session.scalars(
             select(RuleCenterReplayComparisonException).where(
                 RuleCenterReplayComparisonException.comparison_run_id == comparison_run_id,
+                RuleCenterReplayComparisonException.tenant_id == tenant_id,
                 RuleCenterReplayComparisonException.status.in_(("pending_review", "approved")),
                 RuleCenterReplayComparisonException.valid_until >= today,
             )
@@ -5738,12 +6616,12 @@ class RuleCenterReplayComparisonRepository:
         if active:
             raise ValueError("当前比较证据已有待复核或生效中的例外")
         request_hash = content_hash({
-            "comparison_run_id": record.id, "comparison_evidence_hash": record.evidence_hash,
+            "tenant_id": tenant_id, "comparison_run_id": record.id, "comparison_evidence_hash": record.evidence_hash,
             "reason": payload["reason"], "business_impact": payload["business_impact"],
             "compensating_controls": payload["compensating_controls"], "valid_until": valid_until,
         })
         exception = RuleCenterReplayComparisonException(
-            id=str(uuid4()), comparison_run_id=record.id,
+            id=str(uuid4()), tenant_id=tenant_id, comparison_run_id=record.id,
             comparison_evidence_hash=record.evidence_hash, status="pending_review",
             reason=payload["reason"], business_impact=payload["business_impact"],
             compensating_controls=payload["compensating_controls"], valid_until=valid_until,
@@ -5755,17 +6633,20 @@ class RuleCenterReplayComparisonRepository:
         self.audit.append(
             "rule_center_replay_comparison_exception", exception.id,
             "replay_comparison_exception_requested", actor_name,
-            {"comparison_run_id": record.id, "evidence_hash": record.evidence_hash, "valid_until": valid_until.isoformat(), "request_hash": request_hash},
+            {"tenant_id": tenant_id, "comparison_run_id": record.id, "evidence_hash": record.evidence_hash, "valid_until": valid_until.isoformat(), "request_hash": request_hash},
         )
         self.session.commit()
         self.session.refresh(exception)
         return self._exception_to_dict(exception)
 
-    def review_exception(self, comparison_run_id: str, exception_id: str,
+    def review_exception(self, tenant_id: str, comparison_run_id: str, exception_id: str,
                          expected_row_version: int, decision: str, comment: str,
                          reviewer_subject: str, reviewer_name: str) -> dict:
-        record = self._verified_comparison(comparison_run_id)
-        exception = self.session.get(RuleCenterReplayComparisonException, exception_id)
+        record = self._verified_comparison(tenant_id, comparison_run_id)
+        exception = self.session.scalars(select(RuleCenterReplayComparisonException).where(
+            RuleCenterReplayComparisonException.tenant_id == tenant_id,
+            RuleCenterReplayComparisonException.id == exception_id,
+        )).first()
         if exception is None or exception.comparison_run_id != comparison_run_id:
             raise LookupError("比较例外申请不存在")
         if exception.row_version != expected_row_version:
@@ -5788,7 +6669,7 @@ class RuleCenterReplayComparisonRepository:
             self.audit.append(
                 "rule_center_replay_comparison_exception", exception.id,
                 f"replay_comparison_exception_{exception.status}", reviewer_name,
-                {"comparison_run_id": record.id, "decision": decision, "comment": comment, "evidence_hash": record.evidence_hash},
+                {"tenant_id": tenant_id, "comparison_run_id": record.id, "decision": decision, "comment": comment, "evidence_hash": record.evidence_hash},
             )
             self.session.commit()
         except StaleDataError as exc:
@@ -5797,24 +6678,30 @@ class RuleCenterReplayComparisonRepository:
         self.session.refresh(exception)
         return self._exception_to_dict(exception)
 
-    def _verified_comparison(self, comparison_run_id: str) -> RuleCenterReplayComparisonRun:
-        record = self.session.get(RuleCenterReplayComparisonRun, comparison_run_id)
+    def _verified_comparison(self, tenant_id: str, comparison_run_id: str) -> RuleCenterReplayComparisonRun:
+        record = self._comparison(tenant_id, comparison_run_id)
         if record is None:
             raise LookupError("双模型比较运行不存在")
         if not record.gate_json:
             raise ValueError("历史比较证据未配置门禁，请使用当前阈值重新运行")
         if self.comparison_evidence_hash(record) != record.evidence_hash:
             raise ValueError("双模型比较证据哈希不一致")
-        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, record.dataset_snapshot_id)
+        snapshot = self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
+            RuleCenterReplayDatasetSnapshot.id == record.dataset_snapshot_id,
+        )).first()
         if snapshot is None or snapshot.content_hash != record.dataset_snapshot_hash:
             raise ValueError("比较运行引用的快照已变化")
         if RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot) != snapshot.content_hash:
             raise ValueError("历史回放数据集快照哈希不一致")
+        if content_hash(record.asset_snapshot_json or {}) != record.assets_hash:
+            raise ValueError("双模型比较资产快照哈希不一致")
         return record
 
     @staticmethod
     def comparison_evidence_hash(record: RuleCenterReplayComparisonRun) -> str:
         payload = {
+            "tenant_id": record.tenant_id,
             "dataset_snapshot_id": record.dataset_snapshot_id,
             "dataset_snapshot_hash": record.dataset_snapshot_hash,
             "champion": {"model_key": record.champion_model_key, "model_version": record.champion_model_version, "pipeline_code": record.champion_pipeline_code, "pipeline_version": record.champion_pipeline_version},
@@ -5822,6 +6709,8 @@ class RuleCenterReplayComparisonRepository:
             "segment_field": record.segment_field, "evidence_level": record.evidence_level,
             "config": record.config_json, "metrics": record.metrics_json,
             "details": record.details_json, "gate": record.gate_json,
+            "assets": record.asset_snapshot_json,
+            "assets_hash": record.assets_hash,
         }
         if record.challenger_change_id:
             payload.update({
@@ -5829,6 +6718,57 @@ class RuleCenterReplayComparisonRepository:
                 "challenger_config_hash": record.challenger_config_hash,
             })
         return content_hash(payload)
+
+    @staticmethod
+    def _resolve_side_assets(
+        resolver,
+        tenant_id: str,
+        model_key: str,
+        model_config: dict,
+        model_version: str,
+        pipeline_code: str | None,
+        *,
+        allow_historical: bool = False,
+    ) -> dict:
+        from backend.tenant_asset_repository import TenantAssetError
+
+        try:
+            if pipeline_code:
+                return resolver.resolve_graph(
+                    tenant_id,
+                    model_key,
+                    model_version=model_version if allow_historical else None,
+                    pipeline_code=pipeline_code,
+                    allow_historical=allow_historical,
+                )
+            return resolver.resolve_rating(
+                tenant_id,
+                model_key,
+                model_version=model_version if allow_historical else None,
+                allow_historical=allow_historical,
+            )
+        except (AttributeError, TenantAssetError) as exc:
+            if isinstance(exc, TenantAssetError) and exc.code not in {
+                "ASSET_NOT_FOUND", "ASSET_VERSION_NOT_FOUND"
+            }:
+                raise
+            return resolver.resolve_config_graph(
+                tenant_id,
+                model_key,
+                model_config,
+                model_version,
+                source_scope="governance_resolved_config",
+                asset_id=f"governance:{model_key}:{model_version}",
+                pipeline_code=pipeline_code,
+                allow_historical=allow_historical,
+            )
+
+    @staticmethod
+    def _asset_pipeline_pin(assets: dict) -> tuple[str, str | None]:
+        pipeline = assets.get("pipeline")
+        if pipeline is None:
+            return "LEGACY-SCORECARD", None
+        return str(pipeline["code"]), str(pipeline["version"])
 
     def _pin_pipeline(self, config: dict, override: str | None) -> tuple[str, int | None]:
         code = str(override or config.get("decision_pipeline_code") or "").strip().upper()
@@ -6063,7 +7003,8 @@ class RuleCenterReplayComparisonRepository:
     def _to_dict(self, record: RuleCenterReplayComparisonRun) -> dict:
         latest_exception = self.session.scalars(
             select(RuleCenterReplayComparisonException).where(
-                RuleCenterReplayComparisonException.comparison_run_id == record.id
+                RuleCenterReplayComparisonException.tenant_id == record.tenant_id,
+                RuleCenterReplayComparisonException.comparison_run_id == record.id,
             ).order_by(
                 RuleCenterReplayComparisonException.created_at.desc(),
                 RuleCenterReplayComparisonException.id.desc(),
@@ -6083,7 +7024,8 @@ class RuleCenterReplayComparisonRepository:
         )
         effective_status = "passed" if gate_passed else "exception_approved" if exception_effective else "exception_pending" if latest_exception and latest_exception.status == "pending_review" else "blocked"
         return {
-            "id": record.id, "dataset_snapshot_id": record.dataset_snapshot_id,
+            "id": record.id, "tenant_id": record.tenant_id,
+            "dataset_snapshot_id": record.dataset_snapshot_id,
             "dataset_snapshot_hash": record.dataset_snapshot_hash,
             "champion_model_key": record.champion_model_key, "champion_model_version": record.champion_model_version,
             "challenger_model_key": record.challenger_model_key, "challenger_model_version": record.challenger_model_version,
@@ -6096,6 +7038,7 @@ class RuleCenterReplayComparisonRepository:
             "gate": gate, "effective_status": effective_status,
             "latest_exception": self._exception_to_dict(latest_exception) if latest_exception else None,
             "details": deepcopy(record.details_json), "evidence_hash": record.evidence_hash,
+            "asset_snapshot": deepcopy(record.asset_snapshot_json), "assets_hash": record.assets_hash,
             "created_by": record.created_by, "created_by_name": record.created_by_name,
             "created_at": record.created_at.isoformat() if record.created_at else None,
         }
@@ -6103,7 +7046,8 @@ class RuleCenterReplayComparisonRepository:
     @staticmethod
     def _exception_to_dict(record: RuleCenterReplayComparisonException) -> dict:
         return {
-            "id": record.id, "comparison_run_id": record.comparison_run_id,
+            "id": record.id, "tenant_id": record.tenant_id,
+            "comparison_run_id": record.comparison_run_id,
             "comparison_evidence_hash": record.comparison_evidence_hash,
             "status": record.status, "reason": record.reason,
             "business_impact": record.business_impact,
@@ -6116,6 +7060,12 @@ class RuleCenterReplayComparisonRepository:
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "updated_at": record.updated_at.isoformat() if record.updated_at else None,
         }
+
+    def _comparison(self, tenant_id: str, comparison_run_id: str) -> RuleCenterReplayComparisonRun | None:
+        return self.session.scalars(select(RuleCenterReplayComparisonRun).where(
+            RuleCenterReplayComparisonRun.tenant_id == tenant_id,
+            RuleCenterReplayComparisonRun.id == comparison_run_id,
+        )).first()
 
 
 class RuleCenterReleasePackageRepository:
@@ -6141,18 +7091,22 @@ class RuleCenterReleasePackageRepository:
         ).all()
         return [self._package_to_dict(row) for row in rows]
 
-    def list_replays(self, package_id: str) -> list[dict]:
+    def list_replays(self, tenant_id: str, package_id: str) -> list[dict]:
         if self.session.get(RuleCenterReleasePackage, package_id) is None:
             raise LookupError("规则中心发布包不存在")
         rows = self.session.scalars(
             select(RuleCenterReplayRun)
-            .where(RuleCenterReplayRun.package_id == package_id)
+            .where(
+                RuleCenterReplayRun.tenant_id == tenant_id,
+                RuleCenterReplayRun.package_id == package_id,
+            )
             .order_by(RuleCenterReplayRun.created_at.desc(), RuleCenterReplayRun.id.desc())
         ).all()
         return [self._replay_to_dict(row) for row in rows]
 
     def run_replay(
         self,
+        tenant_id: str,
         package_id: str,
         dataset_snapshot_id: str,
         model_key: str,
@@ -6162,6 +7116,8 @@ class RuleCenterReleasePackageRepository:
         actor_subject: str,
         actor_name: str,
     ) -> dict:
+        from backend.tenant_asset_repository import TenantAssetError, TenantAssetRepository
+        from backend.tenant_runtime_assets import TenantRuntimeAssetResolver
         from rating.decision_pipeline import run_decision_pipeline_sandbox
         from rating.scorecard import rate_counterparty
 
@@ -6170,15 +7126,37 @@ class RuleCenterReleasePackageRepository:
             raise LookupError("规则中心发布包不存在")
         if package.status != "draft":
             raise ValueError("只有待提交发布包可以运行发布前回放")
-        snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, dataset_snapshot_id)
+        snapshot = self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+            RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
+            RuleCenterReplayDatasetSnapshot.id == dataset_snapshot_id,
+        )).first()
         if snapshot is None:
             raise LookupError("历史回放数据集快照不存在")
         actual_snapshot_hash = RuleCenterReplayDatasetRepository.snapshot_content_hash(snapshot)
         if actual_snapshot_hash != snapshot.content_hash:
             raise ValueError("历史回放数据集快照哈希不一致")
-        dataset = self.session.get(RuleCenterReplayDataset, snapshot.dataset_id)
+        dataset = self.session.scalars(select(RuleCenterReplayDataset).where(
+            RuleCenterReplayDataset.tenant_id == tenant_id,
+            RuleCenterReplayDataset.id == snapshot.dataset_id,
+        )).first()
         if dataset is None or dataset.status != "active":
             raise ValueError("历史回放数据集不可用")
+        asset_repository = TenantAssetRepository(self.session)
+        resolver = TenantRuntimeAssetResolver(asset_repository, DemoRepository())
+        try:
+            model_asset = resolver.resolve_model(tenant_id, model_key)
+        except TenantAssetError as exc:
+            if exc.code not in {"ASSET_NOT_FOUND", "ASSET_VERSION_NOT_FOUND"}:
+                raise
+            model_asset = resolver.resolve_config_graph(
+                tenant_id,
+                model_key,
+                model_config,
+                str(model_config.get("version") or "unknown"),
+                source_scope="governance_resolved_config",
+                asset_id=f"governance:{model_key}:{model_config.get('version') or 'unknown'}",
+            )["model"]
+        model_config = deepcopy(model_asset["config"])
         changes = self._package_changes(package.id, {"package_draft"})
         candidate_rules, candidate_sets, candidate_pipelines = self._definition_maps(changes)
         affected_codes = self._affected_pipeline_codes(
@@ -6195,6 +7173,124 @@ class RuleCenterReleasePackageRepository:
 
         active_rules, active_sets, active_pipelines = self._definition_maps([])
         baseline_pipeline = active_pipelines.get(selected_code)
+        try:
+            baseline_assets = resolver.resolve_graph(
+                tenant_id, model_key, pipeline_code=selected_code
+            )
+        except TenantAssetError as exc:
+            if exc.code not in {"ASSET_NOT_FOUND", "ASSET_VERSION_NOT_FOUND"}:
+                raise
+            baseline_assets = None
+
+        change_map = {(item.entity_type, item.template_key): item for item in changes}
+
+        def post_release_asset(asset_type: str, code: str, fallback: dict) -> dict:
+            current = None
+            try:
+                current = asset_repository.resolve(tenant_id, asset_type, code)
+            except TenantAssetError as exc:
+                if exc.code not in {"ASSET_NOT_FOUND", "ASSET_VERSION_NOT_FOUND"}:
+                    raise
+            change = change_map.get((asset_type, code))
+            tenant_keeps_current = current and current["source_scope"] in {
+                "tenant_override", "platform_pinned"
+            }
+            if current and (change is None or tenant_keeps_current):
+                definition = deepcopy(current["config"])
+                return TenantRuntimeAssetResolver.runtime_asset(current, definition)
+            if change is not None:
+                definition = deepcopy(change.config_json)
+                config_hash = content_hash(definition)
+                item = {
+                    "asset_type": asset_type,
+                    "code": code,
+                    "version": str(change.candidate_version),
+                    "config_hash": config_hash,
+                    "source_scope": "governance_candidate",
+                    "asset_id": change.id,
+                    "binding_id": current.get("binding_id") if current else None,
+                    "override_id": None,
+                    "config": definition,
+                    "definition": definition,
+                }
+                item["resolution_hash"] = content_hash({
+                    "tenant_id": tenant_id,
+                    "asset_type": asset_type,
+                    "code": code,
+                    "version": item["version"],
+                    "config_hash": config_hash,
+                    "source_scope": item["source_scope"],
+                    "asset_id": item["asset_id"],
+                })
+                return item
+            raise LookupError(f"发布包候选依赖不存在：{asset_type}:{code}")
+
+        candidate_pipeline_asset = post_release_asset(
+            "pipeline", selected_code, candidate_pipeline
+        )
+        candidate_pipeline = deepcopy(candidate_pipeline_asset["definition"])
+        candidate_rule_set_assets: list[dict] = []
+        candidate_rule_assets: list[dict] = []
+        for stage in candidate_pipeline.get("stages_json") or []:
+            set_code = str(stage.get("rule_set_code") or "").strip().upper()
+            if not set_code:
+                continue
+            set_asset = post_release_asset(
+                "rule_set", set_code, candidate_sets.get(set_code) or {}
+            )
+            candidate_sets[set_code] = deepcopy(set_asset["definition"])
+            candidate_rule_set_assets.append(set_asset)
+            for rule_code in set_asset["definition"].get("rule_codes") or []:
+                normalized_rule_code = str(rule_code).strip().upper()
+                rule_asset = post_release_asset(
+                    "rule", normalized_rule_code,
+                    candidate_rules.get(normalized_rule_code) or {},
+                )
+                candidate_rules[normalized_rule_code] = deepcopy(rule_asset["definition"])
+                candidate_rule_assets.append(rule_asset)
+
+        candidate_rule_set_assets = list({item["code"]: item for item in candidate_rule_set_assets}.values())
+        candidate_rule_assets = list({item["code"]: item for item in candidate_rule_assets}.values())
+        candidate_assets = {
+            "model": model_asset,
+            "scorecard": deepcopy(model_asset.get("scorecard")),
+            "pipeline": candidate_pipeline_asset,
+            "rule_sets": candidate_rule_set_assets,
+            "rules": candidate_rule_assets,
+        }
+        candidate_assets["resolution_hash"] = content_hash({
+            "model": model_asset["resolution_hash"],
+            "scorecard": (model_asset.get("scorecard") or {}).get("resolution_hash"),
+            "pipeline": candidate_pipeline_asset["resolution_hash"],
+            "rule_sets": [item["resolution_hash"] for item in candidate_rule_set_assets],
+            "rules": [item["resolution_hash"] for item in candidate_rule_assets],
+        })
+        asset_snapshot = {
+            "schema_version": "tenant-release-package-replay-assets-v1",
+            "tenant_id": tenant_id,
+            "baseline": (
+                resolver.public_snapshot(baseline_assets)
+                if baseline_assets
+                else {
+                    "model": resolver.public_asset(model_asset),
+                    "scorecard": resolver.public_asset(model_asset.get("scorecard")),
+                    "pipeline": None,
+                    "rule_sets": [],
+                    "rules": [],
+                    "resolution_hash": None,
+                    "degraded_reason": "no_active_baseline_pipeline",
+                }
+            ),
+            "candidate": resolver.public_snapshot(candidate_assets),
+            "package_config_hash": package.config_hash,
+        }
+        asset_snapshot["resolution_hash"] = content_hash({
+            "tenant_id": tenant_id,
+            "baseline": (baseline_assets or {}).get("resolution_hash"),
+            "candidate": candidate_assets["resolution_hash"],
+            "package_config_hash": package.config_hash,
+        })
+        assets_hash = content_hash(asset_snapshot)
         selected_entries = deepcopy((snapshot.samples_json or [])[: int(thresholds["sample_limit"])])
         if not selected_entries:
             raise ValueError("回放样本不能为空")
@@ -6211,7 +7307,9 @@ class RuleCenterReleasePackageRepository:
         for entry in selected_entries:
             sample = deepcopy(entry.get("sample") or {})
             baseline_context = {"counterparty": deepcopy(sample), "config": deepcopy(model_config)}
-            if baseline_pipeline:
+            if baseline_assets:
+                baseline = resolver.execute_rating(deepcopy(sample), baseline_assets)
+            elif baseline_pipeline:
                 baseline = run_decision_pipeline_sandbox(
                     baseline_pipeline, active_sets, active_rules, baseline_context
                 )
@@ -6298,26 +7396,31 @@ class RuleCenterReleasePackageRepository:
         }
         gate = {"passed": not errors, "errors": errors, "warnings": warnings, "summary": "回放门禁通过" if not errors else "；".join(errors)}
         evidence_payload = {
+            "tenant_id": tenant_id,
             "package_id": package.id,
             "package_config_hash": package.config_hash,
             "dataset_snapshot_id": snapshot.id,
             "dataset_snapshot_hash": snapshot.content_hash,
             "model_key": model_key,
-            "model_version": model_config.get("version", ""),
+            "model_version": model_asset.get("version", ""),
             "pipeline_code": selected_code,
             "sample_ids": [item.get("sample", {}).get("id") for item in selected_entries],
             "thresholds": thresholds,
             "metrics": metrics,
             "details": details,
             "gate": gate,
+            "assets": asset_snapshot,
+            "assets_hash": assets_hash,
         }
         record = RuleCenterReplayRun(
-            id=str(uuid4()), package_id=package.id, package_config_hash=package.config_hash,
+            id=str(uuid4()), tenant_id=tenant_id,
+            package_id=package.id, package_config_hash=package.config_hash,
             dataset_snapshot_id=snapshot.id, dataset_snapshot_hash=snapshot.content_hash,
-            model_key=model_key, model_version=str(model_config.get("version", "")),
+            model_key=model_key, model_version=str(model_asset.get("version", "")),
             pipeline_code=selected_code, sample_source=f"dataset:{dataset.code}:v{snapshot.version}",
             sample_count=sample_count, status="completed", thresholds_json=deepcopy(thresholds),
             metrics_json=metrics, details_json=details, gate_json=gate,
+            asset_snapshot_json=asset_snapshot, assets_hash=assets_hash,
             evidence_hash=content_hash(evidence_payload), created_by=actor_subject,
             created_by_name=actor_name,
         )
@@ -6325,7 +7428,7 @@ class RuleCenterReleasePackageRepository:
         self.session.flush()
         self.audit.append(
             "rule_center_replay", record.id, "rule_center_replay_completed", actor_name,
-            {"package_id": package.id, "dataset_snapshot_id": snapshot.id, "dataset_snapshot_hash": snapshot.content_hash, "pipeline_code": selected_code, "sample_count": sample_count, "gate": gate, "evidence_hash": record.evidence_hash},
+            {"tenant_id": tenant_id, "package_id": package.id, "dataset_snapshot_id": snapshot.id, "dataset_snapshot_hash": snapshot.content_hash, "pipeline_code": selected_code, "sample_count": sample_count, "gate": gate, "evidence_hash": record.evidence_hash},
         )
         self.session.commit()
         self.session.refresh(record)
@@ -6384,6 +7487,7 @@ class RuleCenterReleasePackageRepository:
 
     def submit(
         self,
+        tenant_id: str,
         package_id: str,
         expected_row_version: int,
         actor_subject: str,
@@ -6402,7 +7506,7 @@ class RuleCenterReleasePackageRepository:
         package.config_hash = analysis["config_hash"]
         package.dependency_snapshot_json = deepcopy(analysis["dependency_snapshot"])
         package.impact_json = deepcopy(analysis["impact"])
-        self._assert_replay_gate(package, changes)
+        self._assert_replay_gate(tenant_id, package, changes)
         package.status = "pending_review"
         package.submitted_at = datetime.now(timezone.utc)
         for row in changes:
@@ -6416,6 +7520,7 @@ class RuleCenterReleasePackageRepository:
 
     def review(
         self,
+        tenant_id: str,
         package_id: str,
         expected_row_version: int,
         decision: str,
@@ -6452,7 +7557,7 @@ class RuleCenterReleasePackageRepository:
             raise ConcurrentUpdateError("发布包成员配置已变化，请重新创建发布包")
         if analysis["dependency_snapshot"] != package.dependency_snapshot_json:
             raise ConcurrentUpdateError("发布包依赖环境已变化，请重新分析后提交")
-        self._assert_replay_gate(package, changes, concurrent=True)
+        self._assert_replay_gate(tenant_id, package, changes, concurrent=True)
         try:
             for row in self._ordered(changes):
                 repository = self._repository(row.entity_type)
@@ -6727,7 +7832,8 @@ class RuleCenterReleasePackageRepository:
         return sorted(impacted_pipelines)
 
     def _assert_replay_gate(
-        self, package: RuleCenterReleasePackage, changes: list[ModelChangeRecord], concurrent: bool = False
+        self, tenant_id: str, package: RuleCenterReleasePackage,
+        changes: list[ModelChangeRecord], concurrent: bool = False
     ) -> None:
         _, rule_sets, pipelines = self._definition_maps(changes)
         if not self._affected_pipeline_codes(changes, rule_sets, pipelines):
@@ -6735,6 +7841,7 @@ class RuleCenterReleasePackageRepository:
         replay = self.session.scalars(
             select(RuleCenterReplayRun)
             .where(
+                RuleCenterReplayRun.tenant_id == tenant_id,
                 RuleCenterReplayRun.package_id == package.id,
                 RuleCenterReplayRun.package_config_hash == package.config_hash,
                 RuleCenterReplayRun.status == "completed",
@@ -6747,7 +7854,10 @@ class RuleCenterReleasePackageRepository:
         elif not replay.dataset_snapshot_id or not replay.dataset_snapshot_hash:
             message = "发布前回放必须绑定不可变历史数据集快照"
         else:
-            snapshot = self.session.get(RuleCenterReplayDatasetSnapshot, replay.dataset_snapshot_id)
+            snapshot = self.session.scalars(select(RuleCenterReplayDatasetSnapshot).where(
+                RuleCenterReplayDatasetSnapshot.tenant_id == tenant_id,
+                RuleCenterReplayDatasetSnapshot.id == replay.dataset_snapshot_id,
+            )).first()
             if snapshot is None:
                 message = "发布前回放引用的历史数据集快照不存在"
             elif snapshot.content_hash != replay.dataset_snapshot_hash:
@@ -6756,6 +7866,8 @@ class RuleCenterReleasePackageRepository:
                 message = "历史数据集快照内容哈希不一致"
         if not message and replay.evidence_hash != self._replay_evidence_hash(replay):
             message = "发布前回放证据哈希不一致"
+        elif not message and content_hash(replay.asset_snapshot_json or {}) != replay.assets_hash:
+            message = "发布前回放资产快照哈希不一致"
         elif not message and not (replay.gate_json or {}).get("passed"):
             message = f"发布前回放门禁未通过：{(replay.gate_json or {}).get('summary', '')}"
         if message:
@@ -6816,6 +7928,7 @@ class RuleCenterReleasePackageRepository:
     @staticmethod
     def _replay_evidence_hash(record: RuleCenterReplayRun) -> str:
         return content_hash({
+            "tenant_id": record.tenant_id,
             "package_id": record.package_id,
             "package_config_hash": record.package_config_hash,
             "dataset_snapshot_id": record.dataset_snapshot_id,
@@ -6828,12 +7941,15 @@ class RuleCenterReleasePackageRepository:
             "metrics": record.metrics_json,
             "details": record.details_json,
             "gate": record.gate_json,
+            "assets": record.asset_snapshot_json,
+            "assets_hash": record.assets_hash,
         })
 
     @staticmethod
     def _replay_to_dict(record: RuleCenterReplayRun) -> dict:
         return {
-            "id": record.id, "package_id": record.package_id,
+            "id": record.id, "tenant_id": record.tenant_id,
+            "package_id": record.package_id,
             "package_config_hash": record.package_config_hash,
             "dataset_snapshot_id": record.dataset_snapshot_id,
             "dataset_snapshot_hash": record.dataset_snapshot_hash,
@@ -6843,6 +7959,8 @@ class RuleCenterReleasePackageRepository:
             "thresholds": deepcopy(record.thresholds_json),
             "metrics": deepcopy(record.metrics_json), "details": deepcopy(record.details_json),
             "gate": deepcopy(record.gate_json), "evidence_hash": record.evidence_hash,
+            "asset_snapshot": deepcopy(record.asset_snapshot_json),
+            "assets_hash": record.assets_hash,
             "created_by": record.created_by, "created_by_name": record.created_by_name,
             "created_at": record.created_at.isoformat() if record.created_at else None,
         }

@@ -10,11 +10,12 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
-from backend.dependencies import get_approval_repository, get_demo_repository, get_document_repository, get_object_storage
+from backend.counterparty_repository import CounterpartyError, CounterpartyRepository
+from backend.dependencies import get_approval_repository, get_counterparty_repository, get_document_repository, get_object_storage
 from backend.document_comparison import build_document_version_comparison
 from backend.document_policy import ALLOWED_DOCUMENT_TYPES, DOCUMENT_REVIEW_CHECKS, assess_renewal_document_carryover, build_document_checklist
 from backend.document_precheck import precheck_document
-from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, DemoRepository, DocumentRepository, TaskOwnershipConflict
+from backend.repository import ApprovalCaseRepository, ConcurrentUpdateError, DocumentRepository, TaskOwnershipConflict
 from backend.schemas import DocumentCaseLinkRequest, DocumentReviewRequest, RenewalDocumentCarryoverRequest
 from backend.security import Principal, enforce_counterparty_scope, require_permissions
 from backend.storage import ObjectStorage
@@ -33,18 +34,20 @@ async def upload_document(
     case_id: str | None = Form(default=None),
     correction_id: str | None = Form(default=None),
     principal: Principal = Depends(require_permissions("documents:upload")),
-    demo_repository: DemoRepository = Depends(get_demo_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
     repository: DocumentRepository = Depends(get_document_repository),
     storage: ObjectStorage = Depends(get_object_storage),
 ) -> dict:
     enforce_counterparty_scope(principal, counterparty_id)
-    if not demo_repository.get_counterparty(counterparty_id):
-        raise HTTPException(status_code=404, detail="客商不存在")
+    try:
+        counterparty_repository.get(principal.tenant_id, counterparty_id)
+    except CounterpartyError as exc:
+        raise HTTPException(status_code=404, detail="客商不存在") from exc
     if document_type not in ALLOWED_DOCUMENT_TYPES:
         raise HTTPException(status_code=422, detail="资料类型不在允许清单中")
     if correction_id:
-        correction = repository.get_correction(correction_id)
+        correction = repository.get_correction(principal.tenant_id, correction_id)
         if not correction:
             raise HTTPException(status_code=404, detail="补件任务不存在")
         enforce_counterparty_scope(principal, correction["counterparty_id"])
@@ -53,7 +56,7 @@ async def upload_document(
         if correction["counterparty_id"] != counterparty_id or correction["case_id"] != case_id or correction["document_type"] != document_type:
             raise HTTPException(status_code=422, detail="替换资料与补件任务的企业、审批单或资料类型不匹配")
     if case_id:
-        approval_case = approval_repository.get(case_id)
+        approval_case = approval_repository.get(principal.tenant_id, case_id)
         if not approval_case:
             raise HTTPException(status_code=404, detail="审批申请不存在")
         if approval_case["counterparty_id"] != counterparty_id:
@@ -70,11 +73,12 @@ async def upload_document(
     if not _matches_declared_type(content_type, suffix, content):
         raise HTTPException(status_code=415, detail="文件内容与声明类型或扩展名不一致")
     document_id = str(uuid4())
-    object_key = f"{counterparty_id}/{document_id}{suffix}"
+    object_key = f"{principal.tenant_id}/{counterparty_id}/{document_id}{suffix}"
     digest = hashlib.sha256(content).hexdigest()
     storage.put(object_key, content, content_type)
     try:
         return repository.create(
+            principal.tenant_id,
             {
                 "id": document_id,
                 "counterparty_id": counterparty_id,
@@ -116,7 +120,7 @@ def list_documents(
 ) -> list[dict]:
     if "client" in principal.roles:
         counterparty_id = principal.counterparty_id
-    return repository.list(counterparty_id, case_id)
+    return repository.list(principal.tenant_id, counterparty_id, case_id)
 
 
 @router.get("/checklist")
@@ -128,7 +132,7 @@ def get_document_checklist(
     repository: DocumentRepository = Depends(get_document_repository),
 ) -> dict:
     enforce_counterparty_scope(principal, counterparty_id)
-    return build_document_checklist(repository.list(counterparty_id, case_id), template_key)
+    return build_document_checklist(repository.list(principal.tenant_id, counterparty_id, case_id), template_key)
 
 
 @router.get("/renewal-carryover")
@@ -141,8 +145,8 @@ def get_renewal_document_carryover(
 ) -> dict:
     approval_case, source_case_id = _renewal_document_context(case_id, approval_repository, principal)
     assessment = assess_renewal_document_carryover(
-        repository.list(case_id=source_case_id),
-        repository.list(case_id=case_id),
+        repository.list(principal.tenant_id, case_id=source_case_id),
+        repository.list(principal.tenant_id, case_id=case_id),
         template_key,
     )
     return {
@@ -167,8 +171,8 @@ def carry_over_renewal_documents(
     if approval_case["status"] not in {"处理中", "待补件"} or approval_case["current_stage"] not in {"document_upload", "supplement"}:
         raise HTTPException(status_code=409, detail="只有资料上传或补件环节可以承接历史资料")
     assessment = assess_renewal_document_carryover(
-        repository.list(case_id=source_case_id),
-        repository.list(case_id=request.case_id),
+        repository.list(principal.tenant_id, case_id=source_case_id),
+        repository.list(principal.tenant_id, case_id=request.case_id),
         request.template_key,
     )
     reusable = [item for item in assessment["items"] if item["action"] == "reusable" and item["source_document"]]
@@ -198,7 +202,7 @@ def carry_over_renewal_documents(
                 raise HTTPException(status_code=409, detail=f"来源资料指纹校验失败：{source['original_name']}")
             document_id = str(uuid4())
             suffix = _safe_suffix(source["original_name"])
-            object_key = f"{approval_case['counterparty_id']}/{document_id}{suffix}"
+            object_key = f"{principal.tenant_id}/{approval_case['counterparty_id']}/{document_id}{suffix}"
             storage.put(object_key, content, source["content_type"])
             copied_objects.append((document_id, object_key))
             metadata_rows.append(
@@ -226,14 +230,14 @@ def carry_over_renewal_documents(
                     "carried_over_at": now,
                 }
             )
-        result = repository.carry_over(metadata_rows, principal.name)
+        result = repository.carry_over(principal.tenant_id, metadata_rows, principal.name)
         created_ids = set(result["created_ids"])
         for document_id, object_key in copied_objects:
             if document_id not in created_ids:
                 storage.delete(object_key)
         refreshed = assess_renewal_document_carryover(
-            repository.list(case_id=source_case_id),
-            repository.list(case_id=request.case_id),
+            repository.list(principal.tenant_id, case_id=source_case_id),
+            repository.list(principal.tenant_id, case_id=request.case_id),
             request.template_key,
         )
         return {
@@ -275,7 +279,7 @@ def get_document_corrections(
         raise HTTPException(status_code=422, detail="补件任务必须指定客商或审批申请")
     if counterparty_id:
         enforce_counterparty_scope(principal, counterparty_id)
-    rows = repository.list_corrections(counterparty_id, case_id)
+    rows = repository.list_corrections(principal.tenant_id, counterparty_id, case_id)
     for row in rows:
         enforce_counterparty_scope(principal, row["counterparty_id"])
     return rows
@@ -285,24 +289,31 @@ def get_document_corrections(
 def get_document_correction_comparison(
     correction_id: str,
     principal: Principal = Depends(require_permissions("documents:view")),
-    demo_repository: DemoRepository = Depends(get_demo_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     repository: DocumentRepository = Depends(get_document_repository),
     storage: ObjectStorage = Depends(get_object_storage),
 ) -> dict:
-    correction = repository.get_correction(correction_id)
+    correction = repository.get_correction(principal.tenant_id, correction_id)
     if not correction:
         raise HTTPException(status_code=404, detail="补件任务不存在")
     enforce_counterparty_scope(principal, correction["counterparty_id"])
     version_ids = correction["version_document_ids"]
     if len(version_ids) < 2:
         raise HTTPException(status_code=422, detail="补件任务尚无可比较的替换版本")
-    previous_document = repository.get(version_ids[-2])
-    current_document = repository.get(version_ids[-1])
+    previous_document = repository.get(principal.tenant_id, version_ids[-2])
+    current_document = repository.get(principal.tenant_id, version_ids[-1])
     if not previous_document or not current_document:
         raise HTTPException(status_code=409, detail="补件版本链引用的资料不存在")
     if current_document["id"] != correction["current_document_id"]:
         raise HTTPException(status_code=409, detail="补件当前版本与版本链不一致")
-    counterparty = demo_repository.get_counterparty(correction["counterparty_id"])
+    try:
+        counterparty = counterparty_repository.get(
+            principal.tenant_id,
+            correction["counterparty_id"],
+            include_archived=True,
+        )
+    except CounterpartyError as exc:
+        raise HTTPException(status_code=404, detail="客商不存在") from exc
     try:
         previous_content = storage.get(previous_document["object_key"])
     except FileNotFoundError:
@@ -325,7 +336,7 @@ def get_document_prechecks(
     counterparty_id: str | None = None,
     case_id: str | None = None,
     principal: Principal = Depends(require_permissions("documents:view")),
-    demo_repository: DemoRepository = Depends(get_demo_repository),
+    counterparty_repository: CounterpartyRepository = Depends(get_counterparty_repository),
     repository: DocumentRepository = Depends(get_document_repository),
     storage: ObjectStorage = Depends(get_object_storage),
 ) -> list[dict]:
@@ -336,13 +347,21 @@ def get_document_prechecks(
     if counterparty_id:
         enforce_counterparty_scope(principal, counterparty_id)
     results = []
-    for document in repository.list(counterparty_id, case_id):
+    for document in repository.list(principal.tenant_id, counterparty_id, case_id):
         enforce_counterparty_scope(principal, document["counterparty_id"])
+        try:
+            counterparty = counterparty_repository.get(
+                principal.tenant_id,
+                document["counterparty_id"],
+                include_archived=True,
+            )
+        except CounterpartyError as exc:
+            raise HTTPException(status_code=404, detail="客商不存在") from exc
         try:
             content = storage.get(document["object_key"])
         except FileNotFoundError:
             content = b""
-        results.append(precheck_document(document, content, demo_repository.get_counterparty(document["counterparty_id"])))
+        results.append(precheck_document(document, content, counterparty))
     return results
 
 
@@ -354,7 +373,7 @@ def review_document(
     repository: DocumentRepository = Depends(get_document_repository),
     storage: ObjectStorage = Depends(get_object_storage),
 ) -> dict:
-    document = repository.get(document_id)
+    document = repository.get(principal.tenant_id, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="资料不存在")
     enforce_counterparty_scope(principal, document["counterparty_id"])
@@ -382,6 +401,7 @@ def review_document(
         raise HTTPException(status_code=409, detail="资料对象不存在或文件指纹已变化，完整性检查不能通过")
     try:
         return repository.review(
+            principal.tenant_id,
             document_id,
             request.expected_row_version,
             request.decision,
@@ -410,17 +430,17 @@ def link_document_to_case(
     approval_repository: ApprovalCaseRepository = Depends(get_approval_repository),
     repository: DocumentRepository = Depends(get_document_repository),
 ) -> dict:
-    document = repository.get(document_id)
+    document = repository.get(principal.tenant_id, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="资料不存在")
     enforce_counterparty_scope(principal, document["counterparty_id"])
-    approval_case = approval_repository.get(request.case_id)
+    approval_case = approval_repository.get(principal.tenant_id, request.case_id)
     if not approval_case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     if approval_case["counterparty_id"] != document["counterparty_id"]:
         raise HTTPException(status_code=422, detail="资料所属客商与审批申请不匹配")
     try:
-        return repository.link_case(document_id, request.case_id, request.expected_row_version, principal.name)
+        return repository.link_case(principal.tenant_id, document_id, request.case_id, request.expected_row_version, principal.name)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -436,7 +456,7 @@ def download_document(
     repository: DocumentRepository = Depends(get_document_repository),
     storage: ObjectStorage = Depends(get_object_storage),
 ) -> Response:
-    document = repository.get(document_id)
+    document = repository.get(principal.tenant_id, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="资料不存在")
     enforce_counterparty_scope(principal, document["counterparty_id"])
@@ -453,7 +473,7 @@ def _renewal_document_context(
     approval_repository: ApprovalCaseRepository,
     principal: Principal,
 ) -> tuple[dict, str]:
-    approval_case = approval_repository.get(case_id)
+    approval_case = approval_repository.get(principal.tenant_id, case_id)
     if not approval_case:
         raise HTTPException(status_code=404, detail="审批申请不存在")
     enforce_counterparty_scope(principal, approval_case["counterparty_id"])
@@ -462,7 +482,7 @@ def _renewal_document_context(
     source_case_id = approval_case.get("data", {}).get("_workflow", {}).get("renewal_request", {}).get("source_case_id")
     if not source_case_id:
         raise HTTPException(status_code=409, detail="续授信缺少原审批血缘，不能承接历史资料")
-    source_case = approval_repository.get(source_case_id)
+    source_case = approval_repository.get(principal.tenant_id, source_case_id)
     if not source_case or source_case["counterparty_id"] != approval_case["counterparty_id"]:
         raise HTTPException(status_code=409, detail="续授信原审批不存在或主体不一致")
     return approval_case, source_case_id
